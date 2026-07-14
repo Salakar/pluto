@@ -12,51 +12,117 @@ void main() {
           )
           as Map<String, Object?>;
 
-  _expectRejected(
+  _expectMappingRejected(
     generator,
     source,
     profileId: 'rm1',
     mappingBytes: null,
     message: 'rm1 MXCFB display contract has incompatible fields',
   );
-  _expectRejected(
+  _expectMappingRejected(
     generator,
     source,
     profileId: 'rm1',
     mappingBytes: 10813439,
     message: 'rm1 MXCFB mapping does not cover virtual framebuffer',
   );
-  _expectRejected(
+  _expectMappingRejected(
     generator,
     source,
     profileId: 'rm1',
     mappingBytes: 10813441,
     message: 'rm1 MXCFB mapping is not the exact framebuffer size',
   );
-  _expectRejected(
+  _expectMappingRejected(
     generator,
     source,
     profileId: 'rm2',
     mappingBytes: 24893439,
     message: 'rm2 LCDIF mapping does not cover virtual framebuffer',
   );
-  _expectRejected(
+  _expectMappingRejected(
     generator,
     source,
     profileId: 'move',
     mappingBytes: 1,
     message: 'move DRM display contract has incompatible fields',
   );
+  _expectWaveformOptionRejected(
+    generator,
+    source,
+    profileId: 'rm2',
+    waveformOptionKey: 'wbf,extra',
+    message: 'rm2 waveform option key is not a safe lowercase name',
+  );
+  _expectWaveformOptionRejected(
+    generator,
+    source,
+    profileId: 'rm1',
+    waveformOptionKey: 'eink',
+    message: 'rm1 kernel-owned MXCFB waveform needs no option key',
+  );
+  _expectWaveformOptionRejected(
+    generator,
+    source,
+    profileId: 'rm2',
+    waveformOptionKey: null,
+    message: 'rm2 LCDIF waveform option key must be wbf',
+  );
+  _expectWaveformOptionRejected(
+    generator,
+    source,
+    profileId: 'move',
+    waveformOptionKey: 'wbf',
+    message: 'move Gallery3 waveform option key must be eink',
+  );
 
   stdout.writeln('generate_device_profiles_test: ok');
+}
+
+void _expectMappingRejected(
+  String generator,
+  Map<String, Object?> source, {
+  required String profileId,
+  required int? mappingBytes,
+  required String message,
+}) {
+  _expectRejected(
+    generator,
+    source,
+    profileId: profileId,
+    message: message,
+    mutateRuntime: (Map<String, Object?> runtime) {
+      final Map<String, Object?> display =
+          runtime['display']! as Map<String, Object?>;
+      display['mappingBytes'] = mappingBytes;
+    },
+  );
+}
+
+void _expectWaveformOptionRejected(
+  String generator,
+  Map<String, Object?> source, {
+  required String profileId,
+  required String? waveformOptionKey,
+  required String message,
+}) {
+  _expectRejected(
+    generator,
+    source,
+    profileId: profileId,
+    message: message,
+    mutateRuntime: (Map<String, Object?> runtime) {
+      runtime['waveformOptionKey'] = waveformOptionKey;
+    },
+  );
 }
 
 void _expectRejected(
   String generator,
   Map<String, Object?> source, {
   required String profileId,
-  required int? mappingBytes,
   required String message,
+  required void Function(Map<String, Object?> runtime) mutateRuntime,
 }) {
   final Map<String, Object?> candidate =
       jsonDecode(jsonEncode(source)) as Map<String, Object?>;
@@ -66,9 +132,7 @@ void _expectRejected(
       .singleWhere((Map<String, Object?> value) => value['id'] == profileId);
   final Map<String, Object?> runtime =
       profile['runtime']! as Map<String, Object?>;
-  final Map<String, Object?> display =
-      runtime['display']! as Map<String, Object?>;
-  display['mappingBytes'] = mappingBytes;
+  mutateRuntime(runtime);
 
   final Directory temporary = Directory.systemTemp.createTempSync(
     'pluto-device-profile-generator-test-',

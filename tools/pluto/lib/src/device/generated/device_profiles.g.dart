@@ -47,6 +47,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
           ),
         ],
       ),
+      waveformOptionKey: null,
       presenterOptions: null,
       pen: InputDeviceProfile(
         byPath: '/dev/input/by-path/platform-21a4000.i2c-event-mouse',
@@ -134,6 +135,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
           ),
         ],
       ),
+      waveformOptionKey: 'wbf',
       presenterOptions: null,
       pen: InputDeviceProfile(
         byPath: '/dev/input/by-path/platform-30a20000.i2c-event-mouse',
@@ -221,6 +223,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
           ),
         ],
       ),
+      waveformOptionKey: 'eink',
       presenterOptions:
           'exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0',
       pen: InputDeviceProfile(

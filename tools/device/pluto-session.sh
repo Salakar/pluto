@@ -247,9 +247,12 @@ configure_profile() {
       return 78
     fi
   fi
-  if [ -n "$WAVEFORM" ]; then
-    PRESENTER_OPTS="$PRESENTER_OPTS,eink=$WAVEFORM"
-  fi
+  PRESENTER_OPTS="$(
+    pluto_profile_presenter_options "$PRESENTER_OPTS" "$WAVEFORM"
+  )" || {
+    log "profile rejected: could not bind the verified waveform to presenter options"
+    return 78
+  }
   export PLUTO_PROFILE_ID PLUTO_PROFILE_WIRE_MODEL PLUTO_PROFILE_CODENAME
   export PLUTO_PROFILE_TARGET PLUTO_PROFILE_DISPLAY_DRIVER
   export PLUTO_PROFILE_PANEL_WIDTH PLUTO_PROFILE_PANEL_HEIGHT

@@ -64,6 +64,7 @@ final class _Runtime {
       displayDevice = _string(json, 'displayDevice'),
       display = _DisplayContract(_map(json, 'display')),
       waveform = _Waveform(_map(json, 'waveform')),
+      waveformOptionKey = _optionalString(json, 'waveformOptionKey'),
       presenterOptions = _optionalString(json, 'presenterOptions'),
       pen = _InputDevice(_map(json, 'pen')),
       touch = _InputDevice(_map(json, 'touch')),
@@ -82,6 +83,7 @@ final class _Runtime {
   final String displayDevice;
   final _DisplayContract display;
   final _Waveform waveform;
+  final String? waveformOptionKey;
   final String? presenterOptions;
   final _InputDevice pen;
   final _InputDevice touch;
@@ -464,6 +466,7 @@ void _validate(List<_Profile> profiles) {
         source.panelSignature,
       );
     }
+    _validateWaveformOptionContract(profile);
     for (final String path in <String>[
       profile.runtime.displayDevice,
       profile.runtime.pen.byPath,
@@ -488,10 +491,32 @@ void _validate(List<_Profile> profiles) {
       _fail('${profile.id} bezel redraw paths must both be present or absent');
     }
     _validateRecoveryContract(profile);
-    if (profile.runtime.nativeSessionEnabled &&
-        profile.runtime.presenterOptions == null) {
-      _fail('${profile.id} enabled native session needs presenter options');
-    }
+  }
+}
+
+void _validateWaveformOptionContract(_Profile profile) {
+  final String? optionKey = profile.runtime.waveformOptionKey;
+  if (optionKey != null && !RegExp(r'^[a-z][a-z0-9_]*$').hasMatch(optionKey)) {
+    _fail('${profile.id} waveform option key is not a safe lowercase name');
+  }
+  switch (profile.displayDriver) {
+    case 'mxcfb_epdc':
+      if (optionKey != null) {
+        _fail('${profile.id} kernel-owned MXCFB waveform needs no option key');
+      }
+      break;
+    case 'lcdif_tcon':
+      if (optionKey != 'wbf') {
+        _fail('${profile.id} LCDIF waveform option key must be wbf');
+      }
+      break;
+    case 'gallery3_drm':
+      if (optionKey != 'eink') {
+        _fail('${profile.id} Gallery3 waveform option key must be eink');
+      }
+      break;
+    default:
+      _fail('${profile.id} has an unvalidated waveform option driver');
   }
 }
 
@@ -729,6 +754,7 @@ String _cpp(List<_Profile> profiles) {
     ..writeln('  std::string_view display_device;')
     ..writeln('  GeneratedDisplayContract display;')
     ..writeln('  GeneratedWaveformProfile waveform;')
+    ..writeln('  std::optional<std::string_view> waveform_option_key;')
     ..writeln('  std::string_view presenter_options;')
     ..writeln('  GeneratedInputDeviceProfile pen;')
     ..writeln('  GeneratedInputDeviceProfile touch;')
@@ -881,6 +907,9 @@ String _cpp(List<_Profile> profiles) {
         '                            .accepted_sources = k${prefix}AcceptedWaveformSources,',
       )
       ..writeln('                        },')
+      ..writeln(
+        '                    .waveform_option_key = ${_cppOptionalString(profile.runtime.waveformOptionKey)},',
+      )
       ..writeln(
         '                    .presenter_options = ${_cppString(profile.runtime.presenterOptions ?? '')},',
       )
@@ -1186,6 +1215,9 @@ String _dart(List<_Profile> profiles) {
       ..writeln('            ],')
       ..writeln('          ),')
       ..writeln(
+        '          waveformOptionKey: ${_dartNullableString(profile.runtime.waveformOptionKey)},',
+      )
+      ..writeln(
         '          presenterOptions: ${_dartNullableString(profile.runtime.presenterOptions)},',
       )
       ..writeln('          pen: InputDeviceProfile(')
@@ -1391,6 +1423,9 @@ String _shell(List<_Profile> profiles) {
         "      PLUTO_PROFILE_PHASE_INTERVAL_NS=${_shellOptionalInt(profile.runtime.display.phaseIntervalNanoseconds)}",
       )
       ..writeln(
+        "      PLUTO_PROFILE_WAVEFORM_OPTION_KEY=${_shellString(profile.runtime.waveformOptionKey ?? '')}",
+      )
+      ..writeln(
         "      PLUTO_PROFILE_PRESENTER_OPTIONS=${_shellString(profile.runtime.presenterOptions ?? '')}",
       )
       ..writeln(
@@ -1485,6 +1520,7 @@ String _shell(List<_Profile> profiles) {
     ..writeln('  export PLUTO_PROFILE_BUFFER_SLOTS PLUTO_PROFILE_SLOT_BYTES')
     ..writeln('  export PLUTO_PROFILE_DAMAGE_ALIGNMENT')
     ..writeln('  export PLUTO_PROFILE_PHASE_INTERVAL_NS')
+    ..writeln('  export PLUTO_PROFILE_WAVEFORM_OPTION_KEY')
     ..writeln('  export PLUTO_PROFILE_PRESENTER_OPTIONS')
     ..writeln('  export PLUTO_PROFILE_PEN_DEVICE PLUTO_PROFILE_PEN_NAME')
     ..writeln('  export PLUTO_PROFILE_TOUCH_DEVICE PLUTO_PROFILE_TOUCH_NAME')
@@ -1505,6 +1541,25 @@ String _shell(List<_Profile> profiles) {
     ..writeln('  export PLUTO_PROFILE_RECOVERY_COUNTER_DIR')
     ..writeln('  export PLUTO_PROFILE_SUSPEND_COMMAND')
     ..writeln('  export PLUTO_PROFILE_BUILD_MODES PLUTO_PROFILE_CAPABILITIES')
+    ..writeln('}')
+    ..writeln()
+    ..writeln('pluto_profile_presenter_options() {')
+    ..writeln('  _pluto_profile_base_options=\$1')
+    ..writeln('  _pluto_profile_waveform_path=\$2')
+    ..writeln('  if [ -z "\$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" ]; then')
+    ..writeln('    printf \'%s\\n\' "\$_pluto_profile_base_options"')
+    ..writeln('    return 0')
+    ..writeln('  fi')
+    ..writeln('  [ -n "\$_pluto_profile_waveform_path" ] || return 1')
+    ..writeln('  if [ -n "\$_pluto_profile_base_options" ]; then')
+    ..writeln(
+      '    printf \'%s,%s=%s\\n\' "\$_pluto_profile_base_options" "\$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" "\$_pluto_profile_waveform_path"',
+    )
+    ..writeln('  else')
+    ..writeln(
+      '    printf \'%s=%s\\n\' "\$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" "\$_pluto_profile_waveform_path"',
+    )
+    ..writeln('  fi')
     ..writeln('}')
     ..writeln()
     ..writeln('pluto_profile_waveform_discovery_paths() {')
@@ -1708,6 +1763,9 @@ String _cppName(String value) => value
 String _cppString(String value) => jsonEncode(value);
 
 String _cppOptionalInt(int? value) => value == null ? 'std::nullopt' : '$value';
+
+String _cppOptionalString(String? value) =>
+    value == null ? 'std::nullopt' : _cppString(value);
 
 String _cppOptionalIntArray2(List<int>? values) => values == null
     ? 'std::nullopt'

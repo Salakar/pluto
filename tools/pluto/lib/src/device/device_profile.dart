@@ -225,6 +225,7 @@ final class DeviceRuntimeProfile {
     required this.displayDevice,
     required this.display,
     required this.waveform,
+    required this.waveformOptionKey,
     required this.presenterOptions,
     required this.pen,
     required this.touch,
@@ -248,6 +249,9 @@ final class DeviceRuntimeProfile {
 
   /// Discovery candidates and panel-bound accepted waveform identities.
   final WaveformProfile waveform;
+
+  /// Presenter option key for a verified userspace-owned waveform, if needed.
+  final String? waveformOptionKey;
 
   /// Device-specific options passed through the common native presenter.
   final String? presenterOptions;

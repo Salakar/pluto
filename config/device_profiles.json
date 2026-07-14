@@ -59,6 +59,7 @@
             }
           ]
         },
+        "waveformOptionKey": null,
         "presenterOptions": null,
         "pen": {
           "byPath": "/dev/input/by-path/platform-21a4000.i2c-event-mouse",
@@ -160,6 +161,7 @@
             }
           ]
         },
+        "waveformOptionKey": "wbf",
         "presenterOptions": null,
         "pen": {
           "byPath": "/dev/input/by-path/platform-30a20000.i2c-event-mouse",
@@ -258,6 +260,7 @@
             }
           ]
         },
+        "waveformOptionKey": "eink",
         "presenterOptions": "exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0",
         "pen": {
           "byPath": "/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse",

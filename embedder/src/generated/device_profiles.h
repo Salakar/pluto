@@ -82,6 +82,7 @@ struct GeneratedRuntimeProfile {
   std::string_view display_device;
   GeneratedDisplayContract display;
   GeneratedWaveformProfile waveform;
+  std::optional<std::string_view> waveform_option_key;
   std::string_view presenter_options;
   GeneratedInputDeviceProfile pen;
   GeneratedInputDeviceProfile touch;
@@ -280,6 +281,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                             .discovery_paths = kRm1WaveformDiscoveryPaths,
                             .accepted_sources = kRm1AcceptedWaveformSources,
                         },
+                    .waveform_option_key = std::nullopt,
                     .presenter_options = "",
                     .pen =
                         {
@@ -360,6 +362,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                             .discovery_paths = kRm2WaveformDiscoveryPaths,
                             .accepted_sources = kRm2AcceptedWaveformSources,
                         },
+                    .waveform_option_key = "wbf",
                     .presenter_options = "",
                     .pen =
                         {
@@ -440,6 +443,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                             .discovery_paths = kMoveWaveformDiscoveryPaths,
                             .accepted_sources = kMoveAcceptedWaveformSources,
                         },
+                    .waveform_option_key = "eink",
                     .presenter_options = "exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0",
                     .pen =
                         {

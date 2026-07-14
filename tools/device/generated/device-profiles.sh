@@ -28,6 +28,7 @@ pluto_profile_load() {
       PLUTO_PROFILE_SLOT_BYTES=''
       PLUTO_PROFILE_DAMAGE_ALIGNMENT=1
       PLUTO_PROFILE_PHASE_INTERVAL_NS=''
+      PLUTO_PROFILE_WAVEFORM_OPTION_KEY=''
       PLUTO_PROFILE_PRESENTER_OPTIONS=''
       PLUTO_PROFILE_PEN_DEVICE='/dev/input/by-path/platform-21a4000.i2c-event-mouse'
       PLUTO_PROFILE_PEN_NAME='Wacom I2C Digitizer'
@@ -76,6 +77,7 @@ pluto_profile_load() {
       PLUTO_PROFILE_SLOT_BYTES='1464320'
       PLUTO_PROFILE_DAMAGE_ALIGNMENT=8
       PLUTO_PROFILE_PHASE_INTERVAL_NS='11763000'
+      PLUTO_PROFILE_WAVEFORM_OPTION_KEY='wbf'
       PLUTO_PROFILE_PRESENTER_OPTIONS=''
       PLUTO_PROFILE_PEN_DEVICE='/dev/input/by-path/platform-30a20000.i2c-event-mouse'
       PLUTO_PROFILE_PEN_NAME='Wacom I2C Digitizer'
@@ -124,6 +126,7 @@ pluto_profile_load() {
       PLUTO_PROFILE_SLOT_BYTES='1241000'
       PLUTO_PROFILE_DAMAGE_ALIGNMENT=8
       PLUTO_PROFILE_PHASE_INTERVAL_NS='11764706'
+      PLUTO_PROFILE_WAVEFORM_OPTION_KEY='eink'
       PLUTO_PROFILE_PRESENTER_OPTIONS='exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0'
       PLUTO_PROFILE_PEN_DEVICE='/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse'
       PLUTO_PROFILE_PEN_NAME='Elan marker input'
@@ -167,6 +170,7 @@ pluto_profile_load() {
   export PLUTO_PROFILE_BUFFER_SLOTS PLUTO_PROFILE_SLOT_BYTES
   export PLUTO_PROFILE_DAMAGE_ALIGNMENT
   export PLUTO_PROFILE_PHASE_INTERVAL_NS
+  export PLUTO_PROFILE_WAVEFORM_OPTION_KEY
   export PLUTO_PROFILE_PRESENTER_OPTIONS
   export PLUTO_PROFILE_PEN_DEVICE PLUTO_PROFILE_PEN_NAME
   export PLUTO_PROFILE_TOUCH_DEVICE PLUTO_PROFILE_TOUCH_NAME
@@ -185,6 +189,21 @@ pluto_profile_load() {
   export PLUTO_PROFILE_RECOVERY_COUNTER_DIR
   export PLUTO_PROFILE_SUSPEND_COMMAND
   export PLUTO_PROFILE_BUILD_MODES PLUTO_PROFILE_CAPABILITIES
+}
+
+pluto_profile_presenter_options() {
+  _pluto_profile_base_options=$1
+  _pluto_profile_waveform_path=$2
+  if [ -z "$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" ]; then
+    printf '%s\n' "$_pluto_profile_base_options"
+    return 0
+  fi
+  [ -n "$_pluto_profile_waveform_path" ] || return 1
+  if [ -n "$_pluto_profile_base_options" ]; then
+    printf '%s,%s=%s\n' "$_pluto_profile_base_options" "$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" "$_pluto_profile_waveform_path"
+  else
+    printf '%s=%s\n' "$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" "$_pluto_profile_waveform_path"
+  fi
 }
 
 pluto_profile_waveform_discovery_paths() {

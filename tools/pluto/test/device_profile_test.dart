@@ -18,4 +18,10 @@ void main() {
 
     expect(move.mappingBytes, isNull);
   });
+
+  test('generated waveform option keys match native driver ownership', () {
+    expect(deviceProfileById('rm1')!.runtime.waveformOptionKey, isNull);
+    expect(deviceProfileById('rm2')!.runtime.waveformOptionKey, 'wbf');
+    expect(deviceProfileById('move')!.runtime.waveformOptionKey, 'eink');
+  });
 }

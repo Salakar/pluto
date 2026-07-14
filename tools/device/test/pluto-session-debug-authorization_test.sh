@@ -7,6 +7,8 @@ PROFILE_FILE="$HERE/../generated/device-profiles.sh"
 TMP=${TMPDIR:-/tmp}/pluto-session-debug-authorization-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
+MOVE_WAVEFORM=/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink
+MOVE_BASE_OPTIONS=exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0
 SESSION_PID=""
 
 cleanup() {
@@ -176,6 +178,9 @@ grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- '--bezel-redraw' ||
   fail "launcher did not receive the in-place bezel redraw gesture"
 grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- '--presenter=native' ||
   fail "launcher did not use the common native presenter"
+grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -Fq -- \
+  "--presenter-options=$MOVE_BASE_OPTIONS,eink=$MOVE_WAVEFORM" ||
+  fail "Move launch did not bind the verified waveform through its generated key"
 grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- \
   '--touch-device=/dev/input/by-path/platform-44360000.spi-cs-0-event ' ||
   fail "launcher did not receive the profile-selected touch device"

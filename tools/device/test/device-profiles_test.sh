@@ -54,6 +54,13 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
     2816:16:1 ] || fail "rm1 framebuffer layout drifted"
 [ "$PLUTO_PROFILE_MAPPING_BYTES" = 10813440 ] ||
   fail "rm1 framebuffer mapping length drifted"
+[ -z "$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" ] ||
+  fail "rm1 kernel-owned waveform incorrectly gained a presenter option"
+[ "$(pluto_profile_presenter_options '' /verified/epdc.fw)" = '' ] ||
+  fail "rm1 waveform path leaked into presenter options"
+[ "$(pluto_profile_presenter_options 'dither=1' /verified/epdc.fw)" = \
+    'dither=1' ] ||
+  fail "rm1 waveform handling changed existing presenter options"
 [ -z "$PLUTO_PROFILE_BUFFER_SLOTS$PLUTO_PROFILE_PHASE_INTERVAL_NS" ] ||
   fail "rm1 incorrectly gained userspace phase scanout fields"
 [ "$PLUTO_PROFILE_PEN_DEVICE" = \
@@ -86,6 +93,17 @@ pluto_profile_load rm2 || fail "could not load rm2 runtime profile"
     1040:32:0 ] || fail "rm2 framebuffer layout drifted"
 [ "$PLUTO_PROFILE_MAPPING_BYTES" = 33554432 ] ||
   fail "rm2 framebuffer mapping length drifted"
+[ "$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" = wbf ] ||
+  fail "rm2 waveform option key drifted"
+[ "$(pluto_profile_presenter_options '' /verified/active.wbf)" = \
+    'wbf=/verified/active.wbf' ] ||
+  fail "rm2 empty base options gained a leading comma"
+[ "$(pluto_profile_presenter_options 'dither=1' /verified/active.wbf)" = \
+    'dither=1,wbf=/verified/active.wbf' ] ||
+  fail "rm2 waveform option did not join non-empty base options"
+if pluto_profile_presenter_options '' '' >/dev/null 2>&1; then
+  fail "rm2 waveform option accepted an empty verified path"
+fi
 [ "$PLUTO_PROFILE_BUFFER_SLOTS:$PLUTO_PROFILE_SLOT_BYTES" = \
     17:1464320 ] || fail "rm2 scanout ring geometry drifted"
 [ "$PLUTO_PROFILE_DAMAGE_ALIGNMENT:$PLUTO_PROFILE_PHASE_INTERVAL_NS" = \
@@ -125,6 +143,11 @@ pluto_profile_load move || fail "could not load Move runtime profile"
   fail "Move incorrectly gained fixed fbdev layout fields"
 [ -z "$PLUTO_PROFILE_MAPPING_BYTES" ] ||
   fail "Move incorrectly gained an fbdev mapping length"
+[ "$PLUTO_PROFILE_WAVEFORM_OPTION_KEY" = eink ] ||
+  fail "Move waveform option key drifted"
+[ "$(pluto_profile_presenter_options 'exact_color=1' /verified/move.eink)" = \
+    'exact_color=1,eink=/verified/move.eink' ] ||
+  fail "Move waveform option did not preserve the existing presenter options"
 [ "$PLUTO_PROFILE_BUFFER_SLOTS:$PLUTO_PROFILE_SLOT_BYTES" = \
     16:1241000 ] || fail "Move DRM buffer-ring geometry drifted"
 [ "$PLUTO_PROFILE_DAMAGE_ALIGNMENT:$PLUTO_PROFILE_PHASE_INTERVAL_NS" = \
