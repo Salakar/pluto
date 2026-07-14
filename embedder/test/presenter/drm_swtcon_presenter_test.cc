@@ -1,4 +1,4 @@
-// DrmSwtconPresenter behavior tests — the per-pixel-engine presenter glue.
+// Gallery3DrmPresenter behavior tests — the per-pixel-engine presenter glue.
 // Re-pins from the deleted record-playback core (deletion notes in
 // swtcon_packer_test.cc):
 //   - dry-run frame lifecycle + option surface (retired keys accepted)
@@ -106,7 +106,7 @@ void store_rgb565(std::vector<std::uint8_t> *frame, int x, int y,
   (*frame)[offset + 1] = static_cast<std::uint8_t>(value >> 8);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorHandoffRouteRequiresCompleteMoveIdentityAndGeometry) {
   const auto matches = [](int width, int height, int engine_stride,
                           std::uint32_t tile_px, int history_stride,
@@ -141,7 +141,7 @@ TEST(DrmSwtconPresenterTest,
       matches(954, 1696, 960, 32, 968, 1697, "reMarkable Chiappa", "i.MX93"));
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ProductionColorHandoffNamespaceRejectsEveryNoncanonicalPath) {
   EXPECT_FALSE(
       pluto::swtcon::production_handoff_path_is_secure_tmpfs_for_testing(""));
@@ -156,7 +156,7 @@ TEST(DrmSwtconPresenterTest,
           "/run/pluto/../pluto/glass.handoff"));
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      FastCoverageWordMergeMatchesScalarForUnalignedOverlaps) {
   {
     // A clipped coverage proof strictly inside execution, with a five-bit
@@ -359,7 +359,7 @@ struct BlockingCallback {
   }
 };
 
-// Presenter harness: opens "swtcon" through the registry with the given
+// Presenter harness: opens "gallery3_drm" through the registry with the given
 // options; present() retries kPlutoStatusAgain (the cold-clear gate)
 // with a deadline.
 class Presenter {
@@ -369,11 +369,11 @@ public:
                      void *callback_user_data = nullptr,
                      bool install_default_callback = true)
       : options_(options) {
-    ops_ = pluto_presenter_by_name("swtcon");
+    ops_ = pluto_gallery3_drm_presenter_ops();
     EXPECT_TRUE(ops_ != nullptr);
     PlutoPresenterConfig config{};
     config.struct_size = sizeof(config);
-    config.backend_name = "swtcon";
+    config.backend_name = "gallery3_drm";
     config.options = options_.c_str();
     if (callback != nullptr) {
       config.on_complete = callback;
@@ -505,10 +505,10 @@ public:
     ASSERT_EQ(ops_->wait_idle(presenter_, 30000), kPlutoStatusOk);
   }
 
-  PlutoSwtconDebugStats stats() const {
-    PlutoSwtconDebugStats out{};
+  PlutoGallery3DrmDebugStats stats() const {
+    PlutoGallery3DrmDebugStats out{};
     out.struct_size = sizeof(out);
-    EXPECT_EQ(pluto_swtcon_presenter_debug_stats(presenter_, &out),
+    EXPECT_EQ(pluto_gallery3_drm_presenter_debug_stats(presenter_, &out),
               kPlutoStatusOk);
     return out;
   }
@@ -945,9 +945,9 @@ bool run_exact_color_process(ExactColorProcessMode mode,
   renderer->set_auto_maintenance_allowed(false);
 
   ExactColorProcessOutcome outcome;
-  PlutoSwtconDebugStats stats{};
+  PlutoGallery3DrmDebugStats stats{};
   stats.struct_size = sizeof(stats);
-  if (pluto_swtcon_presenter_debug_stats(presenter.raw(), &stats) !=
+  if (pluto_gallery3_drm_presenter_debug_stats(presenter.raw(), &stats) !=
       kPlutoStatusOk) {
     return false;
   }
@@ -1045,7 +1045,7 @@ bool run_exact_color_process(ExactColorProcessMode mode,
 
   stats = {};
   stats.struct_size = sizeof(stats);
-  if (pluto_swtcon_presenter_debug_stats(presenter.raw(), &stats) !=
+  if (pluto_gallery3_drm_presenter_debug_stats(presenter.raw(), &stats) !=
       kPlutoStatusOk) {
     return false;
   }
@@ -1087,7 +1087,7 @@ template <typename Child> bool run_exact_color_child(Child child) {
 // string on purpose: they must parse as accepted-and-ignored. NOTE the old
 // no-eink lifecycle variant is deleted: the engine drives exclusively from
 // a decoded .eink.
-TEST(DrmSwtconPresenterTest, DryRunLifecycleCompletesFramesAndSnapshots) {
+TEST(Gallery3DrmPresenterTest, DryRunLifecycleCompletesFramesAndSnapshots) {
   const std::string eink = write_synth_eink(3, "lifecycle");
   Presenter p("dry_run=1,flip_interval_ms=0,settle_delay_ms=0,du_frames=5," +
               std::string("dither=1,eink=") + eink);
@@ -1112,7 +1112,7 @@ TEST(DrmSwtconPresenterTest, DryRunLifecycleCompletesFramesAndSnapshots) {
   EXPECT_EQ(p.log().last_frame_id.load(std::memory_order_acquire), 43u);
   EXPECT_EQ(p.log().calls.load(std::memory_order_acquire), 2);
 
-  PlutoSwtconDebugStats stats = p.stats();
+  PlutoGallery3DrmDebugStats stats = p.stats();
   EXPECT_EQ(stats.updates_completed, 2u);
   EXPECT_EQ(stats.full_updates, 1u);
   // Both frames fell back to mode 2 (the synthetic table lacks mode 7), a
@@ -1137,7 +1137,7 @@ TEST(DrmSwtconPresenterTest, DryRunLifecycleCompletesFramesAndSnapshots) {
   std::remove(eink.c_str());
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorCapabilityIsFailClosedAndMappedDryRunCompletes) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -1254,7 +1254,7 @@ TEST(DrmSwtconPresenterTest,
   for (std::size_t index = 0; index < callbacks.size(); ++index) {
     EXPECT_EQ(callbacks[index], index + 1);
   }
-  const PlutoSwtconDebugStats stats = p.stats();
+  const PlutoGallery3DrmDebugStats stats = p.stats();
   EXPECT_EQ(stats.full_updates, 1u);
   EXPECT_EQ(stats.color_enabled, 1u);
   // Fast uses the safe ordinary mode-7 island; only trailing Full is mapped.
@@ -1269,7 +1269,7 @@ TEST(DrmSwtconPresenterTest,
   EXPECT_EQ(stats.color_faults, 0u);
 }
 
-TEST(DrmSwtconPresenterTest, PenTruthFullPreservesRegionalRequest) {
+TEST(Gallery3DrmPresenterTest, PenTruthFullPreservesRegionalRequest) {
   const std::string eink = write_synth_eink(3, "pen_truth_region");
   Presenter p("dry_run=1,flip_interval_ms=0,eink=" + eink);
   ASSERT_EQ(p.open_status(), kPlutoStatusOk);
@@ -1303,7 +1303,7 @@ TEST(DrmSwtconPresenterTest, PenTruthFullPreservesRegionalRequest) {
   std::remove(eink.c_str());
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      SameTilePenTruthCoalescesExactlyForFullTextAndPackedEdge) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -1332,10 +1332,10 @@ TEST(DrmSwtconPresenterTest,
                                                 PlutoRect{80, 80, 4, 4}};
   const auto full_hole_before = history(72, 72);
   const auto full_selected_before = history(64, 64);
-  const PlutoSwtconDebugStats before = p.stats();
+  const PlutoGallery3DrmDebugStats before = p.stats();
   fill_rgb565(p.frame(), 0x0000);
   p.present_many(kPlutoRefreshFull, full_damage, 1, kPlutoPresentFlagPenTruth);
-  const PlutoSwtconDebugStats after_full = p.stats();
+  const PlutoGallery3DrmDebugStats after_full = p.stats();
   EXPECT_EQ(after_full.mapped_admissions, before.mapped_admissions + 1u);
   EXPECT_EQ(after_full.mapped_confirmed, before.mapped_confirmed + 1u);
   EXPECT_EQ(after_full.color_pen_truth_input_rects,
@@ -1359,7 +1359,7 @@ TEST(DrmSwtconPresenterTest,
   const auto text_selected_before = history(128, 64);
   fill_rgb565(p.frame(), 0xf800);
   p.present_many(kPlutoRefreshText, text_damage, 2, kPlutoPresentFlagPenTruth);
-  const PlutoSwtconDebugStats after_text = p.stats();
+  const PlutoGallery3DrmDebugStats after_text = p.stats();
   EXPECT_EQ(after_text.mapped_admissions, after_full.mapped_admissions + 1u);
   EXPECT_EQ(after_text.color_pen_truth_input_rects,
             after_full.color_pen_truth_input_rects + 2u);
@@ -1383,7 +1383,7 @@ TEST(DrmSwtconPresenterTest,
   fill_rgb565(p.frame(), 0x0000);
   p.present_many(kPlutoRefreshFull, unaligned_damage, 3,
                  kPlutoPresentFlagPenTruth);
-  const PlutoSwtconDebugStats after_unaligned = p.stats();
+  const PlutoGallery3DrmDebugStats after_unaligned = p.stats();
   EXPECT_EQ(after_unaligned.mapped_admissions,
             after_text.mapped_admissions + 1u);
   EXPECT_EQ(after_unaligned.color_pen_truth_input_rects,
@@ -1405,7 +1405,7 @@ TEST(DrmSwtconPresenterTest,
   const auto edge_guard_before = history(959, 102);
   fill_rgb565(p.frame(), 0x0000);
   p.present_many(kPlutoRefreshFull, edge_damage, 4, kPlutoPresentFlagPenTruth);
-  const PlutoSwtconDebugStats after_edge = p.stats();
+  const PlutoGallery3DrmDebugStats after_edge = p.stats();
   EXPECT_EQ(after_edge.mapped_admissions,
             after_unaligned.mapped_admissions + 1u);
   EXPECT_EQ(after_edge.color_pen_truth_input_rects,
@@ -1423,7 +1423,7 @@ TEST(DrmSwtconPresenterTest,
   EXPECT_EQ(p.log().calls.load(std::memory_order_acquire), 4);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      SpanningAndFullScreenPenTruthRemainDenseAndAccepted) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -1438,7 +1438,7 @@ TEST(DrmSwtconPresenterTest,
   Presenter p(installed_color_options());
   ASSERT_EQ(p.open_status(), kPlutoStatusOk);
   ASSERT_EQ(p.ops()->wait_idle(p.raw(), 30000), kPlutoStatusOk);
-  const PlutoSwtconDebugStats before = p.stats();
+  const PlutoGallery3DrmDebugStats before = p.stats();
 
   // The first execution crosses x=32 and blocks the second contributor's
   // tile from grouping. Both remain the original dense operations.
@@ -1446,7 +1446,7 @@ TEST(DrmSwtconPresenterTest,
                                              PlutoRect{4, 100, 4, 2}};
   fill_rgb565(p.frame(), 0x0000);
   p.present_many(kPlutoRefreshFull, spanning, 1, kPlutoPresentFlagPenTruth);
-  const PlutoSwtconDebugStats after_spanning = p.stats();
+  const PlutoGallery3DrmDebugStats after_spanning = p.stats();
   EXPECT_EQ(after_spanning.mapped_admissions, before.mapped_admissions + 2u);
   EXPECT_EQ(after_spanning.color_pen_truth_input_rects,
             before.color_pen_truth_input_rects);
@@ -1466,7 +1466,7 @@ TEST(DrmSwtconPresenterTest,
       &bottom_guard_b_before));
   fill_rgb565(p.frame(), 0x0000);
   p.present_many(kPlutoRefreshFull, bottom, 2, kPlutoPresentFlagPenTruth);
-  const PlutoSwtconDebugStats after_bottom = p.stats();
+  const PlutoGallery3DrmDebugStats after_bottom = p.stats();
   EXPECT_EQ(after_bottom.mapped_admissions,
             after_spanning.mapped_admissions + 2u);
   EXPECT_EQ(after_bottom.color_pen_truth_input_rects,
@@ -1486,7 +1486,7 @@ TEST(DrmSwtconPresenterTest,
   fill_rgb565(p.frame(), 0xffff);
   p.present(kPlutoRefreshFull, Presenter::kFullScreen, 3,
             kPlutoPresentFlagPenTruth);
-  const PlutoSwtconDebugStats after_full = p.stats();
+  const PlutoGallery3DrmDebugStats after_full = p.stats();
   EXPECT_EQ(after_full.mapped_admissions, after_bottom.mapped_admissions + 1u);
   EXPECT_EQ(after_full.color_pen_truth_input_rects,
             before.color_pen_truth_input_rects);
@@ -1496,50 +1496,50 @@ TEST(DrmSwtconPresenterTest,
   EXPECT_EQ(after_full.color_faults, 0u);
 }
 
-// PlutoSwtconDebugStats is APPEND-ONLY ABI: callers pass struct_size and
+// PlutoGallery3DrmDebugStats is APPEND-ONLY ABI: callers pass struct_size and
 // must never see existing fields move. The engine stage appended ten
 // fields; every offset below is pinned — moving, removing, or reordering
 // ANY field breaks this at compile time.
-static_assert(offsetof(PlutoSwtconDebugStats, struct_size) == 0);
-static_assert(offsetof(PlutoSwtconDebugStats, updates_completed) == 8);
-static_assert(offsetof(PlutoSwtconDebugStats, gc16_updates) == 16);
-static_assert(offsetof(PlutoSwtconDebugStats, full_updates) == 24);
-static_assert(offsetof(PlutoSwtconDebugStats, settle_updates) == 32);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, struct_size) == 0);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, updates_completed) == 8);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, gc16_updates) == 16);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, full_updates) == 24);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, settle_updates) == 32);
 // Appended at the per-pixel engine stage (now equally frozen):
-static_assert(offsetof(PlutoSwtconDebugStats, admissions) == 40);
-static_assert(offsetof(PlutoSwtconDebugStats, absorbed) == 48);
-static_assert(offsetof(PlutoSwtconDebugStats, parked) == 56);
-static_assert(offsetof(PlutoSwtconDebugStats, retargets) == 64);
-static_assert(offsetof(PlutoSwtconDebugStats, cancels) == 72);
-static_assert(offsetof(PlutoSwtconDebugStats, neutral_frames) == 80);
-static_assert(offsetof(PlutoSwtconDebugStats, double_scans) == 88);
-static_assert(offsetof(PlutoSwtconDebugStats, dc_saturations) == 96);
-static_assert(offsetof(PlutoSwtconDebugStats, pauses) == 104);
-static_assert(offsetof(PlutoSwtconDebugStats, active_px_peak) == 112);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, admissions) == 40);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, absorbed) == 48);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, parked) == 56);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, retargets) == 64);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, cancels) == 72);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, neutral_frames) == 80);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, double_scans) == 88);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, dc_saturations) == 96);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, pauses) == 104);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, active_px_peak) == 112);
 // Appended at the HOLD-gap exemption stage (device livelock fix):
-static_assert(offsetof(PlutoSwtconDebugStats, hold_rescans) == 120);
-static_assert(offsetof(PlutoSwtconDebugStats, pen_cross_mode_preemptions) ==
+static_assert(offsetof(PlutoGallery3DrmDebugStats, hold_rescans) == 120);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, pen_cross_mode_preemptions) ==
               136);
-static_assert(offsetof(PlutoSwtconDebugStats, color_enabled) == 144);
-static_assert(offsetof(PlutoSwtconDebugStats, color_preprocess_max_us) == 256);
-static_assert(offsetof(PlutoSwtconDebugStats, color_fast_bypasses) == 264);
-static_assert(offsetof(PlutoSwtconDebugStats, color_fast_bypass_wait_max_us) ==
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_enabled) == 144);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_preprocess_max_us) == 256);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_bypasses) == 264);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_bypass_wait_max_us) ==
               272);
-static_assert(offsetof(PlutoSwtconDebugStats, color_fast_obligations) == 280);
-static_assert(offsetof(PlutoSwtconDebugStats, color_fast_reserve_declines) ==
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_obligations) == 280);
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_reserve_declines) ==
               320);
-static_assert(offsetof(PlutoSwtconDebugStats, color_pen_focus_updates) == 328);
-static_assert(offsetof(PlutoSwtconDebugStats,
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_focus_updates) == 328);
+static_assert(offsetof(PlutoGallery3DrmDebugStats,
                        color_pen_focus_deferred_current) == 360);
-static_assert(offsetof(PlutoSwtconDebugStats, color_pen_truth_input_rects) ==
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_truth_input_rects) ==
               368);
-static_assert(offsetof(PlutoSwtconDebugStats, color_pen_truth_grouped_tiles) ==
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_truth_grouped_tiles) ==
               376);
-static_assert(offsetof(PlutoSwtconDebugStats, color_pen_truth_masked_lanes) ==
+static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_truth_masked_lanes) ==
               384);
-static_assert(offsetof(PlutoSwtconDebugStats,
+static_assert(offsetof(PlutoGallery3DrmDebugStats,
                        color_pen_truth_groups_per_request_max) == 392);
-static_assert(sizeof(PlutoSwtconDebugStats) == 400,
+static_assert(sizeof(PlutoGallery3DrmDebugStats) == 400,
               "append new fields at the END and update this pin");
 static_assert(offsetof(PlutoPenFocus, struct_size) == 0);
 static_assert(offsetof(PlutoPenFocus, rect) == 8);
@@ -1555,7 +1555,7 @@ static_assert(sizeof(PlutoPresenterOps) == 104,
 
 // Re-pin: option parsing. Invalid values reject the open; retired keys are
 // accepted-and-ignored; the engine constants parse.
-TEST(DrmSwtconPresenterTest, OptionSurfaceValidatesAndRetiresKeys) {
+TEST(Gallery3DrmPresenterTest, OptionSurfaceValidatesAndRetiresKeys) {
   const std::string eink = write_synth_eink(3, "options");
 
   {
@@ -1592,7 +1592,7 @@ TEST(DrmSwtconPresenterTest, OptionSurfaceValidatesAndRetiresKeys) {
 // Re-pin: the presenter never self-schedules a quality pass — every drive
 // maps 1:1 to an explicit present(), completing its frame_id exactly once;
 // retired settle keys with old "aggressive" values change nothing.
-TEST(DrmSwtconPresenterTest, PresenterNeverSelfSchedulesSettles) {
+TEST(Gallery3DrmPresenterTest, PresenterNeverSelfSchedulesSettles) {
   const std::string eink = write_synth_eink(3, "settle");
   Presenter p("dry_run=1,flip_interval_ms=0,eink=" + eink +
               ",settle_delay_ms=25,full_refresh_every=1");
@@ -1609,7 +1609,7 @@ TEST(DrmSwtconPresenterTest, PresenterNeverSelfSchedulesSettles) {
   p.present(kPlutoRefreshFast, PlutoRect{8, 8, 64, 64}, 1);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
-  PlutoSwtconDebugStats stats = p.stats();
+  PlutoGallery3DrmDebugStats stats = p.stats();
   EXPECT_EQ(stats.updates_completed, 1u);
   EXPECT_EQ(stats.settle_updates, 0u);
   EXPECT_EQ(stats.full_updates, 0u);
@@ -1631,7 +1631,7 @@ TEST(DrmSwtconPresenterTest, PresenterNeverSelfSchedulesSettles) {
 
 // Multi-inflight: two presents accepted back-to-back without waiting for
 // completion (ready() does not gate on in-flight updates), both complete.
-TEST(DrmSwtconPresenterTest, AcceptsConcurrentPresentsWithoutInflightGate) {
+TEST(Gallery3DrmPresenterTest, AcceptsConcurrentPresentsWithoutInflightGate) {
   const std::string eink = write_synth_eink(3, "inflight");
   Presenter p("dry_run=1,flip_interval_ms=0,eink=" + eink);
   ASSERT_EQ(p.open_status(), kPlutoStatusOk);
@@ -1670,7 +1670,7 @@ TEST(DrmSwtconPresenterTest, AcceptsConcurrentPresentsWithoutInflightGate) {
 // enqueue-only completion callback, so that delivery must have an explicit
 // second fence of its own. Deliberately blocking the test callback makes the
 // otherwise tiny handoff window deterministic.
-TEST(DrmSwtconPresenterTest, WaitIdleIncludesCompletionCallbackDelivery) {
+TEST(Gallery3DrmPresenterTest, WaitIdleIncludesCompletionCallbackDelivery) {
   const std::string eink = write_synth_eink(3, "callback_fence");
   BlockingCallback callback;
   Presenter p("dry_run=1,flip_interval_ms=0,stats_log_s=0,eink=" + eink,
@@ -1715,7 +1715,7 @@ TEST(DrmSwtconPresenterTest, WaitIdleIncludesCompletionCallbackDelivery) {
   std::remove(eink.c_str());
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      NullAndThrowingCompletionCallbacksCannotStrandIdle) {
   const std::string eink = write_synth_eink(3, "callback_edges");
   const std::string options =
@@ -2057,7 +2057,7 @@ private:
 
 } // namespace
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      HandoffNamespaceContentionReturnsBeforeAnyDrmAccessOrModeset) {
   const std::string eink = write_synth_eink(3, "handoff_lease_before_drm");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
@@ -2099,7 +2099,7 @@ TEST(DrmSwtconPresenterTest,
   EXPECT_FALSE(std::filesystem::exists(handoff + ".lease"));
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorFastReserveSurvivesTruthSaturationAndStaysBounded) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -2124,15 +2124,15 @@ TEST(DrmSwtconPresenterTest,
   // against the immediately previous append-only ABI must still receive its
   // known prefix without the implementation overwriting its unknown tail.
   constexpr std::size_t kLegacyStatsSize =
-      offsetof(PlutoSwtconDebugStats, color_fast_obligations);
-  alignas(PlutoSwtconDebugStats)
-      std::byte legacy_storage[sizeof(PlutoSwtconDebugStats) + 16u];
+      offsetof(PlutoGallery3DrmDebugStats, color_fast_obligations);
+  alignas(PlutoGallery3DrmDebugStats)
+      std::byte legacy_storage[sizeof(PlutoGallery3DrmDebugStats) + 16u];
   auto *legacy_stats =
-      ::new (static_cast<void *>(legacy_storage)) PlutoSwtconDebugStats{};
+      ::new (static_cast<void *>(legacy_storage)) PlutoGallery3DrmDebugStats{};
   legacy_stats->struct_size = kLegacyStatsSize;
   std::memset(legacy_storage + kLegacyStatsSize, 0xa5,
               sizeof(legacy_storage) - kLegacyStatsSize);
-  ASSERT_EQ(pluto_swtcon_presenter_debug_stats(p.raw(), legacy_stats),
+  ASSERT_EQ(pluto_gallery3_drm_presenter_debug_stats(p.raw(), legacy_stats),
             kPlutoStatusOk);
   EXPECT_EQ(legacy_stats->struct_size, kLegacyStatsSize);
   for (std::size_t index = kLegacyStatsSize; index < sizeof(legacy_storage);
@@ -2185,7 +2185,7 @@ TEST(DrmSwtconPresenterTest,
     return;
   }
 
-  PlutoSwtconDebugStats saturated = p.stats();
+  PlutoGallery3DrmDebugStats saturated = p.stats();
   EXPECT_EQ(saturated.color_truth_obligations, 64u);
   EXPECT_EQ(saturated.color_fast_obligations, 0u);
   EXPECT_EQ(saturated.color_truth_obligation_peak, 64u);
@@ -2208,7 +2208,7 @@ TEST(DrmSwtconPresenterTest,
   truth.flags = kPlutoPresentFlagInkPriority;
   truth.frame_id = 4;
   const PlutoStatus overflow_fast_status = p.ops()->present(p.raw(), &truth);
-  const PlutoSwtconDebugStats reserved = p.stats();
+  const PlutoGallery3DrmDebugStats reserved = p.stats();
 
   EXPECT_EQ(fast_status, kPlutoStatusOk);
   EXPECT_EQ(further_truth_status, kPlutoStatusAgain);
@@ -2222,13 +2222,13 @@ TEST(DrmSwtconPresenterTest,
 
   drm_raw->release_held_content_flip();
   ASSERT_EQ(p.ops()->wait_idle(p.raw(), 30000), kPlutoStatusOk);
-  const PlutoSwtconDebugStats idle = p.stats();
+  const PlutoGallery3DrmDebugStats idle = p.stats();
   EXPECT_EQ(idle.color_truth_obligations, 0u);
   EXPECT_EQ(idle.color_fast_obligations, 0u);
   EXPECT_EQ(idle.color_faults, 0u);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      PhysicalHoverDefersSameTileRawTruthWhileDisjointAndStartedTruthRun) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -2285,7 +2285,7 @@ TEST(DrmSwtconPresenterTest,
 
   const auto held_deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-  PlutoSwtconDebugStats initially_held{};
+  PlutoGallery3DrmDebugStats initially_held{};
   do {
     initially_held = p.stats();
     if (initially_held.color_pen_focus_deferred_current == 1u) {
@@ -2324,7 +2324,7 @@ TEST(DrmSwtconPresenterTest,
   ASSERT_TRUE(disjoint_completed)
       << "disjoint mapped truth stalled behind physical hover";
   const auto held_callbacks = p.log().snapshot();
-  PlutoSwtconDebugStats held = p.stats();
+  PlutoGallery3DrmDebugStats held = p.stats();
   EXPECT_GE(held.color_pen_focus_truth_deferrals, 1u);
   EXPECT_GE(held.color_pen_focus_disjoint_bypasses, 1u);
   EXPECT_TRUE(std::find(held_callbacks.begin(), held_callbacks.end(), 2u) !=
@@ -2381,7 +2381,7 @@ TEST(DrmSwtconPresenterTest,
   ASSERT_EQ(p.ops()->set_pen_focus(p.raw(), &clear), kPlutoStatusOk);
   const auto final_clear_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(1);
-  PlutoSwtconDebugStats final = p.stats();
+  PlutoGallery3DrmDebugStats final = p.stats();
   while (final.color_pen_focus_clears < 2u &&
          std::chrono::steady_clock::now() < final_clear_deadline) {
     std::this_thread::yield();
@@ -2392,7 +2392,7 @@ TEST(DrmSwtconPresenterTest,
   EXPECT_EQ(final.color_faults, 0u);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      MovingFocusRenewsQuietWindowButIdenticalSynsDoNotStarveTruth) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -2454,7 +2454,7 @@ TEST(DrmSwtconPresenterTest,
   ASSERT_EQ(p.ops()->wait_idle(p.raw(), 30000), kPlutoStatusOk);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      PartialFastCoverageOfOlderTruthCannotDeadlockPendingLane) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -2499,13 +2499,13 @@ TEST(DrmSwtconPresenterTest,
               callbacks.end());
   EXPECT_TRUE(std::find(callbacks.begin(), callbacks.end(), 3u) !=
               callbacks.end());
-  const PlutoSwtconDebugStats stats = p.stats();
+  const PlutoGallery3DrmDebugStats stats = p.stats();
   EXPECT_EQ(stats.color_truth_obligations, 0u);
   EXPECT_EQ(stats.color_fast_obligations, 0u);
   EXPECT_EQ(stats.color_faults, 0u);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      PenFocusMailboxIsCoherentAndContendedPublishP99IsBounded) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -2588,7 +2588,7 @@ TEST(DrmSwtconPresenterTest,
   EXPECT_EQ(p.stats().color_faults, 0u);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorSafeFastWaitsForTerminalLatchAndUnknownFailsClosed) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -2703,7 +2703,7 @@ TEST(DrmSwtconPresenterTest,
   }
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorFaultDiscardsWarmCandidateAndNextOpenColdClears) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -2820,7 +2820,7 @@ TEST(DrmSwtconPresenterTest,
 // 15) whenever nothing is active, and content planes flip in deterministic
 // build-slot order 0,1,2,... — two short cold-clear rails first, then the
 // present's waveform phases.
-TEST(DrmSwtconPresenterTest, ScanParksOnBlankHoldAndSlotsRotateInOrder) {
+TEST(Gallery3DrmPresenterTest, ScanParksOnBlankHoldAndSlotsRotateInOrder) {
   const std::string eink = write_synth_eink(3, "hold");
   auto drm = std::make_unique<RecordingDrm>();
   RecordingDrm *drm_raw = drm.get();
@@ -2880,7 +2880,7 @@ TEST(DrmSwtconPresenterTest, ScanParksOnBlankHoldAndSlotsRotateInOrder) {
     }
 
     // Appended debug-stats fields are live.
-    const PlutoSwtconDebugStats stats = p.stats();
+    const PlutoGallery3DrmDebugStats stats = p.stats();
     EXPECT_GT(stats.admissions, 0u);
     EXPECT_GT(stats.neutral_frames, 0u); // HOLD parking counted
     EXPECT_EQ(stats.double_scans, 0u);
@@ -2895,7 +2895,7 @@ TEST(DrmSwtconPresenterTest, ScanParksOnBlankHoldAndSlotsRotateInOrder) {
 // thread after it consumes the user's final ready slot but before the DRM
 // commit/latch event: PixelEngine bookkeeping and the completion callback may
 // finish, yet wait_idle must remain blocked until that exact slot is latched.
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      WaitIdleFencesFinalReadySlotUntilLatchAcknowledgement) {
   const std::string eink = write_synth_eink(1, "ready_slot_fence");
   auto drm = std::make_unique<RecordingDrm>();
@@ -2972,7 +2972,7 @@ TEST(DrmSwtconPresenterTest,
 // pending-frame record. Pin its sixth and final one-phase/onset-band content
 // flip before latch: wait_idle must block from open, remain blocked after the
 // engine marks cold clear terminal, and finish only when that slot latches.
-TEST(DrmSwtconPresenterTest, WaitIdleIncludesColdClearThroughItsFinalLatch) {
+TEST(Gallery3DrmPresenterTest, WaitIdleIncludesColdClearThroughItsFinalLatch) {
   const std::string eink = write_synth_eink(1, "cold_clear_idle_fence");
   auto drm = std::make_unique<RecordingDrm>();
   RecordingDrm *drm_raw = drm.get();
@@ -3096,7 +3096,7 @@ std::string write_livelock_eink() {
 //     (<= 576 x 954 px), never the whole field (device: 1,617,984);
 //   - jitter lands in hold_rescans; double_scans counts only content
 //     rescans.
-TEST(DrmSwtconPresenterTest, JitteryVblankColdClearNeverLivelocks) {
+TEST(Gallery3DrmPresenterTest, JitteryVblankColdClearNeverLivelocks) {
   const std::string eink = write_livelock_eink();
   auto drm = std::make_unique<RecordingDrm>();
   drm->sequence_step = 2;    // gap >= 2 on EVERY latch
@@ -3119,7 +3119,7 @@ TEST(DrmSwtconPresenterTest, JitteryVblankColdClearNeverLivelocks) {
         << "cold clear never completed under vblank jitter (livelock)";
 
     // Cold-clear sweep bound: never more than one band active at once.
-    PlutoSwtconDebugStats stats = p.stats();
+    PlutoGallery3DrmDebugStats stats = p.stats();
     EXPECT_LE(stats.active_px_peak, 576u * 954u);
     EXPECT_LT(stats.active_px_peak,
               static_cast<std::uint64_t>(kLogicalWidth) * kLogicalHeight);
@@ -3200,7 +3200,7 @@ std::string write_recharge_eink() {
 // The summary path has no plane-read hook (the plane-reading recharge and
 // its slot targets are deleted), so agreement here proves the build-time
 // summaries carry the exact impulse the panel physically re-drove.
-TEST(DrmSwtconPresenterTest, DoubleScanRechargeChargesExactPlaneImpulse) {
+TEST(Gallery3DrmPresenterTest, DoubleScanRechargeChargesExactPlaneImpulse) {
   using pluto::swtcon::kFirstDataRow;
   using pluto::swtcon::kFirstDataWord;
   const std::string eink = write_recharge_eink();
@@ -3235,7 +3235,7 @@ TEST(DrmSwtconPresenterTest, DoubleScanRechargeChargesExactPlaneImpulse) {
     std::uint64_t previous_double_scans = 0;
     bool have_previous = false;
     int stable_snapshots = 0;
-    PlutoSwtconDebugStats stats0{};
+    PlutoGallery3DrmDebugStats stats0{};
     const auto baseline_deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (stable_snapshots < 3 &&
@@ -3360,7 +3360,7 @@ TEST(DrmSwtconPresenterTest, DoubleScanRechargeChargesExactPlaneImpulse) {
 
     // Driven tiles take k_dscan x extra stress. Pauses also charge active
     // tiles (k_pause), so require exact equality only on a pause-free run.
-    const PlutoSwtconDebugStats stats1 = p.stats();
+    const PlutoGallery3DrmDebugStats stats1 = p.stats();
     EXPECT_GT(stats1.double_scans, stats0.double_scans);
     EXPECT_EQ(stats1.dc_saturations, 0u);
     for (std::size_t tile = 0; tile < stress.size(); ++tile) {
@@ -3380,7 +3380,7 @@ TEST(DrmSwtconPresenterTest, DoubleScanRechargeChargesExactPlaneImpulse) {
 // the settled glass plane; the next open seeds the engine from it and skips
 // the INIT cold clear entirely — the app-switch flash killer. Glass truth
 // must carry across the process swap and the chain count must advance.
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      WarmGlassHandoffRejectsScanTimingAndSimulatorBackendMismatch) {
   const std::string eink = write_synth_eink(3, "handoff_route_identity");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
@@ -3440,7 +3440,7 @@ TEST(DrmSwtconPresenterTest,
   std::remove(eink.c_str());
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      WarmGlassHandoffChainCapConsumesLastLinkThenForcesColdClear) {
   const std::string eink = write_synth_eink(3, "handoff_chain_lifecycle");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
@@ -3496,7 +3496,7 @@ TEST(DrmSwtconPresenterTest,
   std::remove(eink.c_str());
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      WarmGlassHandoffLostFirstAdmissionClaimForcesColdRestart) {
   const std::string eink = write_synth_eink(3, "handoff_lost_claim");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
@@ -3556,7 +3556,7 @@ TEST(DrmSwtconPresenterTest,
   std::remove(eink.c_str());
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorLostFirstAdmissionClaimNeverWritesImportedStateToPanel) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -3621,7 +3621,7 @@ TEST(DrmSwtconPresenterTest,
   discard_handoff_path(handoff);
 }
 
-TEST(DrmSwtconPresenterTest, WarmGlassHandoffSkipsColdClearAndSeedsGlass) {
+TEST(Gallery3DrmPresenterTest, WarmGlassHandoffSkipsColdClearAndSeedsGlass) {
   const std::string eink = write_synth_eink(3, "handoff");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
                               "/pluto_handoff_" + std::to_string(::getpid()) +
@@ -3708,7 +3708,7 @@ TEST(DrmSwtconPresenterTest, WarmGlassHandoffSkipsColdClearAndSeedsGlass) {
 // renderer takes longer than the cold-clear decision timeout to decode it,
 // that pointer remains immutable and readable until confirm_handoff() (or
 // close) ends the loan.
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      IncomingRendererPayloadSurvivesConfirmationTimeout) {
   const std::string eink = write_synth_eink(3, "handoff_payload_lease");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
@@ -3765,7 +3765,7 @@ TEST(DrmSwtconPresenterTest,
 // proves that importing the A/B plane, engine ledgers, and renderer debt
 // together produces the same ordinary color successor as uninterrupted live
 // execution, including when warm-resume paint bounds under-report the frame.
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorHandoffAcrossProcessesMatchesLiveUninterruptedSuccessor) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -3932,7 +3932,7 @@ TEST(DrmSwtconPresenterTest,
   std::filesystem::remove_all(root);
 }
 
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      ExactColorHandoffRefusesPendingMappedWorkAndRemovesSeed) {
   const std::filesystem::path eink(PLUTO_SWTCON_EINK_FIXTURE);
   const std::filesystem::path directory = eink.parent_path();
@@ -3988,7 +3988,7 @@ TEST(DrmSwtconPresenterTest,
 // PixelEngine advances its logical planes while building, so persisting them
 // merely because cold-clear completed would let the next process skip its
 // clear against phases that never reached the panel.
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      WarmGlassHandoffIsRemovedWhenCloseInterruptsPendingWork) {
   const std::string eink = write_synth_eink(20, "handoff_pending_close");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
@@ -4031,7 +4031,7 @@ TEST(DrmSwtconPresenterTest,
 // successful DRM commit whose flip event never arrives: queues and engine are
 // idle, but ScanReadySlot remains unacknowledged, so close must fail closed
 // instead of saving the build-ahead prev plane.
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      WarmGlassHandoffRequiresFinalScanLatchAcknowledgement) {
   const std::string eink = write_synth_eink(1, "handoff_latch_close");
   const std::string handoff = std::filesystem::temp_directory_path().string() +
@@ -4103,7 +4103,7 @@ TEST(DrmSwtconPresenterTest,
 // sparse pen-priority update may preempt an in-flight quality pass, complete
 // the changed pixel, and leave same-target pixels' prev values estimated.
 // close() must reject that idle but optically inexact plane.
-TEST(DrmSwtconPresenterTest,
+TEST(Gallery3DrmPresenterTest,
      WarmGlassHandoffRejectsIdleSparsePenPreemptionEstimate) {
   const std::string eink = write_synth_eink(8, "handoff_prev_est_close");
   const std::string handoff = std::filesystem::temp_directory_path().string() +

@@ -153,7 +153,7 @@ typedef struct PlutoPresenter PlutoPresenter; // opaque, backend-owned
 
 typedef struct PlutoPresenterConfig {
   size_t struct_size;
-  const char *backend_name; // "qtfb" | "swtcon" | "host-window" |
+  const char *backend_name; // "qtfb" | "native" | "host-window" |
                             // "host-headless" | "null" | NULL = auto-probe
   const char
       *options; // backend-specific key=value CSV (documented per backend)
@@ -259,8 +259,9 @@ typedef struct PlutoPresenterOps {
 
 // Registry (static; D9).
 const PlutoPresenterOps *pluto_presenter_by_name(const char *name);
-// Auto-probe ladder for on-device use: qtfb -> (swtcon, if built & gate open).
-// Host builds: host-window -> host-headless.
+// Auto-probe ladder for on-device use: temporary qtfb development route,
+// followed by an immutable-profile-gated native backend. Host builds use the
+// host preview. The final native cut removes qtfb entirely.
 const PlutoPresenterOps *pluto_presenter_probe(void);
 
 #ifdef __cplusplus

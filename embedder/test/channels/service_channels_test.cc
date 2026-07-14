@@ -248,7 +248,7 @@ struct ServiceHarness {
     write_file(paths.wifi_settings_file, "wifi = on\n");
 
     pluto::ChannelContext context;
-    context.presenter_name = "swtcon";
+    context.presenter_name = "native";
     context.request_shutdown = [this] { ++shutdown_requests; };
     context.system_ui_ready = [this] {
       ++system_ui_ready_requests;
@@ -283,7 +283,7 @@ struct ServiceHarness {
 
   void enable_hibernation() {
     pluto::ChannelContext context;
-    context.presenter_name = "swtcon";
+    context.presenter_name = "native";
     context.request_shutdown = [this] { ++shutdown_requests; };
     context.request_hibernate = [this] { ++hibernate_requests; };
     registry.set_context(std::move(context));

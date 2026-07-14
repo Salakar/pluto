@@ -86,7 +86,7 @@ TEST(QtfbInputSelection, MissingCooperativeKeyCanNeverFallBackToEvdev) {
       static_cast<int>(pluto::qtfb_input_policy("qtfb", nullptr, false, false)),
       static_cast<int>(QtfbInputPolicy::kDisabled));
   EXPECT_EQ(static_cast<int>(
-                pluto::qtfb_input_policy("swtcon", "7171298", true, true)),
+                pluto::qtfb_input_policy("native", "7171298", true, true)),
             static_cast<int>(QtfbInputPolicy::kUseEvdev));
 }
 

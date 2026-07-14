@@ -3,21 +3,24 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "engine/device_identity.h"
+#include "generated/device_profiles.h"
 #include "presenter/host_preview.h"
+#include "presenter/native/native_display_backend.h"
+#include "presenter/native/native_presenter.h"
 #include "presenter/qtfb/qtfb_presenter.h"
-#include "presenter/swtcon/drm_swtcon_presenter.h"
 
 extern "C" {
 
-const PlutoPresenterOps* pluto_presenter_by_name(const char* name) {
+const PlutoPresenterOps *pluto_presenter_by_name(const char *name) {
   if (name == nullptr) {
     return pluto_presenter_probe();
   }
   if (std::strcmp(name, "qtfb") == 0) {
     return pluto_qtfb_presenter_ops();
   }
-  if (std::strcmp(name, "swtcon") == 0) {
-    return pluto_swtcon_presenter_ops();
+  if (std::strcmp(name, "native") == 0) {
+    return pluto_native_presenter_ops();
   }
   if (std::strcmp(name, "host-headless") == 0 ||
       std::strcmp(name, "host-png") == 0 ||
@@ -30,16 +33,20 @@ const PlutoPresenterOps* pluto_presenter_by_name(const char* name) {
   return nullptr;
 }
 
-const PlutoPresenterOps* pluto_presenter_probe(void) {
-  const char* key = std::getenv("QTFB_KEY");
+const PlutoPresenterOps *pluto_presenter_probe(void) {
+  const char *key = std::getenv("QTFB_KEY");
   if (key != nullptr && *key != '\0') {
     return pluto_qtfb_presenter_ops();
   }
-  const char* swtcon = std::getenv("PLUTO_SWTCON_AUTO");
-  if (swtcon != nullptr && std::strcmp(swtcon, "1") == 0) {
-    return pluto_swtcon_presenter_ops();
+  const pluto::RemarkableDeviceIdentity identity =
+      pluto::probe_remarkable_device_identity();
+  const pluto::GeneratedDeviceProfile *profile =
+      pluto::generated_device_profile_by_id(identity.profile_id);
+  if (profile != nullptr &&
+      pluto::native::native_display_backend_is_implemented(*profile)) {
+    return pluto_native_presenter_ops();
   }
   return pluto_host_preview_presenter_ops();
 }
 
-}  // extern "C"
+} // extern "C"

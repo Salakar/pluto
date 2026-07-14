@@ -487,7 +487,7 @@ PlatformResponse handle_session(ChannelRegistry* registry,
   if (call.method == "info") {
     const ChannelContext& ctx = registry->context();
     std::string backend = "hostPreview";
-    if (ctx.presenter_name == "swtcon") {
+    if (ctx.presenter_name == "native") {
       backend = "ownSwtcon";
     } else if (ctx.presenter_name == "qtfb") {
       backend = "qtfbCooperative";

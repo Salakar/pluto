@@ -1,4 +1,4 @@
-// DrmSwtconPresenter — the per-pixel waveform engine presenter, built on
+// Gallery3DrmPresenter — the per-pixel waveform engine presenter, built on
 // the device-proven scan protocol.
 //
 // Drive stack (single renderer policy — this is the ONLY frame path):
@@ -582,9 +582,9 @@ private:
   std::vector<std::uint8_t> drive_;   // slot-major [slot][tile]
 };
 
-class DrmSwtconPresenter final {
+class Gallery3DrmPresenter final {
 public:
-  ~DrmSwtconPresenter() { close(); }
+  ~Gallery3DrmPresenter() { close(); }
 
   PlutoStatus open(const PlutoPresenterConfig *config) {
     presenter_open_t_ns_ = steady_now_ns();
@@ -1031,10 +1031,10 @@ public:
     build_count_ = 0;
 
     pen_focus_accepting_.store(true, std::memory_order_release);
-    engine_thread_ = std::thread(&DrmSwtconPresenter::engine_thread_main, this);
+    engine_thread_ = std::thread(&Gallery3DrmPresenter::engine_thread_main, this);
     if (config_.mode_lab_step_ms > 0) {
       mode_lab_thread_ =
-          std::thread(&DrmSwtconPresenter::mode_lab_thread_main, this);
+          std::thread(&Gallery3DrmPresenter::mode_lab_thread_main, this);
     }
     if (!config_.dry_run) {
       if (!scan_loop_.start()) {
@@ -2380,13 +2380,13 @@ public:
     return true;
   }
 
-  PlutoStatus debug_stats(PlutoSwtconDebugStats *out_stats) const {
+  PlutoStatus debug_stats(PlutoGallery3DrmDebugStats *out_stats) const {
     if (out_stats == nullptr || out_stats->struct_size < sizeof(std::size_t)) {
       return kPlutoStatusInvalidArgument;
     }
     std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t size = out_stats->struct_size;
-    PlutoSwtconDebugStats stats = stats_snapshot_;
+    PlutoGallery3DrmDebugStats stats = stats_snapshot_;
     stats.struct_size = size;
     stats.updates_completed = stat_updates_;
     stats.gc16_updates = stat_gc16_;
@@ -2448,7 +2448,7 @@ public:
     // their smaller struct_size; copy only the prefix they know, while newer
     // callers retain any future tail beyond this implementation's version.
     std::memcpy(out_stats, &stats,
-                std::min(size, sizeof(PlutoSwtconDebugStats)));
+                std::min(size, sizeof(PlutoGallery3DrmDebugStats)));
     return kPlutoStatusOk;
   }
 
@@ -5732,7 +5732,7 @@ private:
   // Guarded by mutex_. A frame leaves pending_frames_ before its callback runs,
   // so wait_idle must include this second half of the completion handoff.
   std::size_t completion_callbacks_pending_ = 0;
-  PlutoSwtconDebugStats stats_snapshot_{};
+  PlutoGallery3DrmDebugStats stats_snapshot_{};
   std::uint64_t stat_updates_ = 0;
   std::uint64_t stat_gc16_ = 0;
   std::uint64_t stat_fulls_ = 0;
@@ -5848,13 +5848,13 @@ private:
   std::thread mode_lab_thread_;
 };
 
-PlutoStatus swtcon_open(const PlutoPresenterConfig *config,
+PlutoStatus gallery3_drm_open(const PlutoPresenterConfig *config,
                         PlutoPresenter **out_presenter) {
   if (out_presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   *out_presenter = nullptr;
-  auto *presenter = new (std::nothrow) DrmSwtconPresenter();
+  auto *presenter = new (std::nothrow) Gallery3DrmPresenter();
   if (presenter == nullptr) {
     return kPlutoStatusInternal;
   }
@@ -5872,138 +5872,138 @@ PlutoStatus swtcon_open(const PlutoPresenterConfig *config,
   return kPlutoStatusOk;
 }
 
-void swtcon_close(PlutoPresenter *presenter) {
-  auto *swtcon = reinterpret_cast<DrmSwtconPresenter *>(presenter);
+void gallery3_drm_close(PlutoPresenter *presenter) {
+  auto *swtcon = reinterpret_cast<Gallery3DrmPresenter *>(presenter);
   delete swtcon;
 }
 
-PlutoStatus swtcon_info(PlutoPresenter *presenter, PlutoDisplayInfo *out_info) {
+PlutoStatus gallery3_drm_info(PlutoPresenter *presenter, PlutoDisplayInfo *out_info) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->info(out_info);
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->info(out_info);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_present(PlutoPresenter *presenter,
+PlutoStatus gallery3_drm_present(PlutoPresenter *presenter,
                            const PlutoPresentRequest *request) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->present(request);
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->present(request);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-bool swtcon_ready(PlutoPresenter *presenter, PlutoRefreshClass refresh_class) {
+bool gallery3_drm_ready(PlutoPresenter *presenter, PlutoRefreshClass refresh_class) {
   if (presenter == nullptr) {
     return false;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->ready(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->ready(
         refresh_class);
   } catch (...) {
     return false;
   }
 }
 
-PlutoStatus swtcon_wait_idle(PlutoPresenter *presenter,
+PlutoStatus gallery3_drm_wait_idle(PlutoPresenter *presenter,
                              std::uint32_t timeout_ms) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->wait_idle(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->wait_idle(
         timeout_ms);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_snapshot(PlutoPresenter *presenter,
+PlutoStatus gallery3_drm_snapshot(PlutoPresenter *presenter,
                             PlutoSurface *out_surface) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->snapshot(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->snapshot(
         out_surface);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_set_pen_focus(PlutoPresenter *presenter,
+PlutoStatus gallery3_drm_set_pen_focus(PlutoPresenter *presenter,
                                  const PlutoPenFocus *focus) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->set_pen_focus(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->set_pen_focus(
         focus);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_stage_handoff(PlutoPresenter *presenter,
+PlutoStatus gallery3_drm_stage_handoff(PlutoPresenter *presenter,
                                  const PlutoHandoffPayload *payload,
                                  std::uint32_t timeout_ms) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->stage_handoff(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->stage_handoff(
         payload, timeout_ms);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_get_handoff(PlutoPresenter *presenter,
+PlutoStatus gallery3_drm_get_handoff(PlutoPresenter *presenter,
                                PlutoHandoffPayload *out_payload) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->get_handoff(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->get_handoff(
         out_payload);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_confirm_handoff(PlutoPresenter *presenter, bool accepted) {
+PlutoStatus gallery3_drm_confirm_handoff(PlutoPresenter *presenter, bool accepted) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->confirm_handoff(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->confirm_handoff(
         accepted);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-const PlutoPresenterOps kSwtconOps{
+const PlutoPresenterOps kGallery3DrmOps{
     sizeof(PlutoPresenterOps),
-    "swtcon",
-    swtcon_open,
-    swtcon_close,
-    swtcon_info,
-    swtcon_present,
-    swtcon_ready,
-    swtcon_wait_idle,
-    swtcon_snapshot,
-    swtcon_set_pen_focus,
-    swtcon_stage_handoff,
-    swtcon_get_handoff,
-    swtcon_confirm_handoff,
+    "gallery3_drm",
+    gallery3_drm_open,
+    gallery3_drm_close,
+    gallery3_drm_info,
+    gallery3_drm_present,
+    gallery3_drm_ready,
+    gallery3_drm_wait_idle,
+    gallery3_drm_snapshot,
+    gallery3_drm_set_pen_focus,
+    gallery3_drm_stage_handoff,
+    gallery3_drm_get_handoff,
+    gallery3_drm_confirm_handoff,
 };
 
 } // namespace
@@ -6034,7 +6034,7 @@ bool debug_glass_for_testing(PlutoPresenter *presenter,
   if (presenter == nullptr) {
     return false;
   }
-  return reinterpret_cast<DrmSwtconPresenter *>(presenter)->debug_glass(
+  return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->debug_glass(
       out_levels, out_width, out_height, out_stride);
 }
 
@@ -6045,7 +6045,7 @@ bool debug_dc_for_testing(PlutoPresenter *presenter,
   if (presenter == nullptr) {
     return false;
   }
-  return reinterpret_cast<DrmSwtconPresenter *>(presenter)->debug_dc(
+  return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->debug_dc(
       out_rescan, out_stress, out_tile_cols);
 }
 
@@ -6055,7 +6055,7 @@ bool debug_color_history_for_testing(PlutoPresenter *presenter, int x, int y,
   if (presenter == nullptr) {
     return false;
   }
-  return reinterpret_cast<DrmSwtconPresenter *>(presenter)->debug_color_history(
+  return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->debug_color_history(
       x, y, out_a, out_b);
 }
 
@@ -6065,18 +6065,18 @@ bool debug_color_history_for_testing(PlutoPresenter *presenter, int x, int y,
 
 extern "C" {
 
-const PlutoPresenterOps *pluto_swtcon_presenter_ops(void) {
-  return &pluto::kSwtconOps;
+const PlutoPresenterOps *pluto_gallery3_drm_presenter_ops(void) {
+  return &pluto::kGallery3DrmOps;
 }
 
 PlutoStatus
-pluto_swtcon_presenter_debug_stats(PlutoPresenter *presenter,
-                                   PlutoSwtconDebugStats *out_stats) {
+pluto_gallery3_drm_presenter_debug_stats(PlutoPresenter *presenter,
+                                   PlutoGallery3DrmDebugStats *out_stats) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<pluto::DrmSwtconPresenter *>(presenter)
+    return reinterpret_cast<pluto::Gallery3DrmPresenter *>(presenter)
         ->debug_stats(out_stats);
   } catch (...) {
     return kPlutoStatusInternal;

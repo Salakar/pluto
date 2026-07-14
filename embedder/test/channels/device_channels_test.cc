@@ -84,7 +84,7 @@ struct DeviceHarness {
     context.dpi = dpi;
     context.is_color = is_color;
     context.pixel_format = "rgb565";
-    context.presenter_name = "swtcon";
+    context.presenter_name = "native";
     registry.set_context(std::move(context));
     pluto::register_service_channels(&registry, paths);
   }

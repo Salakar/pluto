@@ -508,7 +508,7 @@ bool EngineHost::capture_direct_screenshot(
 }
 
 void EngineHost::start_foreground_services() {
-  if (config_.presenter_name == "swtcon") {
+  if (config_.presenter_name == "native") {
     if (direct_control_server_ == nullptr) {
       DirectControlServerConfig control;
       control.run_dir = config_.run_dir;
@@ -1706,12 +1706,13 @@ bool EngineHost::setup_renderer(std::string *error) {
   renderer_config.start_presenter_thread = true;
   renderer_config.presenter_pen_focus_from_host =
       presenter_has_pen_focus_hook(presenter_ops_);
-  // Automatic optical hygiene requires BOTH waveform-class control and real
-  // device completion. Direct SWTCON has those capabilities. qtfb only sends
-  // ALL/PARTIAL framebuffer updates to Xochitl and reports timer estimates,
-  // so it must fail closed until a real ghost-control/completion bridge exists.
+  // Automatic optical hygiene requires both waveform-class control and real
+  // device completion. Select it from behavior instead of a model or backend
+  // name so every native driver follows the same scheduler path.
   renderer_config.pigment_hygiene_supported =
-      config_.presenter_name == "swtcon";
+      presenter_display_info_valid_ &&
+      presenter_display_info_.controls_refresh_class &&
+      presenter_display_info_.reports_completion;
   renderer_config.enable_auto_ghostbuster =
       renderer_config.pigment_hygiene_supported;
   renderer_config.set_flutter_rendering_paused = [this](bool paused) {

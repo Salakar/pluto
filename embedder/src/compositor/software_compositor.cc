@@ -1821,24 +1821,22 @@ void FrameRenderer::try_stage_handoff_locked(uint64_t deadline_us) {
       presentation_resume_requested_ || auto_ghostbuster_.action_active() ||
       input_mask != 0 || !retained_content_ready_ ||
       seeded_physical_baseline_valid_) {
-    if (ops->name != nullptr && std::strcmp(ops->name, "swtcon") == 0) {
-      std::fprintf(
-          stderr,
-          "pluto: renderer handoff staging skipped unsafe valid=%d "
-          "components=%d scheduler_idle=%d user_pending=%d "
-          "settle_pending=%d inflight=%d completions=%zu dropped=%zu "
-          "reset_phase=%u hold=%d suspended=%d resume_pending=%d "
-          "maintenance_active=%d input=%u retained=%d seeded=%d\n",
-          valid_ ? 1 : 0, components_valid() ? 1 : 0, scheduler_idle ? 1 : 0,
-          user_pending ? 1 : 0, settle_pending ? 1 : 0,
-          presenter_inflight ? 1 : 0, completion_count, dropped,
-          static_cast<unsigned>(pixel_reset_phase_),
-          pixel_reset_render_hold_ ? 1 : 0, presentation_suspended_ ? 1 : 0,
-          presentation_resume_requested_ ? 1 : 0,
-          auto_ghostbuster_.action_active() ? 1 : 0,
-          static_cast<unsigned>(input_mask), retained_content_ready_ ? 1 : 0,
-          seeded_physical_baseline_valid_ ? 1 : 0);
-    }
+    std::fprintf(
+        stderr,
+        "pluto: renderer handoff staging skipped unsafe valid=%d "
+        "components=%d scheduler_idle=%d user_pending=%d "
+        "settle_pending=%d inflight=%d completions=%zu dropped=%zu "
+        "reset_phase=%u hold=%d suspended=%d resume_pending=%d "
+        "maintenance_active=%d input=%u retained=%d seeded=%d\n",
+        valid_ ? 1 : 0, components_valid() ? 1 : 0, scheduler_idle ? 1 : 0,
+        user_pending ? 1 : 0, settle_pending ? 1 : 0,
+        presenter_inflight ? 1 : 0, completion_count, dropped,
+        static_cast<unsigned>(pixel_reset_phase_),
+        pixel_reset_render_hold_ ? 1 : 0, presentation_suspended_ ? 1 : 0,
+        presentation_resume_requested_ ? 1 : 0,
+        auto_ghostbuster_.action_active() ? 1 : 0,
+        static_cast<unsigned>(input_mask), retained_content_ready_ ? 1 : 0,
+        seeded_physical_baseline_valid_ ? 1 : 0);
     return;
   }
 
@@ -2084,9 +2082,7 @@ bool FrameRenderer::detach_presenter(uint32_t timeout_ms) {
   // skips staging; detach itself continues and the next process cold-clears.
   if (handoff_scheduler_quiescent) {
     try_stage_handoff_locked(deadline_us);
-  } else if (config_.presenter_ops != nullptr &&
-             config_.presenter_ops->name != nullptr &&
-             std::strcmp(config_.presenter_ops->name, "swtcon") == 0) {
+  } else if (presenter_has_stage_handoff_hook(config_.presenter_ops)) {
     std::fprintf(stderr,
                  "pluto: renderer handoff quiescence failed user_pending=%d "
                  "settle_pending=%d inflight=%d\n",
