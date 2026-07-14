@@ -3,6 +3,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 SUPERVISOR="$HERE/../pluto-session.sh"
+PROFILE_FILE="$HERE/../generated/device-profiles.sh"
 TMP=${TMPDIR:-/tmp}/pluto-session-warm-resume-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
@@ -106,6 +107,9 @@ mkdir -p "$TMP/starts"
 
 PATH="$TMP/bin:$PATH" \
 PLUTO_ROOT="$ROOT" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=move \
 PLUTO_RUN_DIR="$CTL" \
 PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
 PLUTO_UPTIME_FILE="$TMP/uptime" \

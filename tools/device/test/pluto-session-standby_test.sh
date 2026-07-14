@@ -3,6 +3,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 SUPERVISOR="$HERE/../pluto-session.sh"
+PROFILE_FILE="$HERE/../generated/device-profiles.sh"
 TMP=${TMPDIR:-/tmp}/pluto-session-standby-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
@@ -22,8 +23,9 @@ fail() {
 }
 
 grep -Fq \
-  'SUSPEND_COMMAND="${PLUTO_SUSPEND_COMMAND:-systemctl start --wait suspend.target}"' \
-  "$SUPERVISOR" || fail "default suspend command is not blocking through wake"
+  '"suspendCommand": "systemctl start --wait suspend.target"' \
+  "$HERE/../../../config/device_profiles.json" ||
+  fail "generated profile suspend command is not blocking through wake"
 
 mkdir -p \
   "$ROOT/bin" \
@@ -136,6 +138,9 @@ chmod +x "$ROOT/bin/pluto-embedder" "$ROOT/bin/fake-power-watch.sh" \
   "$ROOT/bin/fake-suspend.sh"
 
 PLUTO_ROOT="$ROOT" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=move \
 PLUTO_RUN_DIR="$CTL" \
 PLUTO_POWER_WATCHER="$ROOT/bin/fake-power-watch.sh" \
 PLUTO_UPTIME_FILE="$TMP/uptime" \

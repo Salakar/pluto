@@ -12,6 +12,7 @@ ENGINE="$ENGINE_DIR/libflutter_engine.so"
 ICU_DATA="$ENGINE_DIR/icudtl.dat"
 EMBEDDER="$ROOT/embedder/build/device-arm/pluto-embedder"
 CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-controlctl"
+DEVICE_PROFILES="$ROOT/tools/device/generated/device-profiles.sh"
 CONTROL_CLIENT_EXPLICIT=0
 CODEX_BIN="$ROOT/.pluto-cache/build/codex-armv7/output/codex"
 XOVI_SOURCE="$ROOT/.pluto-cache/xovi/arm32-v19/xovi"
@@ -561,6 +562,7 @@ if ((DRY_RUN == 1)); then
   done
   echo "+ assemble rootfs $OUTPUT"
   echo "+ stage shared runtime $PAYLOAD_RUNTIME for $DEVICE_RUNTIME"
+  echo "+ install generated device profiles $DEVICE_PROFILES"
   echo "+ install Codex CLI $DEVICE_CODEX_BIN"
   if [[ -n "$ARCHIVE" ]]; then
     print_command tar -C "$OUTPUT" -cf "$ARCHIVE" home
@@ -572,6 +574,8 @@ fi
 for tool in cmp file find grep install mktemp mv objdump od strings tar; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
+[[ -s "$DEVICE_PROFILES" ]] ||
+  die "missing generated device profiles: $DEVICE_PROFILES"
 
 # Reuse setup's checksum-manifest parser without requiring a Flutter SDK: this
 # assembler consumes completed layouts and must only authenticate the committed
@@ -648,9 +652,12 @@ RUNTIME_ROOT="$STAGING$PAYLOAD_RUNTIME"
 install -d \
   "$RUNTIME_ROOT/bin" \
   "$RUNTIME_ROOT/engine/release" \
-  "$RUNTIME_ROOT/apps"
+  "$RUNTIME_ROOT/apps" \
+  "$RUNTIME_ROOT/share"
 install -m 0755 "$EMBEDDER" "$RUNTIME_ROOT/bin/pluto-embedder"
 install -m 0755 "$CONTROL_CLIENT" "$RUNTIME_ROOT/bin/pluto-controlctl"
+install -m 0644 "$DEVICE_PROFILES" \
+  "$RUNTIME_ROOT/share/device-profiles.sh"
 install -m 0755 "$CODEX_BIN" "$RUNTIME_ROOT/bin/codex"
 install -m 0644 "$ENGINE" "$RUNTIME_ROOT/engine/release/libflutter_engine.so"
 install -m 0644 "$ICU_DATA" "$RUNTIME_ROOT/engine/release/icudtl.dat"

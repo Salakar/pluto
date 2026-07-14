@@ -272,6 +272,9 @@ RUNTIME="$OUTPUT/home/root/pluto-arm"
 [[ -x "$RUNTIME/bin/pluto-embedder" ]] || fail "shared embedder is absent"
 [[ -x "$RUNTIME/bin/pluto-controlctl" ]] ||
   fail "Pluto control client is absent"
+cmp -s "$ROOT/tools/device/generated/device-profiles.sh" \
+  "$RUNTIME/share/device-profiles.sh" ||
+  fail "generated device profiles were not packaged byte-for-byte"
 [[ -x "$RUNTIME/bin/codex" ]] || fail "real Codex CLI is absent"
 cmp -s "$CODEX_BIN" "$RUNTIME/bin/codex" ||
   fail "packaged Codex CLI differs from its release input"

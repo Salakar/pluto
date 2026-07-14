@@ -3,6 +3,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 SUPERVISOR="$HERE/../pluto-session.sh"
+PROFILE_FILE="$HERE/../generated/device-profiles.sh"
 TMP=${TMPDIR:-/tmp}/pluto-session-debug-authorization-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
@@ -67,8 +68,8 @@ cat > "$TMP/bin/reset-boot-count" <<'RESET_BOOT_COUNT'
 #!/bin/sh
 count=$(cat "$PLUTO_TEST_BOOT_CONFIRM_COUNT" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$PLUTO_TEST_BOOT_CONFIRM_COUNT"
-part=$(cat "$PLUTO_LPGPR_DIR/root_part")
-printf '0\n' > "$PLUTO_LPGPR_DIR/root${part}_errcnt"
+part=$(cat "$PLUTO_PROFILE_RECOVERY_COUNTER_DIR/root_part")
+printf '0\n' > "$PLUTO_PROFILE_RECOVERY_COUNTER_DIR/root${part}_errcnt"
 RESET_BOOT_COUNT
 : > "$TMP/zz-pluto.conf"
 
@@ -111,11 +112,15 @@ chmod +x "$TMP/bin/systemctl" "$TMP/bin/xochitl" \
 
 PATH="$TMP/bin:$PATH" \
 PLUTO_ROOT="$ROOT" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=move \
 PLUTO_RUN_DIR="$CTL" \
 PLUTO_BOOT_DROPIN="$TMP/zz-pluto.conf" \
 PLUTO_STOCK_XOCHITL="$TMP/bin/xochitl" \
-PLUTO_GOOD_ROOT_HELPER="$TMP/bin/reset-boot-count" \
-PLUTO_LPGPR_DIR="$TMP/lpgpr" \
+PLUTO_BOOT_CONFIRM_DISPATCHER="$HERE/../pluto-boot-confirm.sh" \
+PLUTO_TEST_RECOVERY_HELPER="$TMP/bin/reset-boot-count" \
+PLUTO_TEST_RECOVERY_COUNTER_DIR="$TMP/lpgpr" \
 PLUTO_BOOT_CONFIRM_DELAY=0 \
 PLUTO_BOOT_CONFIRM_TIMEOUT=2 \
 PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
@@ -156,6 +161,17 @@ if grep '^dev.example.release ' "$TMP/invocations" | grep -q -- '--auto-rotate';
 fi
 grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- '--bezel-redraw' ||
   fail "launcher did not receive the in-place bezel redraw gesture"
+grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- '--presenter=native' ||
+  fail "launcher did not use the common native presenter"
+grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- \
+  '--touch-device=/dev/input/by-path/platform-44360000.spi-cs-0-event ' ||
+  fail "launcher did not receive the profile-selected touch device"
+grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- \
+  '--pen-device=/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse ' ||
+  fail "launcher did not receive the profile-selected pen device"
+if grep -q -- '--presenter=swtcon' "$TMP/invocations"; then
+  fail "retired Move-specific presenter name is still present"
+fi
 grep '^dev.example.release ' "$TMP/invocations" | grep -q -- '--bezel-redraw' ||
   fail "ordinary apps did not receive the in-place bezel redraw gesture"
 if grep -q -- '--home-tap' "$TMP/invocations"; then
@@ -175,7 +191,8 @@ done
   fail "vendor boot confirmation did not run exactly once"
 [ "$(cat "$TMP/lpgpr/roota_errcnt")" -eq 0 ] ||
   fail "vendor boot confirmation did not reset the selected root counter"
-grep -q '^part=a confirmed_at=' "$ROOT/state/boot-confirmed" ||
+grep -q '^part=a/counter=roota_errcnt confirmed_at=' \
+  "$ROOT/state/boot-confirmed" ||
   fail "verified boot confirmation receipt was not recorded"
 [ "$(cat "$TMP/stock-pid")" -eq "$EXPECTED_STOCK_PID" ] ||
   fail "stock xochitl did not replace the boot-first supervisor process"

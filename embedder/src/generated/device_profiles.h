@@ -4,6 +4,8 @@
 #define PLUTO_GENERATED_DEVICE_PROFILES_H_
 
 #include <array>
+#include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -15,13 +17,71 @@ enum class NativeDisplayDriverKind {
   kLcdifTcon,
   kGallery3Drm,
 };
+enum class GeneratedRecoveryStrategy { kUbootEnv, kLpgprHelper };
 
 struct GeneratedPanelProfile {
   int width;
   int height;
   int dpi;
+  std::string_view signature;
   std::string_view source_pixel_format;
   bool color;
+};
+
+struct GeneratedInputDeviceProfile {
+  std::string_view by_path;
+  std::string_view name;
+};
+
+struct GeneratedDisplayContract {
+  std::uint32_t scanout_width;
+  std::uint32_t scanout_height;
+  std::optional<std::uint32_t> virtual_width;
+  std::optional<std::uint32_t> virtual_height;
+  std::optional<std::uint32_t> stride_bytes;
+  std::uint32_t bits_per_pixel;
+  std::optional<std::uint32_t> rotation;
+  std::optional<std::uint32_t> buffer_slots;
+  std::optional<std::uint32_t> slot_bytes;
+  std::uint32_t damage_alignment_pixels;
+  std::optional<std::uint64_t> phase_interval_nanoseconds;
+};
+
+struct GeneratedRecoveryContract {
+  GeneratedRecoveryStrategy strategy;
+  std::string_view mmc_device;
+  std::optional<std::array<std::uint32_t, 2>> root_partitions;
+  std::optional<std::uint32_t> expected_boot_limit;
+  std::string_view helper_path;
+  std::string_view counter_directory;
+};
+
+struct GeneratedWaveformSourceProfile {
+  std::string_view path;
+  std::string_view sha256;
+  std::string_view panel_signature;
+};
+
+struct GeneratedWaveformProfile {
+  std::span<const std::string_view> discovery_paths;
+  std::span<const GeneratedWaveformSourceProfile> accepted_sources;
+};
+
+struct GeneratedRuntimeProfile {
+  bool native_session_enabled;
+  std::string_view display_device;
+  GeneratedDisplayContract display;
+  GeneratedWaveformProfile waveform;
+  std::string_view presenter_options;
+  GeneratedInputDeviceProfile pen;
+  GeneratedInputDeviceProfile touch;
+  GeneratedInputDeviceProfile power_key;
+  std::string_view frontlight_brightness_path;
+  std::string_view vpdd_timeout_path;
+  std::string_view bezel_redraw_iio_path;
+  std::string_view bezel_redraw_enable_path;
+  GeneratedRecoveryContract recovery;
+  std::string_view suspend_command;
 };
 
 struct GeneratedDeviceProfile {
@@ -33,6 +93,7 @@ struct GeneratedDeviceProfile {
   DeviceTargetSlice target_slice;
   NativeDisplayDriverKind display_driver;
   GeneratedPanelProfile panel;
+  GeneratedRuntimeProfile runtime;
   std::span<const std::string_view> architectures;
   std::span<const std::string_view> board_tokens;
   std::span<const std::string_view> compatible_tokens;
@@ -74,6 +135,18 @@ inline constexpr std::array<std::string_view, 4> kRm1Capabilities = {
     "real-completion",
 };
 
+inline constexpr std::array<std::string_view, 1> kRm1WaveformDiscoveryPaths = {
+    "/lib/firmware/imx/epdc/epdc_ES103CS1.fw",
+};
+
+inline constexpr std::array<GeneratedWaveformSourceProfile, 1> kRm1AcceptedWaveformSources = {{
+    {
+        .path = "/lib/firmware/imx/epdc/epdc_ES103CS1.fw",
+        .sha256 = "185515bebf37d3e9d99ffa1f13a2804bbb2b64464fa6fc5067475fb6f65ff6b0",
+        .panel_signature = "ES103CS1",
+    },
+}};
+
 inline constexpr std::array<std::string_view, 1> kRm2Architectures = {
     "armv7l",
 };
@@ -98,6 +171,19 @@ inline constexpr std::array<std::string_view, 4> kRm2Capabilities = {
     "refresh-control",
     "real-completion",
 };
+
+inline constexpr std::array<std::string_view, 2> kRm2WaveformDiscoveryPaths = {
+    "/var/lib/uboot/320_R405_AFA011_ED103TC2C5_VB3300-KCD_TC.wbf",
+    "/usr/share/remarkable/320_R467_AF4731_ED103TC2C6_VB3300-KCD_TC.wbf",
+};
+
+inline constexpr std::array<GeneratedWaveformSourceProfile, 1> kRm2AcceptedWaveformSources = {{
+    {
+        .path = "/var/lib/uboot/320_R405_AFA011_ED103TC2C5_VB3300-KCD_TC.wbf",
+        .sha256 = "79783d751ba066af12c6ac5aca46279fe7c79d4ef834105bd46824f870f9c6f8",
+        .panel_signature = "ED103TC2C5",
+    },
+}};
 
 inline constexpr std::array<std::string_view, 1> kMoveArchitectures = {
     "aarch64",
@@ -129,6 +215,18 @@ inline constexpr std::array<std::string_view, 9> kMoveCapabilities = {
     "hot-reload",
 };
 
+inline constexpr std::array<std::string_view, 1> kMoveWaveformDiscoveryPaths = {
+    "/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink",
+};
+
+inline constexpr std::array<GeneratedWaveformSourceProfile, 1> kMoveAcceptedWaveformSources = {{
+    {
+        .path = "/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink",
+        .sha256 = "80b8174773effceefbc16b54722cc0afd2187bd9a7c260a71bfbf92baeae8b67",
+        .panel_signature = "AC073MC1F2",
+    },
+}};
+
 inline constexpr std::array<GeneratedDeviceProfile, 3>
     kGeneratedDeviceProfiles = {{
         {
@@ -144,8 +242,63 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .width = 1404,
                     .height = 1872,
                     .dpi = 226,
+                    .signature = "ES103CS1",
                     .source_pixel_format = "rgb565",
                     .color = false,
+                },
+            .runtime =
+                {
+                    .native_session_enabled = false,
+                    .display_device = "/dev/fb0",
+                    .display =
+                        {
+                            .scanout_width = 1404,
+                            .scanout_height = 1872,
+                            .virtual_width = 1408,
+                            .virtual_height = 3840,
+                            .stride_bytes = 2816,
+                            .bits_per_pixel = 16,
+                            .rotation = 1,
+                            .buffer_slots = std::nullopt,
+                            .slot_bytes = std::nullopt,
+                            .damage_alignment_pixels = 1,
+                            .phase_interval_nanoseconds = std::nullopt,
+                        },
+                    .waveform =
+                        {
+                            .discovery_paths = kRm1WaveformDiscoveryPaths,
+                            .accepted_sources = kRm1AcceptedWaveformSources,
+                        },
+                    .presenter_options = "",
+                    .pen =
+                        {
+                            .by_path = "/dev/input/by-path/platform-21a4000.i2c-event-mouse",
+                            .name = "Wacom I2C Digitizer",
+                        },
+                    .touch =
+                        {
+                            .by_path = "/dev/input/by-path/platform-21a8000.i2c-event",
+                            .name = "cyttsp5_mt",
+                        },
+                    .power_key =
+                        {
+                            .by_path = "/dev/input/by-path/platform-gpio-keys-event",
+                            .name = "gpio-keys",
+                        },
+                    .frontlight_brightness_path = "",
+                    .vpdd_timeout_path = "",
+                    .bezel_redraw_iio_path = "",
+                    .bezel_redraw_enable_path = "",
+                    .recovery =
+                        {
+                            .strategy = GeneratedRecoveryStrategy::kUbootEnv,
+                            .mmc_device = "/dev/mmcblk1",
+                            .root_partitions = std::array<std::uint32_t, 2>{2, 3},
+                            .expected_boot_limit = 1,
+                            .helper_path = "",
+                            .counter_directory = "",
+                        },
+                    .suspend_command = "systemctl start --wait suspend.target",
                 },
             .architectures = kRm1Architectures,
             .board_tokens = kRm1BoardTokens,
@@ -166,8 +319,63 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .width = 1404,
                     .height = 1872,
                     .dpi = 226,
+                    .signature = "ED103TC2C5",
                     .source_pixel_format = "rgb565",
                     .color = false,
+                },
+            .runtime =
+                {
+                    .native_session_enabled = false,
+                    .display_device = "/dev/fb0",
+                    .display =
+                        {
+                            .scanout_width = 260,
+                            .scanout_height = 1408,
+                            .virtual_width = 260,
+                            .virtual_height = 23936,
+                            .stride_bytes = 1040,
+                            .bits_per_pixel = 32,
+                            .rotation = 0,
+                            .buffer_slots = 17,
+                            .slot_bytes = 1464320,
+                            .damage_alignment_pixels = 8,
+                            .phase_interval_nanoseconds = 11763000,
+                        },
+                    .waveform =
+                        {
+                            .discovery_paths = kRm2WaveformDiscoveryPaths,
+                            .accepted_sources = kRm2AcceptedWaveformSources,
+                        },
+                    .presenter_options = "",
+                    .pen =
+                        {
+                            .by_path = "/dev/input/by-path/platform-30a20000.i2c-event-mouse",
+                            .name = "Wacom I2C Digitizer",
+                        },
+                    .touch =
+                        {
+                            .by_path = "/dev/input/by-path/platform-30a40000.i2c-event",
+                            .name = "pt_mt",
+                        },
+                    .power_key =
+                        {
+                            .by_path = "/dev/input/by-path/platform-30370000.snvs:snvs-powerkey-event",
+                            .name = "30370000.snvs:snvs-powerkey",
+                        },
+                    .frontlight_brightness_path = "",
+                    .vpdd_timeout_path = "",
+                    .bezel_redraw_iio_path = "",
+                    .bezel_redraw_enable_path = "",
+                    .recovery =
+                        {
+                            .strategy = GeneratedRecoveryStrategy::kUbootEnv,
+                            .mmc_device = "/dev/mmcblk2",
+                            .root_partitions = std::array<std::uint32_t, 2>{2, 3},
+                            .expected_boot_limit = 1,
+                            .helper_path = "",
+                            .counter_directory = "",
+                        },
+                    .suspend_command = "systemctl start --wait suspend.target",
                 },
             .architectures = kRm2Architectures,
             .board_tokens = kRm2BoardTokens,
@@ -188,8 +396,63 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .width = 954,
                     .height = 1696,
                     .dpi = 264,
+                    .signature = "AC073MC1F2",
                     .source_pixel_format = "rgb565",
                     .color = true,
+                },
+            .runtime =
+                {
+                    .native_session_enabled = true,
+                    .display_device = "/dev/dri/card0",
+                    .display =
+                        {
+                            .scanout_width = 365,
+                            .scanout_height = 1700,
+                            .virtual_width = std::nullopt,
+                            .virtual_height = std::nullopt,
+                            .stride_bytes = std::nullopt,
+                            .bits_per_pixel = 16,
+                            .rotation = std::nullopt,
+                            .buffer_slots = 16,
+                            .slot_bytes = 1241000,
+                            .damage_alignment_pixels = 8,
+                            .phase_interval_nanoseconds = 11764706,
+                        },
+                    .waveform =
+                        {
+                            .discovery_paths = kMoveWaveformDiscoveryPaths,
+                            .accepted_sources = kMoveAcceptedWaveformSources,
+                        },
+                    .presenter_options = "exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0",
+                    .pen =
+                        {
+                            .by_path = "/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse",
+                            .name = "Elan marker input",
+                        },
+                    .touch =
+                        {
+                            .by_path = "/dev/input/by-path/platform-44360000.spi-cs-0-event",
+                            .name = "Elan touch input",
+                        },
+                    .power_key =
+                        {
+                            .by_path = "/dev/input/by-path/platform-44440000.bbnsm:pwrkey-event",
+                            .name = "44440000.bbnsm:pwrkey",
+                        },
+                    .frontlight_brightness_path = "/sys/class/backlight/rm_frontlight/brightness",
+                    .vpdd_timeout_path = "/sys/bus/i2c/drivers/g2194-regulator/0-0048/vpdd_timeout_ms",
+                    .bezel_redraw_iio_path = "/dev/iio:device3",
+                    .bezel_redraw_enable_path = "/sys/bus/iio/devices/iio:device3/events/in_accel0_gesture_doubletap_en",
+                    .recovery =
+                        {
+                            .strategy = GeneratedRecoveryStrategy::kLpgprHelper,
+                            .mmc_device = "",
+                            .root_partitions = std::nullopt,
+                            .expected_boot_limit = std::nullopt,
+                            .helper_path = "/usr/sbin/rm-reset-boot-count.sh",
+                            .counter_directory = "/sys/devices/platform/lpgpr",
+                        },
+                    .suspend_command = "systemctl start --wait suspend.target",
                 },
             .architectures = kMoveArchitectures,
             .board_tokens = kMoveBoardTokens,

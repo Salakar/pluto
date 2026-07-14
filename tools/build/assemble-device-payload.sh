@@ -11,6 +11,7 @@ CLI="$ROOT/tools/pluto/bin/pluto.dart"
 PACKAGES="$ROOT/tools/pluto/.dart_tool/package_config.json"
 EMBEDDER=""
 CONTROL_CLIENT="$ROOT/embedder/build/device-arm64/pluto-controlctl"
+DEVICE_PROFILES="$ROOT/tools/device/generated/device-profiles.sh"
 ENGINE_ROOT="$ROOT/third_party/engine/$ENGINE_COMMIT"
 TARGET_PLATFORM=linux-arm64
 TARGET_GLIBC_CEILING=2.39
@@ -21,6 +22,7 @@ SELECTED_APP_COUNT=0
 
 DEVICE_SCRIPTS=(
   pluto-session.sh
+  pluto-boot-confirm.sh
   pluto-power-key-watch.sh
   pluto-boot-install.sh
   pluto-app-control.sh
@@ -286,6 +288,8 @@ if ((DRY_RUN == 0)); then
     die "missing device embedder; run melos run build:embedder:device"
   [[ -s "$CONTROL_CLIENT" ]] ||
     die "missing device control client; run melos run build:embedder:device"
+  [[ -s "$DEVICE_PROFILES" ]] ||
+    die "missing generated device profiles: $DEVICE_PROFILES"
 fi
 
 # Setup verification is the authoritative pin/checksum gate for both committed
@@ -308,10 +312,13 @@ PAYLOAD_DIRECTORIES=(
   "$PAYLOAD/engine/release"
   "$PAYLOAD/engine/profile"
   "$PAYLOAD/apps"
+  "$PAYLOAD/share"
 )
 run install -d "${PAYLOAD_DIRECTORIES[@]}"
 run install -m 0755 "$EMBEDDER" "$PAYLOAD/pluto-embedder"
 run install -m 0755 "$CONTROL_CLIENT" "$PAYLOAD/bin/pluto-controlctl"
+run install -m 0644 "$DEVICE_PROFILES" \
+  "$PAYLOAD/share/device-profiles.sh"
 run install -m 0644 "$RELEASE_ENGINE" \
   "$PAYLOAD/engine/release/libflutter_engine.so"
 run install -m 0644 "$PROFILE_ENGINE" \

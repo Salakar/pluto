@@ -103,6 +103,10 @@ assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/apps/dev.pluto.examples.
 assert_contains "$PAYLOAD_DRY_RUN" "engine/release/libflutter_engine.so"
 assert_contains "$PAYLOAD_DRY_RUN" "engine/profile/libflutter_engine.so"
 assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/bin/pluto-controlctl"
+assert_contains "$PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/share/device-profiles.sh"
+assert_contains "$PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/pluto-boot-confirm.sh"
 [[ "$PAYLOAD_DRY_RUN" != *"apps/codex"* ]] || fail "Codex was selected implicitly"
 [[ "$PAYLOAD_DRY_RUN" != *"kernel_blob.bin"* ]] || fail "dry run copied a JIT kernel"
 EXPECTED_NEXT="Direct-backend handoff: pluto provision --payload-dir $ROOT/build/pluto-payload"

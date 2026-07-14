@@ -85,10 +85,22 @@ cat > "$BIN/pkill" <<'SH'
 #!/bin/sh
 exit 0
 SH
-chmod +x "$BIN/systemctl" "$BIN/pkill"
+cat > "$BIN/fw_printenv" <<'SH'
+#!/bin/sh
+[ "$1" = -n ] && [ "$#" -eq 2 ] || exit 64
+case "$2" in
+  active_partition) printf '2\n' ;;
+  fallback_partition) printf '3\n' ;;
+  bootlimit) printf '1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$BIN/systemctl" "$BIN/pkill" "$BIN/fw_printenv"
 printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-embedder"
 printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-session.sh"
-chmod +x "$ROOT/bin/pluto-embedder" "$ROOT/bin/pluto-session.sh"
+printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-boot-confirm.sh"
+chmod +x "$ROOT/bin/pluto-embedder" "$ROOT/bin/pluto-session.sh" \
+  "$ROOT/bin/pluto-boot-confirm.sh"
 : > "$ROOT/engine/release/libflutter_engine.so"
 : > "$ROOT/launcher/bundle/lib/app.so"
 cat > "$ROOT/launcher/install.json" <<'JSON'
@@ -113,6 +125,30 @@ expect_rejected "profile launcher"
 rm -f "$ROOT/launcher/install.json"
 PLUTO_ROOT="$ROOT" sh "$INSTALLER" validate >/dev/null ||
   fail "legacy release AOT payload without an install record was rejected"
+
+# Without the fixture peer override, the installer derives the inactive root
+# solely from the generated U-Boot recovery boundary. The host fixture cannot
+# manufacture a block device, so it must fail before writing the live root and
+# report the exact RM1 fallback partition it selected.
+printf 'console=tty root=/dev/mmcblk1p2 rootwait\n' > "$TMP/cmdline"
+if env \
+    PATH="$BIN:$PATH" \
+    PLUTO_ROOT="$ROOT" \
+    PLUTO_SYSTEM_ROOT="$LIVE" \
+    PLUTO_SYSTEMCTL="$BIN/systemctl" \
+    PLUTO_PROFILE_FILE="$HERE/../generated/device-profiles.sh" \
+    PLUTO_TESTING=1 \
+    PLUTO_TEST_PROFILE_ID=rm1 \
+    PLUTO_FW_PRINTENV="$BIN/fw_printenv" \
+    PLUTO_CMDLINE_FILE="$TMP/cmdline" \
+      sh "$INSTALLER" install > "$TMP/uboot-peer.out" 2>&1; then
+  fail "non-block U-Boot peer partition was accepted"
+fi
+grep -q 'peer slot /dev/mmcblk1p3 is not a block device' \
+  "$TMP/uboot-peer.out" ||
+  fail "RM1 U-Boot fallback partition was not selected from its profile"
+[ ! -e "$LIVE/usr/lib/systemd/system/xochitl.service.d/zz-pluto.conf" ] ||
+  fail "failed U-Boot peer validation mutated the live boot root"
 
 boot_env() {
   env \

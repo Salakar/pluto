@@ -22,6 +22,9 @@ WANTS_DIR="$UNIT_DIR/multi-user.target.wants"
 STATE="$ROOT/state"
 SYSTEMCTL="${PLUTO_SYSTEMCTL:-systemctl}"
 PEER_ROOT_OVERRIDE="${PLUTO_PEER_ROOT:-}"
+PROFILE_FILE="${PLUTO_PROFILE_FILE:-$ROOT/share/device-profiles.sh}"
+FW_PRINTENV="${PLUTO_FW_PRINTENV:-/usr/sbin/fw_printenv}"
+CMDLINE_FILE="${PLUTO_CMDLINE_FILE:-/proc/cmdline}"
 
 log() { printf '[pluto-boot %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -39,6 +42,8 @@ rootfs_ro() {
 require_payload() {
   [ -x "$ROOT/bin/pluto-embedder" ] || die "missing $ROOT/bin/pluto-embedder"
   [ -x "$ROOT/bin/pluto-session.sh" ] || die "missing $ROOT/bin/pluto-session.sh"
+  [ -x "$ROOT/bin/pluto-boot-confirm.sh" ] ||
+    die "missing $ROOT/bin/pluto-boot-confirm.sh"
   [ -d "$ROOT/launcher/bundle" ] || die "missing launcher bundle at $ROOT/launcher/bundle"
   [ -f "$ROOT/launcher/bundle/lib/app.so" ] || \
     [ -f "$ROOT/launcher/bundle/app.so" ] || \
@@ -114,22 +119,69 @@ remove_legacy_base_etc() {
       "$BW/pluto.service" "$BW/pluto-fallback.service"'
 }
 
-# ---- A/B slot awareness (device-verified 2026-07-09) --------------------
-# The rootfs is one of two OTA A/B slots (root_a=/dev/…p2, root_b=/dev/…p3).
-# The supervisor waits for a successful release-UI present and a stable-start
-# delay before invoking the firmware-owned rm-reset-boot-count.sh helper. The
-# peer slot is deliberately kept stock: if the selected root cannot confirm
-# three boots, U-Boot still has a known-good rescue UI instead of repeating the
-# same Pluto failure on both roots.
+# ---- Profile-selected A/B slot awareness --------------------------------
+# Move exposes root_a/root_b labels and confirms through its LPGPR helper.
+# RM1/RM2 expose the same rescue concept through typed MMC partition numbers
+# and U-Boot active/fallback variables. This is the only hardware branch in the
+# common boot installer.
+load_recovery_profile() {
+  [ -n "${PLUTO_PROFILE_RECOVERY_STRATEGY:-}" ] && return 0
+  [ -r "$PROFILE_FILE" ] || {
+    log "generated device profile is missing: $PROFILE_FILE"
+    return 1
+  }
+  # shellcheck source=generated/device-profiles.sh
+  . "$PROFILE_FILE"
+  if [ -n "${PLUTO_TEST_PROFILE_ID:-}" ]; then
+    [ "${PLUTO_TESTING:-0}" = 1 ] &&
+      pluto_profile_load "$PLUTO_TEST_PROFILE_ID" || return 1
+  else
+    pluto_profile_probe || return 1
+  fi
+}
+
+boot_env_value() {
+  [ -x "$FW_PRINTENV" ] || return 1
+  value="$("$FW_PRINTENV" -n "$1" 2>/dev/null)" || return 1
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$value"
+}
+
 peer_root_dev() {  # echoes the inactive slot's block device, or empty
-  ra="$(readlink -f /dev/disk/by-partlabel/root_a 2>/dev/null)"
-  rb="$(readlink -f /dev/disk/by-partlabel/root_b 2>/dev/null)"
-  [ -n "$ra" ] && [ -n "$rb" ] || return 0
-  cur="$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)"
-  case "$cur" in
-    "$ra") echo "$rb" ;;
-    "$rb") echo "$ra" ;;
-    *) return 0 ;;  # Unknown current root: refuse to guess which slot is safe.
+  load_recovery_profile || return 0
+  case "$PLUTO_PROFILE_RECOVERY_STRATEGY" in
+    lpgpr_helper)
+      ra="$(readlink -f /dev/disk/by-partlabel/root_a 2>/dev/null)"
+      rb="$(readlink -f /dev/disk/by-partlabel/root_b 2>/dev/null)"
+      [ -n "$ra" ] && [ -n "$rb" ] || return 0
+      cur="$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "$CMDLINE_FILE" 2>/dev/null)"
+      case "$cur" in
+        "$ra") echo "$rb" ;;
+        "$rb") echo "$ra" ;;
+      esac
+      ;;
+    uboot_env)
+      active="$(boot_env_value active_partition)" || return 0
+      fallback="$(boot_env_value fallback_partition)" || return 0
+      bootlimit="$(boot_env_value bootlimit)" || return 0
+      [ "$bootlimit" = "$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT" ] || return 0
+      case ",${PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS}," in
+        *",$active,"*) ;;
+        *) return 0 ;;
+      esac
+      case ",${PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS}," in
+        *",$fallback,"*) ;;
+        *) return 0 ;;
+      esac
+      [ "$active" != "$fallback" ] || return 0
+      cur="$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' "$CMDLINE_FILE" 2>/dev/null)"
+      [ "$cur" = "${PLUTO_PROFILE_RECOVERY_MMC_DEVICE}p${active}" ] ||
+        return 0
+      printf '%s\n' "${PLUTO_PROFILE_RECOVERY_MMC_DEVICE}p${fallback}"
+      ;;
+    *) return 0 ;;
   esac
 }
 

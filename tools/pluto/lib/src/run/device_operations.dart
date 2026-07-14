@@ -1525,6 +1525,7 @@ final class LiveDeviceOperations {
             'bin/pluto-embedder',
             'bin/pluto-controlctl',
             'bin/codex',
+            'share/device-profiles.sh',
             'engine/release/libflutter_engine.so',
             'engine/release/icudtl.dat',
           }.contains(file.remoteRelative),

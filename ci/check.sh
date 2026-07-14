@@ -45,6 +45,8 @@ bash tools/device/test/pluto-session-power-menu_test.sh
 bash tools/device/test/pluto-boot-hook_test.sh
 bash tools/device/test/pluto-boot-install_test.sh
 sh tools/device/test/device-profiles_test.sh
+sh tools/device/test/pluto-boot-confirm_test.sh
+sh tools/device/test/pluto-session-profile_test.sh
 dart format --set-exit-if-changed packages apps tools/pluto tools/codegen
 melos run analyze
 melos run test

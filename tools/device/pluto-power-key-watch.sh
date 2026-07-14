@@ -1,5 +1,6 @@
 #!/bin/sh
-# Watches the Paper Pro Move power-key evdev node for one complete press.
+# Watches the generated profile's stable power-key evdev node for one complete
+# press.
 # A release before the hold threshold atomically requests standby and snapshots
 # the frontlight. A continuous hold through the threshold requests the full-screen
 # power menu instead. Both paths ask the exact current embedder to hibernate. The
@@ -7,11 +8,12 @@
 # so the wake press cannot recursively request standby again.
 set -u
 
-POWER_DEVICE="${PLUTO_POWER_KEY_DEVICE:-/dev/input/by-path/platform-44440000.bbnsm:pwrkey-event}"
 RUN_DIR="${PLUTO_RUN_DIR:-/run/pluto}"
 EVTEST="${PLUTO_EVTEST:-/usr/bin/evtest}"
-BACKLIGHT_BRIGHTNESS="${PLUTO_BACKLIGHT_BRIGHTNESS:-/sys/class/backlight/rm_frontlight/brightness}"
 HOLD_SECONDS="${PLUTO_POWER_MENU_HOLD_SECONDS:-2}"
+PROFILE_FILE="${PLUTO_PROFILE_FILE:-${PLUTO_ROOT:-/home/root/pluto}/share/device-profiles.sh}"
+POWER_DEVICE="${PLUTO_POWER_KEY_DEVICE:-${PLUTO_PROFILE_POWER_KEY_DEVICE:-}}"
+BACKLIGHT_BRIGHTNESS="${PLUTO_BACKLIGHT_BRIGHTNESS:-${PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS:-}}"
 TARGET_PID=""
 APP_ID=""
 
@@ -40,6 +42,38 @@ esac
 case "$HOLD_SECONDS" in
   ''|*[!0-9.]*|.*|*.*.*|*.) usage ;;
 esac
+if [ -z "${PLUTO_PROFILE_ID:-}" ]; then
+  [ -r "$PROFILE_FILE" ] || {
+    echo "pluto-power-key-watch: generated profile is missing: $PROFILE_FILE" >&2
+    exit 78
+  }
+  # shellcheck source=generated/device-profiles.sh
+  . "$PROFILE_FILE"
+  if [ -n "${PLUTO_TEST_PROFILE_ID:-}" ]; then
+    [ "${PLUTO_TESTING:-0}" = 1 ] &&
+      pluto_profile_load "$PLUTO_TEST_PROFILE_ID" || {
+        echo "pluto-power-key-watch: invalid test profile" >&2
+        exit 78
+      }
+  elif ! pluto_profile_probe; then
+    echo "pluto-power-key-watch: immutable device profile mismatch" >&2
+    exit 78
+  fi
+  [ -n "$POWER_DEVICE" ] ||
+    POWER_DEVICE="$PLUTO_PROFILE_POWER_KEY_DEVICE"
+  [ -n "$BACKLIGHT_BRIGHTNESS" ] ||
+    BACKLIGHT_BRIGHTNESS="$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS"
+fi
+case "${PLUTO_PROFILE_ID:-}" in
+  ''|*[!a-z0-9_]*)
+    echo "pluto-power-key-watch: invalid or missing profile identity" >&2
+    exit 78
+    ;;
+esac
+[ -n "$POWER_DEVICE" ] || {
+  echo "pluto-power-key-watch: profile has no power-key device" >&2
+  exit 78
+}
 [ -r "$POWER_DEVICE" ] || {
   echo "pluto-power-key-watch: cannot read $POWER_DEVICE" >&2
   exit 66
@@ -122,15 +156,17 @@ while kill -0 "$TARGET_PID" 2>/dev/null && IFS= read -r event_line; do
       # Transition only after the key is physically up. This prevents the
       # initiating press from immediately waking `mem`; value-2 long-press
       # repeats never match either branch.
-      light_raw=$(cat "$BACKLIGHT_BRIGHTNESS" 2>/dev/null || true)
-      case "$light_raw" in
-        ''|*[!0-9]*)
-          echo "pluto-power-key-watch: cannot snapshot frontlight" >&2
-          exit 75
-          ;;
-      esac
-      printf '%s\n' "$light_raw" > "$LIGHT_TMP" || exit 73
-      mv -f "$LIGHT_TMP" "$RUN_DIR/standby-frontlight" || exit 73
+      if [ -n "$BACKLIGHT_BRIGHTNESS" ]; then
+        light_raw=$(cat "$BACKLIGHT_BRIGHTNESS" 2>/dev/null || true)
+        case "$light_raw" in
+          ''|*[!0-9]*)
+            echo "pluto-power-key-watch: cannot snapshot frontlight" >&2
+            exit 75
+            ;;
+        esac
+        printf '%s\n' "$light_raw" > "$LIGHT_TMP" || exit 73
+        mv -f "$LIGHT_TMP" "$RUN_DIR/standby-frontlight" || exit 73
+      fi
       printf 'power-button\n' > "$MARKER_TMP" || exit 73
       mv -f "$MARKER_TMP" "$RUN_DIR/standby" || exit 73
       # SIGUSR1 is handled synchronously through the embedder event loop: it

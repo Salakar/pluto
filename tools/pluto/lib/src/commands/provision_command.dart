@@ -32,6 +32,7 @@ final class ProvisionCommand extends PlutoCommand {
         help:
             'Directory with the runtime payload (pluto-embedder, '
             'bin/pluto-controlctl, bin/codex, COOPERATIVE-PAYLOAD.json, '
+            'share/device-profiles.sh, '
             'engine/{release,profile}/libflutter_engine.so, '
             'apps/<id>/{build-metadata.json,manifest.json,bundle/}). '
             'Defaults to '
@@ -75,6 +76,7 @@ final class ProvisionCommand extends PlutoCommand {
   /// Device scripts used by the direct-display backend.
   static const List<String> deviceScripts = <String>[
     'pluto-session.sh',
+    'pluto-boot-confirm.sh',
     'pluto-power-key-watch.sh',
     'pluto-boot-install.sh',
     'pluto-app-control.sh',
@@ -221,6 +223,13 @@ final class ProvisionCommand extends PlutoCommand {
       }
 
       final List<PayloadFile> runtime = <PayloadFile>[
+        PayloadFile(
+          localPath: selectPayloadFile(<String>[
+            '$payloadDir/share/device-profiles.sh',
+            '$repoRoot/tools/device/generated/device-profiles.sh',
+          ]),
+          remoteRelative: 'share/device-profiles.sh',
+        ),
         if (!cooperativePayload) ...<PayloadFile>[
           for (final String s in deviceScripts)
             PayloadFile(

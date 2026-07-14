@@ -1,7 +1,7 @@
 #!/bin/sh
 # Pluto session supervisor (device-side). No Dart runtime on device, so this
-# native supervisor is the "plutod" that owns the single /dev/dri/card0 handoff
-# between the launcher and app embedders.
+# native supervisor is the "plutod" that owns the profile-selected display
+# handoff between the launcher and app embedders.
 #
 # App registry:  $ROOT/apps/<app-id>/{manifest.json, bundle/}
 # Flavor engines: $ROOT/engine/{release,profile,debug}/libflutter_engine.so;
@@ -48,48 +48,219 @@ RESUME_WAIT_TICKS="${PLUTO_RESUME_WAIT_TICKS:-120}"
 # previous bounded wait. Do not let the wider hibernate transaction envelope
 # make those control paths slower.
 FOREGROUND_EXIT_WAIT_TICKS="${PLUTO_FOREGROUND_EXIT_WAIT_TICKS:-120}"
-# Current Move firmware's OEM counter-reset path. The supervisor calls it only
-# after presenter readiness and the stable-start window, then verifies sysfs.
-GOOD_ROOT_HELPER="${PLUTO_GOOD_ROOT_HELPER:-/usr/sbin/rm-reset-boot-count.sh}"
-LPGPR_DIR="${PLUTO_LPGPR_DIR:-/sys/devices/platform/lpgpr}"
 BOOT_CONFIRM_DELAY="${PLUTO_BOOT_CONFIRM_DELAY:-30}"
 BOOT_CONFIRM_TIMEOUT="${PLUTO_BOOT_CONFIRM_TIMEOUT:-20}"
 POWER_WATCHER="${PLUTO_POWER_WATCHER:-$ROOT/bin/pluto-power-key-watch.sh}"
 UPTIME_FILE="${PLUTO_UPTIME_FILE:-/proc/uptime}"
-BACKLIGHT_BRIGHTNESS="${PLUTO_BACKLIGHT_BRIGHTNESS:-/sys/class/backlight/rm_frontlight/brightness}"
-VPDD_TIMEOUT_FILE="${PLUTO_VPDD_TIMEOUT_FILE:-/sys/bus/i2c/drivers/g2194-regulator/0-0048/vpdd_timeout_ms}"
 VPDD_IDLE_ATTEMPTS="${PLUTO_VPDD_IDLE_ATTEMPTS:-20}"
 VPDD_IDLE_INTERVAL="${PLUTO_VPDD_IDLE_INTERVAL:-0.1}"
 # `systemctl suspend` is intentionally asynchronous and returns as soon as the
 # job is queued. Starting the same target with --wait instead gives us the
 # post-resume receipt required before restoring light or launching an embedder.
-SUSPEND_COMMAND="${PLUTO_SUSPEND_COMMAND:-systemctl start --wait suspend.target}"
 SUSPEND_QUIESCE_DELAY="${PLUTO_SUSPEND_QUIESCE_DELAY:-0.5}"
 POWER_OFF_COMMAND="${PLUTO_POWER_OFF_COMMAND:-systemctl poweroff}"
 # Optional boot-default app (written by `pluto install --set-default`).
 # Falls back to the launcher when unset or when the app cannot start.
 DEFAULT_APP_FILE="$ROOT/state/default-app"
-
+PROFILE_FILE="${PLUTO_PROFILE_FILE:-$ROOT/share/device-profiles.sh}"
+BOOT_CONFIRM_DISPATCHER="${PLUTO_BOOT_CONFIRM_DISPATCHER:-$ROOT/bin/pluto-boot-confirm.sh}"
+BACKLIGHT_BRIGHTNESS="${PLUTO_BACKLIGHT_BRIGHTNESS:-}"
+VPDD_TIMEOUT_FILE="${PLUTO_VPDD_TIMEOUT_FILE:-}"
+SUSPEND_COMMAND="${PLUTO_SUSPEND_COMMAND:-}"
 WAVEFORM="${PLUTO_WAVEFORM:-}"
-DEFAULT_WAVEFORM="/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink"
-if [ -z "$WAVEFORM" ] && [ -r "$DEFAULT_WAVEFORM" ]; then
-  WAVEFORM="$DEFAULT_WAVEFORM"
-fi
-if [ -z "$WAVEFORM" ]; then
-  for candidate in /usr/share/remarkable/*.eink; do
-    if [ -r "$candidate" ]; then
-      WAVEFORM="$candidate"
-      break
-    fi
-  done
-fi
-DEFAULT_PRESENTER_OPTS="exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0"
-if [ -n "$WAVEFORM" ]; then
-  DEFAULT_PRESENTER_OPTS="$DEFAULT_PRESENTER_OPTS,eink=$WAVEFORM"
-fi
-PRESENTER_OPTS="${PLUTO_PRESENTER_OPTS:-$DEFAULT_PRESENTER_OPTS}"
+WAVEFORM_SHA256=""
+WAVEFORM_PANEL_SIGNATURE=""
+PRESENTER_OPTS="${PLUTO_PRESENTER_OPTS:-}"
+PEN_DEVICE="${PLUTO_PEN_DEVICE:-}"
+TOUCH_DEVICE="${PLUTO_TOUCH_DEVICE:-}"
+POWER_KEY_DEVICE="${PLUTO_POWER_KEY_DEVICE:-}"
+DISPLAY_DEVICE="${PLUTO_DISPLAY_DEVICE:-}"
+BEZEL_REDRAW_IIO="${PLUTO_BEZEL_REDRAW_IIO:-}"
+BEZEL_REDRAW_ENABLE="${PLUTO_BEZEL_REDRAW_ENABLE:-}"
+PROFILE_CONFIGURED=0
 
 log() { printf '[pluto-session %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+profile_input_name() {
+  resolved="$(readlink -f "$1" 2>/dev/null || true)"
+  [ -n "$resolved" ] || return 1
+  event_node="${resolved##*/}"
+  cat "/sys/class/input/$event_node/device/name" 2>/dev/null
+}
+
+validate_profile_input() {
+  role="$1"
+  path="$2"
+  expected_name="$3"
+  if [ ! -r "$path" ]; then
+    log "profile rejected: $role input is not readable at $path"
+    return 1
+  fi
+  actual_name="$(profile_input_name "$path" || true)"
+  if [ "$actual_name" != "$expected_name" ]; then
+    log "profile rejected: $role input '$actual_name' != '$expected_name' at $path"
+    return 1
+  fi
+}
+
+select_profile_waveform() {
+  if ! command -v pluto_profile_waveform_sources >/dev/null 2>&1; then
+    log "profile rejected: generated waveform source selector is missing"
+    return 78
+  fi
+  waveform_sources="$(pluto_profile_waveform_sources)" || {
+    log "profile rejected: no waveform contract for $PLUTO_PROFILE_ID"
+    return 78
+  }
+  [ -n "$waveform_sources" ] || {
+    log "profile rejected: accepted waveform set is empty"
+    return 78
+  }
+  if [ "${PLUTO_TESTING:-0}" != 1 ] &&
+     ! command -v sha256sum >/dev/null 2>&1; then
+    log "profile rejected: sha256sum is required to verify waveform identity"
+    return 78
+  fi
+
+  requested_waveform="$WAVEFORM"
+  waveform_selected=0
+  while IFS='|' read -r candidate_path candidate_sha candidate_panel; do
+    [ -n "$candidate_path" ] || continue
+    [ "$candidate_panel" = "$PLUTO_PROFILE_PANEL_SIGNATURE" ] || continue
+    if [ -n "$requested_waveform" ] &&
+       [ "$candidate_path" != "$requested_waveform" ]; then
+      continue
+    fi
+    if [ "${PLUTO_TESTING:-0}" != 1 ]; then
+      [ -r "$candidate_path" ] || continue
+      candidate_actual_sha="$(sha256sum "$candidate_path" 2>/dev/null || true)"
+      candidate_actual_sha="${candidate_actual_sha%% *}"
+      [ "$candidate_actual_sha" = "$candidate_sha" ] || continue
+    fi
+    WAVEFORM="$candidate_path"
+    WAVEFORM_SHA256="$candidate_sha"
+    WAVEFORM_PANEL_SIGNATURE="$candidate_panel"
+    waveform_selected=1
+    break
+  done <<EOF
+$waveform_sources
+EOF
+  if [ "$waveform_selected" -ne 1 ]; then
+    if [ -n "$requested_waveform" ]; then
+      log "profile rejected: requested waveform is not an accepted source: $requested_waveform"
+    else
+      log "profile rejected: no readable waveform matched the accepted path, digest, and panel binding"
+    fi
+    return 78
+  fi
+  PLUTO_PROFILE_SELECTED_WAVEFORM_PATH="$WAVEFORM"
+  PLUTO_PROFILE_SELECTED_WAVEFORM_SHA256="$WAVEFORM_SHA256"
+  PLUTO_PROFILE_SELECTED_WAVEFORM_PANEL="$WAVEFORM_PANEL_SIGNATURE"
+  export PLUTO_PROFILE_SELECTED_WAVEFORM_PATH
+  export PLUTO_PROFILE_SELECTED_WAVEFORM_SHA256
+  export PLUTO_PROFILE_SELECTED_WAVEFORM_PANEL
+}
+
+configure_profile() {
+  if [ "$PROFILE_CONFIGURED" -eq 1 ]; then
+    return 0
+  fi
+  if [ ! -r "$PROFILE_FILE" ]; then
+    log "profile rejected: generated profile fragment is missing: $PROFILE_FILE"
+    return 78
+  fi
+  # shellcheck source=generated/device-profiles.sh
+  . "$PROFILE_FILE"
+  if [ -n "${PLUTO_TEST_PROFILE_ID:-}" ]; then
+    if [ "${PLUTO_TESTING:-0}" != 1 ]; then
+      log "profile rejected: test identity override outside test mode"
+      return 78
+    fi
+    if ! pluto_profile_load "$PLUTO_TEST_PROFILE_ID"; then
+      log "profile rejected: unknown test profile '$PLUTO_TEST_PROFILE_ID'"
+      return 78
+    fi
+  elif ! pluto_profile_probe; then
+    log "profile rejected: immutable machine/model/compatible/architecture did not match exactly one supported device"
+    return 78
+  fi
+  if [ -n "${PLUTO_EXPECTED_PROFILE_ID:-}" ] &&
+     [ "$PLUTO_PROFILE_ID" != "$PLUTO_EXPECTED_PROFILE_ID" ]; then
+    log "profile rejected: detected '$PLUTO_PROFILE_ID', expected '$PLUTO_EXPECTED_PROFILE_ID'"
+    return 78
+  fi
+  if [ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" != 1 ]; then
+    log "profile rejected: native session for '$PLUTO_PROFILE_ID' has not passed its device acceptance gate"
+    return 78
+  fi
+
+  if [ "${PLUTO_TESTING:-0}" = 1 ]; then
+    [ -z "${PLUTO_TEST_RECOVERY_HELPER:-}" ] ||
+      PLUTO_PROFILE_RECOVERY_HELPER="$PLUTO_TEST_RECOVERY_HELPER"
+    [ -z "${PLUTO_TEST_RECOVERY_COUNTER_DIR:-}" ] ||
+      PLUTO_PROFILE_RECOVERY_COUNTER_DIR="$PLUTO_TEST_RECOVERY_COUNTER_DIR"
+    export PLUTO_PROFILE_RECOVERY_HELPER
+    export PLUTO_PROFILE_RECOVERY_COUNTER_DIR
+  fi
+  [ -n "$BACKLIGHT_BRIGHTNESS" ] ||
+    BACKLIGHT_BRIGHTNESS="$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS"
+  [ -n "$VPDD_TIMEOUT_FILE" ] ||
+    VPDD_TIMEOUT_FILE="$PLUTO_PROFILE_VPDD_TIMEOUT"
+  [ -n "$SUSPEND_COMMAND" ] ||
+    SUSPEND_COMMAND="$PLUTO_PROFILE_SUSPEND_COMMAND"
+  [ -n "$PRESENTER_OPTS" ] ||
+    PRESENTER_OPTS="$PLUTO_PROFILE_PRESENTER_OPTIONS"
+  [ -n "$PEN_DEVICE" ] || PEN_DEVICE="$PLUTO_PROFILE_PEN_DEVICE"
+  [ -n "$TOUCH_DEVICE" ] || TOUCH_DEVICE="$PLUTO_PROFILE_TOUCH_DEVICE"
+  [ -n "$POWER_KEY_DEVICE" ] ||
+    POWER_KEY_DEVICE="$PLUTO_PROFILE_POWER_KEY_DEVICE"
+  [ -n "$DISPLAY_DEVICE" ] ||
+    DISPLAY_DEVICE="$PLUTO_PROFILE_DISPLAY_DEVICE"
+  [ -n "$BEZEL_REDRAW_IIO" ] ||
+    BEZEL_REDRAW_IIO="$PLUTO_PROFILE_BEZEL_REDRAW_IIO"
+  [ -n "$BEZEL_REDRAW_ENABLE" ] ||
+    BEZEL_REDRAW_ENABLE="$PLUTO_PROFILE_BEZEL_REDRAW_ENABLE"
+  select_profile_waveform || return $?
+
+  if [ "${PLUTO_TESTING:-0}" != 1 ]; then
+    [ -e "$DISPLAY_DEVICE" ] || {
+      log "profile rejected: display device is missing: $DISPLAY_DEVICE"
+      return 78
+    }
+    validate_profile_input pen "$PEN_DEVICE" \
+      "$PLUTO_PROFILE_PEN_NAME" || return 78
+    validate_profile_input touch "$TOUCH_DEVICE" \
+      "$PLUTO_PROFILE_TOUCH_NAME" || return 78
+    validate_profile_input power-key "$POWER_KEY_DEVICE" \
+      "$PLUTO_PROFILE_POWER_KEY_NAME" || return 78
+    if [ -n "$BACKLIGHT_BRIGHTNESS" ] &&
+       [ ! -r "$BACKLIGHT_BRIGHTNESS" ]; then
+      log "profile rejected: frontlight path is unreadable: $BACKLIGHT_BRIGHTNESS"
+      return 78
+    fi
+    if [ -n "$VPDD_TIMEOUT_FILE" ] && [ ! -r "$VPDD_TIMEOUT_FILE" ]; then
+      log "profile rejected: regulator idle path is unreadable: $VPDD_TIMEOUT_FILE"
+      return 78
+    fi
+    [ -x "$BOOT_CONFIRM_DISPATCHER" ] || {
+      log "profile rejected: boot confirmation dispatcher is missing: $BOOT_CONFIRM_DISPATCHER"
+      return 78
+    }
+  fi
+  if [ -n "$WAVEFORM" ]; then
+    PRESENTER_OPTS="$PRESENTER_OPTS,eink=$WAVEFORM"
+  fi
+  export PLUTO_PROFILE_ID PLUTO_PROFILE_WIRE_MODEL PLUTO_PROFILE_CODENAME
+  export PLUTO_PROFILE_TARGET PLUTO_PROFILE_DISPLAY_DRIVER
+  export PLUTO_PROFILE_PANEL_WIDTH PLUTO_PROFILE_PANEL_HEIGHT
+  export PLUTO_PROFILE_PANEL_DPI PLUTO_PROFILE_CAPABILITIES
+  export PLUTO_POWER_KEY_DEVICE="$POWER_KEY_DEVICE"
+  export PLUTO_BACKLIGHT_BRIGHTNESS="$BACKLIGHT_BRIGHTNESS"
+  export PLUTO_BEZEL_REDRAW_IIO="$BEZEL_REDRAW_IIO"
+  export PLUTO_BEZEL_REDRAW_ENABLE="$BEZEL_REDRAW_ENABLE"
+  PROFILE_CONFIGURED=1
+  log "profile accepted: $PLUTO_PROFILE_ID driver=$PLUTO_PROFILE_DISPLAY_DRIVER target=$PLUTO_PROFILE_TARGET"
+}
 
 confirm_boot_after_ready() {
   case "$BOOT_CONFIRM_DELAY:$BOOT_CONFIRM_TIMEOUT" in
@@ -102,31 +273,24 @@ confirm_boot_after_ready() {
   waited=0
   while [ "$waited" -le "$BOOT_CONFIRM_TIMEOUT" ]; do
     if [ -f "$READY_FILE" ]; then
-      if [ ! -x "$GOOD_ROOT_HELPER" ]; then
-        log "boot confirmation unavailable: missing $GOOD_ROOT_HELPER"
+      if [ ! -x "$BOOT_CONFIRM_DISPATCHER" ]; then
+        log "boot confirmation unavailable: missing $BOOT_CONFIRM_DISPATCHER"
         return 69
       fi
-      if ! "$GOOD_ROOT_HELPER"; then
-        log "boot confirmation helper failed: $GOOD_ROOT_HELPER"
+      recovery_receipt="$("$BOOT_CONFIRM_DISPATCHER")" || {
+        log "boot confirmation strategy failed: $PLUTO_PROFILE_RECOVERY_STRATEGY"
         return 70
-      fi
-      part="$(cat "$LPGPR_DIR/root_part" 2>/dev/null || true)"
-      case "$part" in
-        a|b) ;;
-        *)
-          log "boot confirmation failed: invalid root part '$part'"
+      }
+      case "$recovery_receipt" in
+        ''|*[!A-Za-z0-9_=/.-]*)
+          log "boot confirmation failed: unsafe recovery receipt"
           return 71
           ;;
       esac
-      remaining="$(cat "$LPGPR_DIR/root${part}_errcnt" 2>/dev/null || true)"
-      if [ "$remaining" != 0 ]; then
-        log "boot confirmation failed: root${part}_errcnt=$remaining"
-        return 72
-      fi
       mkdir -p "$STATE"
-      printf 'part=%s confirmed_at=%s\n' "$part" \
+      printf '%s confirmed_at=%s\n' "$recovery_receipt" \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE/boot-confirmed"
-      log "release UI presented; vendor boot confirmation verified for root $part"
+      log "release UI presented; boot recovery confirmed: $recovery_receipt"
       return 0
     fi
     [ "$waited" -lt "$BOOT_CONFIRM_TIMEOUT" ] || break
@@ -144,6 +308,11 @@ uptime_seconds() {
 restore_standby_frontlight() {
   light_file="$CTL/standby-frontlight"
   [ -f "$light_file" ] || return 0
+  if [ -z "$BACKLIGHT_BRIGHTNESS" ]; then
+    rm -f "$light_file"
+    log "discarded frontlight snapshot on a profile without frontlight"
+    return 0
+  fi
   light_raw="$(cat "$light_file" 2>/dev/null || true)"
   case "$light_raw" in
     ''|*[!0-9]*)
@@ -164,6 +333,10 @@ restore_standby_frontlight() {
 }
 
 wait_for_vpdd_idle() {
+  if [ -z "$VPDD_TIMEOUT_FILE" ]; then
+    log "profile requires no supervisor regulator-idle fence"
+    return 0
+  fi
   case "$VPDD_IDLE_ATTEMPTS" in
     ''|*[!0-9]*|0)
       log "suspend withheld: invalid VPDD idle attempts '$VPDD_IDLE_ATTEMPTS'"
@@ -203,10 +376,12 @@ suspend_after_standby_exit() {
   # The standby child has already painted and exited. Assert darkness again,
   # then leave the saved raw value untouched until the firmware suspend target
   # returns after wake (or reports a failure).
-  if ! printf '0\n' 2>/dev/null > "$BACKLIGHT_BRIGHTNESS"; then
-    log "suspend withheld: could not keep frontlight at zero"
-    restore_standby_frontlight || true
-    return 74
+  if [ -n "$BACKLIGHT_BRIGHTNESS" ]; then
+    if ! printf '0\n' 2>/dev/null > "$BACKLIGHT_BRIGHTNESS"; then
+      log "suspend withheld: could not keep frontlight at zero"
+      restore_standby_frontlight || true
+      return 74
+    fi
   fi
   if ! wait_for_vpdd_idle; then
     restore_standby_frontlight || true
@@ -354,10 +529,10 @@ launch_app() {
     --bundle="$dir/bundle" \
     --engine="$engine" \
     --icu-data="$dir/bundle/icudtl.dat" \
-    --presenter=swtcon \
+    --presenter=native \
     --presenter-options="$PRESENTER_OPTS" \
-    --touch \
-    --pen \
+    --touch-device="$TOUCH_DEVICE" \
+    --pen-device="$PEN_DEVICE" \
     --rotation="$ROTATION_DEG" \
     --allowed-rotations="$ALLOWED_ROTATIONS" \
     --run-dir="$CTL" \
@@ -368,7 +543,8 @@ launch_app() {
   # One persistent foreground worker consumes the hardware double-tap event;
   # it redraws in place and never relaunches, so launcher and apps can both use
   # it without the old stale-event Home loop. Standby deliberately stays dark.
-  if [ "$standby_launch" -eq 0 ]; then
+  if [ "$standby_launch" -eq 0 ] && [ -n "$BEZEL_REDRAW_IIO" ] &&
+     [ -n "$BEZEL_REDRAW_ENABLE" ]; then
     set -- "$@" --bezel-redraw
   fi
   if [ -n "$aot_elf" ]; then
@@ -436,7 +612,8 @@ start_power_watcher() {
   [ "$1" -eq 0 ] || return 0
   if [ -x "$POWER_WATCHER" ]; then
     PLUTO_RUN_DIR="$CTL" "$POWER_WATCHER" \
-      --pid="$2" --app-id="$3" --run-dir="$CTL" \
+      --pid="$2" --app-id="$3" --device="$POWER_KEY_DEVICE" \
+      --run-dir="$CTL" \
       >>"$ROOT/logs/current.log" 2>&1 &
     WATCHER_PID=$!
   else
@@ -719,6 +896,7 @@ restore_stock() {
 }
 
 start() {
+  configure_profile || return $?
   mkdir -p "$CTL" "$WARM_DIR" "$HIBERNATED_DIR" "$CTL/previews" \
     "$ROOT/logs"
   case "$MAX_WARM_APPS:$HIBERNATE_WAIT_TICKS:$RESUME_WAIT_TICKS:$FOREGROUND_EXIT_WAIT_TICKS" in
@@ -753,7 +931,11 @@ start() {
     # We ARE xochitl.service (boot-first override): no stock xochitl to stop.
     log "boot-first: this supervisor is xochitl.service; taking the panel"
     pkill -x xochitl 2>/dev/null || true
-    confirm_boot_after_ready &
+    if [ -x "$BOOT_CONFIRM_DISPATCHER" ]; then
+      confirm_boot_after_ready &
+    else
+      log "boot confirmation dispatcher is unavailable"
+    fi
   else
     log "stopping xochitl to take over the panel"
     systemctl reset-failed xochitl.service 2>/dev/null || true

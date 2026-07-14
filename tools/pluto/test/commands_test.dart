@@ -1391,6 +1391,7 @@ void _writeProvisionRuntime(
 }) {
   for (final String script in <String>[
     'pluto-session.sh',
+    'pluto-boot-confirm.sh',
     'pluto-power-key-watch.sh',
     'pluto-boot-install.sh',
     'pluto-app-control.sh',
@@ -1405,6 +1406,9 @@ void _writeProvisionRuntime(
   File('$payload/bin/pluto-controlctl')
     ..createSync(recursive: true)
     ..writeAsBytesSync(<int>[8]);
+  File('$payload/share/device-profiles.sh')
+    ..createSync(recursive: true)
+    ..writeAsStringSync('# generated device profiles\n');
   final String releasePath = legacyRelease
       ? '$payload/libflutter_engine.so'
       : '$payload/engine/release/libflutter_engine.so';
@@ -1426,6 +1430,9 @@ void _writeCooperativeProvisionRuntime(String payload) {
     ..createSync(recursive: true)
     ..writeAsBytesSync(<int>[6]);
   File('$payload/bin/pluto-controlctl').writeAsBytesSync(<int>[8]);
+  File('$payload/share/device-profiles.sh')
+    ..createSync(recursive: true)
+    ..writeAsStringSync('# generated device profiles\n');
   final Uint8List codex = _testCodexBinary();
   File('$payload/bin/codex').writeAsBytesSync(codex);
   File('$payload/engine/release/libflutter_engine.so')
