@@ -122,6 +122,7 @@ final class _DisplayContract {
       virtualWidth = _optionalPositiveInteger(json, 'virtualWidth'),
       virtualHeight = _optionalPositiveInteger(json, 'virtualHeight'),
       strideBytes = _optionalPositiveInteger(json, 'strideBytes'),
+      mappingBytes = _optionalPositiveInteger(json, 'mappingBytes'),
       bitsPerPixel = _integer(json, 'bitsPerPixel'),
       rotation = _optionalNonnegativeInteger(json, 'rotation'),
       bufferSlots = _optionalPositiveInteger(json, 'bufferSlots'),
@@ -137,6 +138,7 @@ final class _DisplayContract {
   final int? virtualWidth;
   final int? virtualHeight;
   final int? strideBytes;
+  final int? mappingBytes;
   final int bitsPerPixel;
   final int? rotation;
   final int? bufferSlots;
@@ -523,6 +525,7 @@ void _validateDisplayContract(_Profile profile) {
 
   final int bytesPerPixel = display.bitsPerPixel ~/ 8;
   final int tightRowBytes = display.scanoutWidth * bytesPerPixel;
+  int? virtualFootprintBytes;
   if (display.virtualWidth != null) {
     if (display.virtualWidth! < display.scanoutWidth ||
         display.virtualHeight! < display.scanoutHeight) {
@@ -532,6 +535,7 @@ void _validateDisplayContract(_Profile profile) {
     if (display.strideBytes == null || display.strideBytes! < minimumStride) {
       _fail('${profile.id} framebuffer stride does not cover virtual width');
     }
+    virtualFootprintBytes = display.strideBytes! * display.virtualHeight!;
   } else if (display.strideBytes != null) {
     _fail('${profile.id} stride requires virtual framebuffer dimensions');
   }
@@ -552,24 +556,36 @@ void _validateDisplayContract(_Profile profile) {
     case 'mxcfb_epdc':
       if (display.virtualWidth == null ||
           display.strideBytes == null ||
+          display.mappingBytes == null ||
           display.rotation == null ||
           display.bufferSlots != null ||
           display.phaseIntervalNanoseconds != null) {
         _fail('${profile.id} MXCFB display contract has incompatible fields');
       }
+      if (display.mappingBytes! < virtualFootprintBytes!) {
+        _fail('${profile.id} MXCFB mapping does not cover virtual framebuffer');
+      }
+      if (display.mappingBytes != virtualFootprintBytes) {
+        _fail('${profile.id} MXCFB mapping is not the exact framebuffer size');
+      }
       break;
     case 'lcdif_tcon':
       if (display.virtualWidth == null ||
           display.strideBytes == null ||
+          display.mappingBytes == null ||
           display.rotation == null ||
           display.bufferSlots == null ||
           display.phaseIntervalNanoseconds == null) {
         _fail('${profile.id} LCDIF display contract is incomplete');
       }
+      if (display.mappingBytes! < virtualFootprintBytes!) {
+        _fail('${profile.id} LCDIF mapping does not cover virtual framebuffer');
+      }
       break;
     case 'gallery3_drm':
       if (display.virtualWidth != null ||
           display.strideBytes != null ||
+          display.mappingBytes != null ||
           display.rotation != null ||
           display.bufferSlots == null ||
           display.phaseIntervalNanoseconds == null) {
@@ -675,6 +691,7 @@ String _cpp(List<_Profile> profiles) {
     ..writeln('  std::optional<std::uint32_t> virtual_width;')
     ..writeln('  std::optional<std::uint32_t> virtual_height;')
     ..writeln('  std::optional<std::uint32_t> stride_bytes;')
+    ..writeln('  std::optional<std::uint64_t> mapping_bytes;')
     ..writeln('  std::uint32_t bits_per_pixel;')
     ..writeln('  std::optional<std::uint32_t> rotation;')
     ..writeln('  std::optional<std::uint32_t> buffer_slots;')
@@ -832,6 +849,9 @@ String _cpp(List<_Profile> profiles) {
       )
       ..writeln(
         '                            .stride_bytes = ${_cppOptionalInt(profile.runtime.display.strideBytes)},',
+      )
+      ..writeln(
+        '                            .mapping_bytes = ${_cppOptionalInt(profile.runtime.display.mappingBytes)},',
       )
       ..writeln(
         '                            .bits_per_pixel = ${profile.runtime.display.bitsPerPixel},',
@@ -1122,6 +1142,9 @@ String _dart(List<_Profile> profiles) {
         '            strideBytes: ${_dartNullableInt(profile.runtime.display.strideBytes)},',
       )
       ..writeln(
+        '            mappingBytes: ${_dartNullableInt(profile.runtime.display.mappingBytes)},',
+      )
+      ..writeln(
         '            bitsPerPixel: ${profile.runtime.display.bitsPerPixel},',
       )
       ..writeln(
@@ -1347,6 +1370,9 @@ String _shell(List<_Profile> profiles) {
         "      PLUTO_PROFILE_STRIDE_BYTES=${_shellOptionalInt(profile.runtime.display.strideBytes)}",
       )
       ..writeln(
+        "      PLUTO_PROFILE_MAPPING_BYTES=${_shellOptionalInt(profile.runtime.display.mappingBytes)}",
+      )
+      ..writeln(
         '      PLUTO_PROFILE_BITS_PER_PIXEL=${profile.runtime.display.bitsPerPixel}',
       )
       ..writeln(
@@ -1454,6 +1480,7 @@ String _shell(List<_Profile> profiles) {
     ..writeln(
       '  export PLUTO_PROFILE_STRIDE_BYTES PLUTO_PROFILE_BITS_PER_PIXEL',
     )
+    ..writeln('  export PLUTO_PROFILE_MAPPING_BYTES')
     ..writeln('  export PLUTO_PROFILE_FRAMEBUFFER_ROTATION')
     ..writeln('  export PLUTO_PROFILE_BUFFER_SLOTS PLUTO_PROFILE_SLOT_BYTES')
     ..writeln('  export PLUTO_PROFILE_DAMAGE_ALIGNMENT')
@@ -1593,6 +1620,7 @@ String _displaySummary(_DisplayContract display) {
     if (display.virtualWidth != null)
       'virtual ${display.virtualWidth} × ${display.virtualHeight}',
     if (display.strideBytes != null) 'stride ${display.strideBytes} B',
+    if (display.mappingBytes != null) 'mapping ${display.mappingBytes} B',
     if (display.bufferSlots != null) '${display.bufferSlots} slots',
     'align ${display.damageAlignmentPixels} px',
   ];

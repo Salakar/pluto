@@ -98,6 +98,7 @@ final class DisplayContract {
     required this.virtualWidth,
     required this.virtualHeight,
     required this.strideBytes,
+    required this.mappingBytes,
     required this.bitsPerPixel,
     required this.rotation,
     required this.bufferSlots,
@@ -120,6 +121,9 @@ final class DisplayContract {
 
   /// Exact fbdev line stride, absent when DRM chooses a validated pitch.
   final int? strideBytes;
+
+  /// Exact fbdev mapping length observed from the kernel, absent for DRM.
+  final int? mappingBytes;
 
   /// Storage bits per scanout pixel or packed scanout word.
   final int bitsPerPixel;

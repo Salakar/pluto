@@ -21,7 +21,8 @@ export PATH="$PLUTO_SDK/bin:$PLUTO_SDK/bin/cache/dart-sdk/bin:$PATH"
 export PATH="${PUB_CACHE:-$HOME/.pub-cache}/bin:$PATH"
 
 bash tools/setup/test/setup_test.sh
-dart analyze --fatal-infos tools/codegen/generate_device_profiles.dart
+dart analyze --fatal-infos tools/codegen
+dart tools/codegen/generate_device_profiles_test.dart
 dart tools/codegen/generate_device_profiles.dart --check
 bash -n tools/setup/camera/capture.sh
 python3 -m unittest discover -s tools/setup/camera/test -p 'test_*.py'

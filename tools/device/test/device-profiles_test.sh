@@ -52,6 +52,8 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
     1408:3840 ] || fail "rm1 virtual framebuffer geometry drifted"
 [ "$PLUTO_PROFILE_STRIDE_BYTES:$PLUTO_PROFILE_BITS_PER_PIXEL:$PLUTO_PROFILE_FRAMEBUFFER_ROTATION" = \
     2816:16:1 ] || fail "rm1 framebuffer layout drifted"
+[ "$PLUTO_PROFILE_MAPPING_BYTES" = 10813440 ] ||
+  fail "rm1 framebuffer mapping length drifted"
 [ -z "$PLUTO_PROFILE_BUFFER_SLOTS$PLUTO_PROFILE_PHASE_INTERVAL_NS" ] ||
   fail "rm1 incorrectly gained userspace phase scanout fields"
 [ "$PLUTO_PROFILE_PEN_DEVICE" = \
@@ -82,6 +84,8 @@ pluto_profile_load rm2 || fail "could not load rm2 runtime profile"
     260:23936 ] || fail "rm2 virtual framebuffer geometry drifted"
 [ "$PLUTO_PROFILE_STRIDE_BYTES:$PLUTO_PROFILE_BITS_PER_PIXEL:$PLUTO_PROFILE_FRAMEBUFFER_ROTATION" = \
     1040:32:0 ] || fail "rm2 framebuffer layout drifted"
+[ "$PLUTO_PROFILE_MAPPING_BYTES" = 33554432 ] ||
+  fail "rm2 framebuffer mapping length drifted"
 [ "$PLUTO_PROFILE_BUFFER_SLOTS:$PLUTO_PROFILE_SLOT_BYTES" = \
     17:1464320 ] || fail "rm2 scanout ring geometry drifted"
 [ "$PLUTO_PROFILE_DAMAGE_ALIGNMENT:$PLUTO_PROFILE_PHASE_INTERVAL_NS" = \
@@ -119,6 +123,8 @@ pluto_profile_load move || fail "could not load Move runtime profile"
     365:1700:16 ] || fail "Move DRM scanout geometry drifted"
 [ -z "$PLUTO_PROFILE_VIRTUAL_WIDTH$PLUTO_PROFILE_VIRTUAL_HEIGHT$PLUTO_PROFILE_STRIDE_BYTES$PLUTO_PROFILE_FRAMEBUFFER_ROTATION" ] ||
   fail "Move incorrectly gained fixed fbdev layout fields"
+[ -z "$PLUTO_PROFILE_MAPPING_BYTES" ] ||
+  fail "Move incorrectly gained an fbdev mapping length"
 [ "$PLUTO_PROFILE_BUFFER_SLOTS:$PLUTO_PROFILE_SLOT_BYTES" = \
     16:1241000 ] || fail "Move DRM buffer-ring geometry drifted"
 [ "$PLUTO_PROFILE_DAMAGE_ALIGNMENT:$PLUTO_PROFILE_PHASE_INTERVAL_NS" = \

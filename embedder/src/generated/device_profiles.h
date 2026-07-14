@@ -46,6 +46,7 @@ struct GeneratedDisplayContract {
   std::optional<std::uint32_t> virtual_width;
   std::optional<std::uint32_t> virtual_height;
   std::optional<std::uint32_t> stride_bytes;
+  std::optional<std::uint64_t> mapping_bytes;
   std::uint32_t bits_per_pixel;
   std::optional<std::uint32_t> rotation;
   std::optional<std::uint32_t> buffer_slots;
@@ -266,6 +267,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                             .virtual_width = 1408,
                             .virtual_height = 3840,
                             .stride_bytes = 2816,
+                            .mapping_bytes = 10813440,
                             .bits_per_pixel = 16,
                             .rotation = 1,
                             .buffer_slots = std::nullopt,
@@ -345,6 +347,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                             .virtual_width = 260,
                             .virtual_height = 23936,
                             .stride_bytes = 1040,
+                            .mapping_bytes = 33554432,
                             .bits_per_pixel = 32,
                             .rotation = 0,
                             .buffer_slots = 17,
@@ -424,6 +427,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                             .virtual_width = std::nullopt,
                             .virtual_height = std::nullopt,
                             .stride_bytes = std::nullopt,
+                            .mapping_bytes = std::nullopt,
                             .bits_per_pixel = 16,
                             .rotation = std::nullopt,
                             .buffer_slots = 16,
