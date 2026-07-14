@@ -175,7 +175,6 @@ final class PlutodServer {
     required this.device,
     this.uninstaller,
     this.plutoVersion = '0.1.0',
-    this.backendMode = 'qtfb-cooperative',
   });
 
   /// Installed-app registry.
@@ -189,9 +188,6 @@ final class PlutodServer {
 
   /// Platform version reported in status.
   final String plutoVersion;
-
-  /// Display backend mode reported in status.
-  final String backendMode;
 
   final Map<String, PlutodRunningApp> _running = <String, PlutodRunningApp>{};
   String _foreground = 'launcher';
@@ -375,7 +371,6 @@ final class PlutodServer {
   Map<String, Object?> _status() => <String, Object?>{
     'v': 1,
     'ok': true,
-    'backendMode': backendMode,
     'plutoVersion': plutoVersion,
     'foreground': _foreground,
     'running': <Map<String, Object?>>[
@@ -592,7 +587,6 @@ final class PlutodListApp {
 final class PlutodStatus {
   /// Creates a status value.
   const PlutodStatus({
-    required this.backendMode,
     required this.plutoVersion,
     required this.foreground,
     required this.running,
@@ -608,7 +602,6 @@ final class PlutodStatus {
       );
     }
     return PlutodStatus(
-      backendMode: _requiredString(json, 'backendMode'),
       plutoVersion: _requiredString(json, 'plutoVersion'),
       foreground: _requiredString(json, 'foreground'),
       running: <PlutodRunningApp>[
@@ -616,9 +609,6 @@ final class PlutodStatus {
       ],
     );
   }
-
-  /// Backend mode.
-  final String backendMode;
 
   /// Pluto version.
   final String plutoVersion;

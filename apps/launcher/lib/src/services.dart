@@ -258,7 +258,6 @@ final class PlutodSessionManager implements SessionManager {
       throw const FormatException('Missing session info.');
     }
     return SessionInfo(
-      backendMode: _backendMode(map['backendMode']),
       plutoVersion: _string(map, 'plutoVersion'),
       engineVersion: _string(map, 'engineVersion'),
       flutterVersion: _string(map, 'flutterVersion'),
@@ -509,15 +508,6 @@ final class PlutoDeviceRepository implements LauncherDeviceRepository {
 
   @override
   Future<DeviceInfo> deviceInfo() => _device.deviceInfo();
-}
-
-LauncherBackendMode _backendMode(Object? value) {
-  return switch (value) {
-    'qtfbCooperative' => LauncherBackendMode.qtfbCooperative,
-    'ownSwtcon' => LauncherBackendMode.ownSwtcon,
-    'hostPreview' => LauncherBackendMode.hostPreview,
-    _ => LauncherBackendMode.hostPreview,
-  };
 }
 
 String _string(Map<String, Object?> map, String key) {

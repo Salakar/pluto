@@ -125,32 +125,16 @@ final class LauncherApp {
   }
 }
 
-/// Session backend mode reported by `plutod`.
-enum LauncherBackendMode {
-  /// qtfb/AppLoad cooperative backend.
-  qtfbCooperative,
-
-  /// Own-display SWTCON fallback backend.
-  ownSwtcon,
-
-  /// Host preview backend.
-  hostPreview,
-}
-
 /// Session information shown in Settings and About.
 final class SessionInfo {
   /// Creates session information.
   const SessionInfo({
-    required this.backendMode,
     required this.plutoVersion,
     required this.engineVersion,
     required this.flutterVersion,
     required this.dartVersion,
     required this.returnInstructions,
   });
-
-  /// Active display/session backend.
-  final LauncherBackendMode backendMode;
 
   /// Pluto platform version.
   final String plutoVersion;

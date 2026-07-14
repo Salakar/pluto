@@ -592,15 +592,15 @@ TEST(ServiceChannels, SuspendNowRequiresReadableVpddLength) {
   EXPECT_EQ(harness.shutdown_requests, 0);
 }
 
-TEST(ServiceChannels, InfoReportsBackendFromPresenter) {
+TEST(ServiceChannels, InfoReportsPresenterWithoutProductBackendMode) {
   ServiceHarness harness;
   const auto [status, value] = harness.invoke("pluto/session", "info");
 
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* backend = map_value(value, "backendMode");
-  ASSERT_NE(backend, nullptr);
-  ASSERT_NE(backend->string(), nullptr);
-  EXPECT_EQ(*backend->string(), "ownSwtcon");
+  const pluto::StandardValue* presenter = map_value(value, "presenter");
+  ASSERT_NE(presenter, nullptr);
+  ASSERT_NE(presenter->string(), nullptr);
+  EXPECT_EQ(*presenter->string(), "native");
 }
 
 TEST(ServiceChannels, FrontlightGetReadsSysfs) {

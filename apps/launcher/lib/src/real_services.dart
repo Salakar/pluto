@@ -212,11 +212,6 @@ final class ChannelSessionManager implements SessionManager {
   Future<SessionInfo> info() async {
     final Map<String, Object?> map = await _invokeMap('info');
     return SessionInfo(
-      backendMode: switch (map['backendMode']) {
-        'ownSwtcon' => LauncherBackendMode.ownSwtcon,
-        'qtfbCooperative' => LauncherBackendMode.qtfbCooperative,
-        _ => LauncherBackendMode.hostPreview,
-      },
       plutoVersion: _stringOr(map, 'plutoVersion', 'unknown'),
       engineVersion: _stringOr(map, 'engineVersion', _engineCommitPin),
       flutterVersion: _stringOr(map, 'flutterVersion', _flutterVersionPin),

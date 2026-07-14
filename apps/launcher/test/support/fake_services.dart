@@ -115,7 +115,6 @@ final class FakeSessionManager implements SessionManager {
   }) : _info = info ?? _defaultSessionInfo;
 
   static const SessionInfo _defaultSessionInfo = SessionInfo(
-    backendMode: LauncherBackendMode.hostPreview,
     plutoVersion: '0.1.0-host',
     engineVersion: 'a10d8ac38de835021c8d2f920dbf50a920ccc030',
     flutterVersion: '3.44.4',
