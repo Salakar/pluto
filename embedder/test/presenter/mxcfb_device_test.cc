@@ -36,6 +36,8 @@ public:
     fixed.smem_len = kRm1MappingBytes;
     fixed.type = uapi::kFramebufferTypePackedPixels;
     fixed.visual = uapi::kFramebufferVisualTrueColor;
+    fixed.xpanstep = 1;
+    fixed.ypanstep = 1;
     fixed.line_length = kRm1Stride;
 
     variable.xres = kRm1Width;
@@ -75,6 +77,17 @@ public:
     }
     if (request == uapi::kGetVariableScreenInfo) {
       std::memcpy(argument, &variable, sizeof(variable));
+      return 0;
+    }
+    if (request == uapi::kPutVariableScreenInfo) {
+      variable = *static_cast<uapi::FramebufferVariableInfoArm32 *>(argument);
+      ++put_count;
+      if (change_variable_contract_after_put) {
+        ++variable.pixclock;
+      }
+      if (change_fixed_contract_after_put) {
+        ++fixed.capabilities;
+      }
       return 0;
     }
     if (request == uapi::kSendUpdate) {
@@ -141,6 +154,8 @@ public:
   int mmap_error = 0;
   bool wait_collision = false;
   bool return_different_marker = false;
+  bool change_variable_contract_after_put = false;
+  bool change_fixed_contract_after_put = false;
 
   std::string open_path;
   int open_flags = 0;
@@ -157,6 +172,7 @@ public:
   int mmap_fd = -1;
   off_t mmap_offset = -1;
   int mmap_count = 0;
+  int put_count = 0;
   void *munmap_address = nullptr;
   std::size_t munmap_length = 0;
   int munmap_count = 0;
@@ -178,6 +194,11 @@ uapi::UpdateData valid_update(std::uint32_t marker = 73) {
   };
 }
 
+void open_and_initialize(MxcfbDevice *device) {
+  ASSERT_EQ(device->open(rm1_profile()), kPlutoStatusOk);
+  ASSERT_EQ(device->initialize(), kPlutoStatusOk);
+}
+
 } // namespace
 
 TEST(MxcfbUapi, PinsArm32StructureAndIoctlNumbers) {
@@ -185,20 +206,33 @@ TEST(MxcfbUapi, PinsArm32StructureAndIoctlNumbers) {
   EXPECT_EQ(sizeof(uapi::FramebufferVariableInfoArm32), 160U);
   EXPECT_EQ(sizeof(uapi::UpdateData), 72U);
   EXPECT_EQ(sizeof(uapi::UpdateMarkerData), 8U);
+  EXPECT_EQ(uapi::kPutVariableScreenInfo, 0x4601UL);
   EXPECT_EQ(uapi::kSendUpdate, 0x4048462eUL);
   EXPECT_EQ(uapi::kWaitForUpdateComplete, 0xc008462fUL);
 }
 
-TEST(MxcfbDevice, OpensValidatesAndMapsTheWholeFramebufferCloexec) {
+TEST(MxcfbDevice, ProbeThenInitializeMatchesTheStockModeAndMapOrder) {
   FakeMxcfbSyscalls fake;
   MxcfbDevice device(&fake);
 
   ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
   EXPECT_TRUE(device.is_open());
+  EXPECT_FALSE(device.is_initialized());
+  EXPECT_EQ(fake.put_count, 0);
   EXPECT_EQ(fake.open_path, "/dev/fb0");
   EXPECT_NE(fake.open_flags & O_CLOEXEC, 0);
   EXPECT_NE(fake.open_flags & O_RDWR, 0);
   EXPECT_EQ(fake.last_ioctl_fd, FakeMxcfbSyscalls::framebuffer_fd);
+  EXPECT_EQ(fake.mmap_count, 0);
+  EXPECT_TRUE(device.framebuffer().empty());
+  EXPECT_EQ(device.framebuffer_info().width, kRm1Width);
+  EXPECT_EQ(device.framebuffer_info().height, kRm1Height);
+  EXPECT_EQ(device.framebuffer_info().virtual_width, kRm1VirtualWidth);
+  EXPECT_EQ(device.framebuffer_info().virtual_height, kRm1VirtualHeight);
+  EXPECT_EQ(device.framebuffer_info().stride_bytes, kRm1Stride);
+  EXPECT_EQ(device.initialize(), kPlutoStatusOk);
+  EXPECT_TRUE(device.is_initialized());
+  EXPECT_EQ(fake.put_count, 1);
   EXPECT_EQ(fake.mmap_length, kRm1MappingBytes);
   EXPECT_NE(fake.mmap_protection & PROT_READ, 0);
   EXPECT_NE(fake.mmap_protection & PROT_WRITE, 0);
@@ -206,11 +240,56 @@ TEST(MxcfbDevice, OpensValidatesAndMapsTheWholeFramebufferCloexec) {
   EXPECT_EQ(fake.mmap_offset, 0);
   EXPECT_EQ(device.framebuffer().data(), fake.mapped_storage.data());
   EXPECT_EQ(device.framebuffer().size(), kRm1MappingBytes);
-  EXPECT_EQ(device.framebuffer_info().width, kRm1Width);
-  EXPECT_EQ(device.framebuffer_info().height, kRm1Height);
-  EXPECT_EQ(device.framebuffer_info().virtual_width, kRm1VirtualWidth);
-  EXPECT_EQ(device.framebuffer_info().virtual_height, kRm1VirtualHeight);
-  EXPECT_EQ(device.framebuffer_info().stride_bytes, kRm1Stride);
+  ASSERT_GE(fake.calls.size(), 7U);
+  EXPECT_EQ(fake.calls[0], "open");
+  EXPECT_EQ(fake.calls[1], "ioctl");
+  EXPECT_EQ(fake.calls[2], "ioctl");
+  EXPECT_EQ(fake.calls[3], "ioctl");
+  EXPECT_EQ(fake.calls[4], "ioctl");
+  EXPECT_EQ(fake.calls[5], "ioctl");
+  EXPECT_EQ(fake.calls[6], "mmap");
+  EXPECT_EQ(device.initialize(), kPlutoStatusInvalidArgument);
+}
+
+TEST(MxcfbDevice, FailsClosedWhenModeInitializationChangesVariableTiming) {
+  FakeMxcfbSyscalls fake;
+  MxcfbDevice device(&fake);
+  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  fake.change_variable_contract_after_put = true;
+
+  EXPECT_EQ(device.initialize(), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.put_count, 1);
+  EXPECT_EQ(fake.munmap_count, 0);
+  EXPECT_EQ(fake.close_count, 1);
+  EXPECT_FALSE(device.is_open());
+  EXPECT_FALSE(device.is_initialized());
+}
+
+TEST(MxcfbDevice, FailsClosedWhenModeInitializationChangesFixedCapabilities) {
+  FakeMxcfbSyscalls fake;
+  MxcfbDevice device(&fake);
+  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  fake.change_fixed_contract_after_put = true;
+
+  EXPECT_EQ(device.initialize(), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.put_count, 1);
+  EXPECT_EQ(fake.munmap_count, 0);
+  EXPECT_EQ(fake.close_count, 1);
+  EXPECT_FALSE(device.is_open());
+  EXPECT_FALSE(device.is_initialized());
+}
+
+TEST(MxcfbDevice, FailsClosedWhenKernelRejectsPinnedModeInitialization) {
+  FakeMxcfbSyscalls fake;
+  MxcfbDevice device(&fake);
+  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  fake.failing_request = uapi::kPutVariableScreenInfo;
+  fake.ioctl_error = EINVAL;
+
+  EXPECT_EQ(device.initialize(), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.munmap_count, 0);
+  EXPECT_EQ(fake.close_count, 1);
+  EXPECT_FALSE(device.is_open());
 }
 
 TEST(MxcfbDevice, RejectsAProfileForAnotherDisplayDriverBeforeOpen) {
@@ -228,6 +307,17 @@ TEST(MxcfbDevice, RejectsIncompleteGeneratedDisplayContractBeforeOpen) {
   FakeMxcfbSyscalls fake;
   pluto::GeneratedDeviceProfile incomplete = rm1_profile();
   incomplete.runtime.display.virtual_width = std::nullopt;
+  MxcfbDevice device(&fake);
+
+  EXPECT_EQ(device.open(incomplete), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.open_count, 0);
+  EXPECT_FALSE(device.is_open());
+}
+
+TEST(MxcfbDevice, RejectsMissingExactMappingContractBeforeOpen) {
+  FakeMxcfbSyscalls fake;
+  pluto::GeneratedDeviceProfile incomplete = rm1_profile();
+  incomplete.runtime.display.mapping_bytes = std::nullopt;
   MxcfbDevice device(&fake);
 
   EXPECT_EQ(device.open(incomplete), kPlutoStatusUnsupported);
@@ -313,7 +403,8 @@ TEST(MxcfbDevice, ClosesDescriptorWhenFramebufferMappingFails) {
   fake.mmap_error = ENOMEM;
   MxcfbDevice device(&fake);
 
-  EXPECT_EQ(device.open(rm1_profile()), kPlutoStatusInternal);
+  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  EXPECT_EQ(device.initialize(), kPlutoStatusInternal);
   EXPECT_EQ(fake.close_count, 1);
   EXPECT_EQ(fake.munmap_count, 0);
   EXPECT_FALSE(device.is_open());
@@ -346,7 +437,7 @@ TEST(MxcfbDevice, SendsUpdateAndWaitsForTheSameRealMarker) {
   FakeMxcfbSyscalls fake;
   fake.wait_collision = true;
   MxcfbDevice device(&fake);
-  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  open_and_initialize(&device);
   uapi::UpdateData update = valid_update(991);
 
   EXPECT_EQ(device.send_update(&update), kPlutoStatusOk);
@@ -367,7 +458,7 @@ TEST(MxcfbDevice, SendsUpdateAndWaitsForTheSameRealMarker) {
 TEST(MxcfbDevice, MapsKernelMarkerTimeoutAndClearsCollisionOutput) {
   FakeMxcfbSyscalls fake;
   MxcfbDevice device(&fake);
-  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  open_and_initialize(&device);
   fake.failing_request = uapi::kWaitForUpdateComplete;
   fake.ioctl_error = ETIMEDOUT;
   bool collision = true;
@@ -381,7 +472,7 @@ TEST(MxcfbDevice, MapsKernelMarkerTimeoutAndClearsCollisionOutput) {
 TEST(MxcfbDevice, MapsSendBackpressureAndWaitDeviceLoss) {
   FakeMxcfbSyscalls fake;
   MxcfbDevice device(&fake);
-  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  open_and_initialize(&device);
   uapi::UpdateData update = valid_update();
   fake.failing_request = uapi::kSendUpdate;
   fake.ioctl_error = EBUSY;
@@ -397,7 +488,7 @@ TEST(MxcfbDevice, MapsSendBackpressureAndWaitDeviceLoss) {
 TEST(MxcfbDevice, RejectsInvalidUpdateBeforeCallingKernel) {
   FakeMxcfbSyscalls fake;
   MxcfbDevice device(&fake);
-  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  open_and_initialize(&device);
   uapi::UpdateData update = valid_update();
   update.update_region.left = kRm1Width - 5;
   update.update_region.width = 10;
@@ -412,7 +503,7 @@ TEST(MxcfbDevice, RejectsCompletionForADifferentMarker) {
   FakeMxcfbSyscalls fake;
   fake.return_different_marker = true;
   MxcfbDevice device(&fake);
-  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  open_and_initialize(&device);
 
   EXPECT_EQ(device.wait_for_update_complete(7, nullptr),
             kPlutoStatusDeviceLost);
@@ -422,7 +513,7 @@ TEST(MxcfbDevice, DestructorUnmapsBeforeClosing) {
   FakeMxcfbSyscalls fake;
   {
     MxcfbDevice device(&fake);
-    ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+    open_and_initialize(&device);
   }
 
   EXPECT_EQ(fake.munmap_count, 1);

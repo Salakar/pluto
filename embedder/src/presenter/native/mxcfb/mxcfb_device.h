@@ -53,9 +53,14 @@ public:
   MxcfbDevice &operator=(MxcfbDevice &&) = delete;
 
   PlutoStatus open(const GeneratedDeviceProfile &profile);
+  // Reasserts the already validated stock mode at the first write boundary,
+  // then proves the kernel kept the exact framebuffer contract. open() stays
+  // observational so NativeDisplayBackend::probe() performs no display write.
+  PlutoStatus initialize();
   void close();
 
   bool is_open() const { return fd_ >= 0; }
+  bool is_initialized() const { return initialized_; }
   const MxcfbFramebufferInfo &framebuffer_info() const { return info_; }
   std::span<std::byte> framebuffer();
   std::string_view last_error() const { return last_error_; }
@@ -71,6 +76,9 @@ private:
   int fd_ = -1;
   void *mapping_ = nullptr;
   MxcfbFramebufferInfo info_{};
+  uapi::FramebufferFixedInfoArm32 fixed_info_{};
+  uapi::FramebufferVariableInfoArm32 variable_info_{};
+  bool initialized_ = false;
   std::string last_error_;
 };
 

@@ -130,6 +130,15 @@ public:
       }
     }
 
+    const PlutoStatus initialization_status = device_->initialize();
+    if (initialization_status != kPlutoStatusOk) {
+      if (initialization_status == kPlutoStatusDeviceLost ||
+          initialization_status == kPlutoStatusInternal) {
+        mark_lost();
+      }
+      return initialization_status;
+    }
+
     const MxcfbFramebufferInfo &framebuffer_info = device_->framebuffer_info();
     const std::span<std::byte> framebuffer = device_->framebuffer();
     const std::size_t tight_stride = this->tight_stride();

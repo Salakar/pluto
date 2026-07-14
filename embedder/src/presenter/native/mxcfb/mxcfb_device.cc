@@ -86,6 +86,58 @@ std::string_view driver_name(const uapi::FramebufferFixedInfoArm32 &fixed) {
   return std::string_view(fixed.id, length);
 }
 
+bool bitfield_equal(const uapi::FramebufferBitfield &left,
+                    const uapi::FramebufferBitfield &right) {
+  return left.offset == right.offset && left.length == right.length &&
+         left.msb_right == right.msb_right;
+}
+
+bool fixed_contract_equal(const uapi::FramebufferFixedInfoArm32 &left,
+                          const uapi::FramebufferFixedInfoArm32 &right) {
+  return driver_name(left) == driver_name(right) &&
+         left.smem_start == right.smem_start &&
+         left.smem_len == right.smem_len && left.type == right.type &&
+         left.type_aux == right.type_aux && left.visual == right.visual &&
+         left.xpanstep == right.xpanstep && left.ypanstep == right.ypanstep &&
+         left.ywrapstep == right.ywrapstep &&
+         left.line_length == right.line_length &&
+         left.mmio_start == right.mmio_start &&
+         left.mmio_len == right.mmio_len && left.accel == right.accel &&
+         left.capabilities == right.capabilities &&
+         left.reserved[0] == right.reserved[0] &&
+         left.reserved[1] == right.reserved[1];
+}
+
+bool variable_contract_equal(const uapi::FramebufferVariableInfoArm32 &left,
+                             const uapi::FramebufferVariableInfoArm32 &right) {
+  return left.xres == right.xres && left.yres == right.yres &&
+         left.xres_virtual == right.xres_virtual &&
+         left.yres_virtual == right.yres_virtual &&
+         left.xoffset == right.xoffset && left.yoffset == right.yoffset &&
+         left.bits_per_pixel == right.bits_per_pixel &&
+         left.grayscale == right.grayscale &&
+         bitfield_equal(left.red, right.red) &&
+         bitfield_equal(left.green, right.green) &&
+         bitfield_equal(left.blue, right.blue) &&
+         bitfield_equal(left.transp, right.transp) &&
+         left.nonstd == right.nonstd && left.activate == right.activate &&
+         left.height == right.height && left.width == right.width &&
+         left.accel_flags == right.accel_flags &&
+         left.pixclock == right.pixclock &&
+         left.left_margin == right.left_margin &&
+         left.right_margin == right.right_margin &&
+         left.upper_margin == right.upper_margin &&
+         left.lower_margin == right.lower_margin &&
+         left.hsync_len == right.hsync_len &&
+         left.vsync_len == right.vsync_len && left.sync == right.sync &&
+         left.vmode == right.vmode && left.rotate == right.rotate &&
+         left.colorspace == right.colorspace &&
+         left.reserved[0] == right.reserved[0] &&
+         left.reserved[1] == right.reserved[1] &&
+         left.reserved[2] == right.reserved[2] &&
+         left.reserved[3] == right.reserved[3];
+}
+
 } // namespace
 
 MxcfbDevice::MxcfbDevice(MxcfbSyscalls *syscalls)
@@ -118,9 +170,9 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
           static_cast<std::uint32_t>(profile.panel.height) ||
       !display.virtual_width.has_value() ||
       !display.virtual_height.has_value() ||
-      !display.stride_bytes.has_value() || !display.rotation.has_value() ||
-      display.bits_per_pixel != 16 || display.buffer_slots.has_value() ||
-      display.slot_bytes.has_value() ||
+      !display.stride_bytes.has_value() || !display.mapping_bytes.has_value() ||
+      !display.rotation.has_value() || display.bits_per_pixel != 16 ||
+      display.buffer_slots.has_value() || display.slot_bytes.has_value() ||
       display.phase_interval_nanoseconds.has_value() ||
       display.damage_alignment_pixels == 0) {
     return fail(kPlutoStatusUnsupported,
@@ -156,10 +208,11 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
                 "fb0 is not backed by the RM1 mxc_epdc_fb driver");
   }
   if (fixed.type != uapi::kFramebufferTypePackedPixels ||
-      fixed.visual != uapi::kFramebufferVisualTrueColor) {
+      fixed.visual != uapi::kFramebufferVisualTrueColor ||
+      fixed.xpanstep != 1 || fixed.ypanstep != 1 || fixed.ywrapstep != 0) {
     close();
     return fail(kPlutoStatusUnsupported,
-                "fb0 does not expose packed true-color pixels");
+                "fb0 does not expose the pinned RM1 packed-pixel contract");
   }
 
   if (variable.xres != display.scanout_width ||
@@ -195,10 +248,59 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
       *display.stride_bytes != packed_stride ||
       fixed.line_length != *display.stride_bytes ||
       exact_allocation > std::numeric_limits<std::uint32_t>::max() ||
-      fixed.smem_len != exact_allocation) {
+      *display.mapping_bytes != exact_allocation ||
+      fixed.smem_len != *display.mapping_bytes) {
     close();
     return fail(kPlutoStatusUnsupported,
                 "fb0 stride or framebuffer allocation is inconsistent");
+  }
+
+  info_ = {
+      .width = variable.xres,
+      .height = variable.yres,
+      .virtual_width = variable.xres_virtual,
+      .virtual_height = variable.yres_virtual,
+      .stride_bytes = fixed.line_length,
+      .mapped_bytes = fixed.smem_len,
+  };
+  fixed_info_ = fixed;
+  variable_info_ = variable;
+  return kPlutoStatusOk;
+}
+
+PlutoStatus MxcfbDevice::initialize() {
+  if (!is_open()) {
+    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not open");
+  }
+  if (initialized_) {
+    return fail(kPlutoStatusInvalidArgument,
+                "MXCFB framebuffer is already initialized");
+  }
+
+  uapi::FramebufferVariableInfoArm32 requested = variable_info_;
+  if (syscalls_->ioctl(fd_, uapi::kPutVariableScreenInfo, &requested) < 0) {
+    const int error = errno;
+    close();
+    const PlutoStatus status = status_for_errno(error);
+    return fail(status == kPlutoStatusInvalidArgument ? kPlutoStatusUnsupported
+                                                      : status,
+                errno_message("FBIOPUT_VSCREENINFO", error));
+  }
+
+  uapi::FramebufferFixedInfoArm32 fixed{};
+  uapi::FramebufferVariableInfoArm32 variable{};
+  if (syscalls_->ioctl(fd_, uapi::kGetFixedScreenInfo, &fixed) < 0 ||
+      syscalls_->ioctl(fd_, uapi::kGetVariableScreenInfo, &variable) < 0) {
+    const int error = errno;
+    close();
+    return fail(status_for_errno(error),
+                errno_message("revalidate RM1 framebuffer mode", error));
+  }
+  if (!fixed_contract_equal(fixed_info_, fixed) ||
+      !variable_contract_equal(variable_info_, variable)) {
+    close();
+    return fail(kPlutoStatusUnsupported,
+                "RM1 framebuffer contract changed after mode initialization");
   }
 
   mapping_ = syscalls_->mmap(nullptr, fixed.smem_len, PROT_READ | PROT_WRITE,
@@ -210,14 +312,10 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
     return fail(status_for_errno(error), errno_message("mmap(fb0)", error));
   }
 
-  info_ = {
-      .width = variable.xres,
-      .height = variable.yres,
-      .virtual_width = variable.xres_virtual,
-      .virtual_height = variable.yres_virtual,
-      .stride_bytes = fixed.line_length,
-      .mapped_bytes = fixed.smem_len,
-  };
+  fixed_info_ = fixed;
+  variable_info_ = variable;
+  initialized_ = true;
+  last_error_.clear();
   return kPlutoStatusOk;
 }
 
@@ -231,6 +329,9 @@ void MxcfbDevice::close() {
     fd_ = -1;
   }
   info_ = {};
+  fixed_info_ = {};
+  variable_info_ = {};
+  initialized_ = false;
 }
 
 std::span<std::byte> MxcfbDevice::framebuffer() {
@@ -241,8 +342,8 @@ std::span<std::byte> MxcfbDevice::framebuffer() {
 }
 
 PlutoStatus MxcfbDevice::send_update(uapi::UpdateData *update) {
-  if (!is_open()) {
-    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not open");
+  if (!is_open() || !initialized_) {
+    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not initialized");
   }
   if (update == nullptr || update->update_marker == 0 ||
       update->update_region.width == 0 || update->update_region.height == 0 ||
@@ -269,8 +370,8 @@ PlutoStatus MxcfbDevice::wait_for_update_complete(std::uint32_t marker,
   if (out_collision != nullptr) {
     *out_collision = false;
   }
-  if (!is_open()) {
-    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not open");
+  if (!is_open() || !initialized_) {
+    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not initialized");
   }
   if (marker == 0) {
     return fail(kPlutoStatusInvalidArgument,

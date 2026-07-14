@@ -7,6 +7,7 @@
 
 #include "engine/device_identity.h"
 #include "presenter/native/gallery3_drm_backend.h"
+#include "presenter/native/mxcfb/mxcfb_backend.h"
 #include "presenter/native/native_display_backend.h"
 
 namespace pluto::native {
@@ -340,7 +341,11 @@ const PlutoPresenterOps kNativeOps{
 
 bool native_display_backend_is_implemented(
     const GeneratedDeviceProfile &profile) {
-  return profile.display_driver == NativeDisplayDriverKind::kGallery3Drm;
+  if (!profile.runtime.native_session_enabled) {
+    return false;
+  }
+  return profile.display_driver == NativeDisplayDriverKind::kGallery3Drm ||
+         profile.display_driver == NativeDisplayDriverKind::kMxcfbEpdc;
 }
 
 std::unique_ptr<NativeDisplayBackend>
@@ -352,11 +357,22 @@ make_native_display_backend(const GeneratedDeviceProfile &profile,
   if (!native_display_backend_is_implemented(profile)) {
     return nullptr;
   }
-  if (out_status != nullptr) {
-    *out_status = kPlutoStatusOk;
+  switch (profile.display_driver) {
+  case NativeDisplayDriverKind::kGallery3Drm:
+    if (out_status != nullptr) {
+      *out_status = kPlutoStatusOk;
+    }
+    return std::make_unique<PresenterOpsDisplayBackend>(
+        profile, pluto_gallery3_drm_presenter_ops());
+  case NativeDisplayDriverKind::kMxcfbEpdc:
+    if (out_status != nullptr) {
+      *out_status = kPlutoStatusOk;
+    }
+    return std::make_unique<mxcfb::MxcfbDisplayBackend>(profile);
+  case NativeDisplayDriverKind::kLcdifTcon:
+    return nullptr;
   }
-  return std::make_unique<PresenterOpsDisplayBackend>(
-      profile, pluto_gallery3_drm_presenter_ops());
+  return nullptr;
 }
 
 } // namespace pluto::native

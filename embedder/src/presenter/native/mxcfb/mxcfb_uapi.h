@@ -114,6 +114,7 @@ inline constexpr std::int32_t kTemperatureUseAmbient = 0x1000;
 // Linux framebuffer retained its original fixed-number GET ioctls rather
 // than encoding the pointed-to structure size in the request number.
 inline constexpr unsigned long kGetVariableScreenInfo = 0x4600UL;
+inline constexpr unsigned long kPutVariableScreenInfo = 0x4601UL;
 inline constexpr unsigned long kGetFixedScreenInfo = 0x4602UL;
 
 constexpr std::uint32_t linux_ioctl_request(std::uint32_t direction,

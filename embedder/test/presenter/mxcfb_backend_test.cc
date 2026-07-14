@@ -45,6 +45,8 @@ public:
     fixed.smem_len = kMappingBytes;
     fixed.type = uapi::kFramebufferTypePackedPixels;
     fixed.visual = uapi::kFramebufferVisualTrueColor;
+    fixed.xpanstep = 1;
+    fixed.ypanstep = 1;
     fixed.line_length = kStride;
 
     variable.xres = kWidth;
@@ -72,6 +74,11 @@ public:
     }
     if (request == uapi::kGetVariableScreenInfo) {
       std::memcpy(argument, &variable, sizeof(variable));
+      return 0;
+    }
+    if (request == uapi::kPutVariableScreenInfo) {
+      variable = *static_cast<uapi::FramebufferVariableInfoArm32 *>(argument);
+      ++put_count;
       return 0;
     }
     if (request == uapi::kSendUpdate) {
@@ -157,6 +164,7 @@ public:
   int open_flags = 0;
   int open_count = 0;
   int mmap_count = 0;
+  int put_count = 0;
   int munmap_count = 0;
   int close_count = 0;
 
@@ -288,6 +296,18 @@ TEST(MxcfbBackend, ReportsStrictCapabilitiesWithoutEnablingProductFactory) {
   EXPECT_FALSE(info.supports_overlap_supersession);
   EXPECT_TRUE(backend.ready(kPlutoRefreshFast));
   EXPECT_TRUE(backend.ready(kPlutoRefreshFull));
+  EXPECT_EQ(syscalls.put_count, 1);
+}
+
+TEST(MxcfbBackend, ProbeIsObservationalAndStartReassertsThePinnedMode) {
+  BlockingMxcfbSyscalls syscalls;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+
+  ASSERT_EQ(backend.probe(rm1_profile()), kPlutoStatusOk);
+  EXPECT_EQ(syscalls.put_count, 0);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(backend.start(config), kPlutoStatusOk);
+  EXPECT_EQ(syscalls.put_count, 1);
 }
 
 TEST(MxcfbBackend, CopiesOnlyExactDamageRowsAndPreservesBothStrides) {

@@ -69,8 +69,8 @@ public:
 };
 
 // The implementation factory is deliberately the only handwritten switch on
-// DisplayDriverKind. Phase 1 admits Gallery 3 only; RM1 and RM2 fail closed
-// here until their native backends pass their device gates.
+// DisplayDriverKind. A generated per-profile acceptance bit remains the final
+// gate even when a driver implementation exists in the binary.
 std::unique_ptr<NativeDisplayBackend>
 make_native_display_backend(const GeneratedDeviceProfile &profile,
                             PlutoStatus *out_status);

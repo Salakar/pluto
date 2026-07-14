@@ -23,7 +23,7 @@ TEST(NativePresenter, RegistryExposesOnlyTheProductPresenterName) {
   EXPECT_EQ(std::string_view(pluto_native_presenter_ops()->name), "native");
 }
 
-TEST(NativePresenter, OnlyMoveBackendIsAdmittedDuringFoundationPhase) {
+TEST(NativePresenter, AdmitsOnlyAcceptedImplementedProfiles) {
   const pluto::GeneratedDeviceProfile *rm1 =
       pluto::generated_device_profile_by_id("rm1");
   const pluto::GeneratedDeviceProfile *rm2 =
@@ -46,6 +46,25 @@ TEST(NativePresenter, OnlyMoveBackendIsAdmittedDuringFoundationPhase) {
   EXPECT_NE(pluto::native::make_native_display_backend(*move, &status),
             nullptr);
   EXPECT_EQ(status, kPlutoStatusOk);
+
+  pluto::GeneratedDeviceProfile disabled_move = *move;
+  disabled_move.runtime.native_session_enabled = false;
+  EXPECT_FALSE(
+      pluto::native::native_display_backend_is_implemented(disabled_move));
+  EXPECT_EQ(pluto::native::make_native_display_backend(disabled_move, &status),
+            nullptr);
+  EXPECT_EQ(status, kPlutoStatusUnsupported);
+
+  EXPECT_FALSE(pluto::native::native_display_backend_is_implemented(*rm1));
+  pluto::GeneratedDeviceProfile accepted_rm1 = *rm1;
+  accepted_rm1.runtime.native_session_enabled = true;
+  EXPECT_TRUE(
+      pluto::native::native_display_backend_is_implemented(accepted_rm1));
+  auto rm1_backend =
+      pluto::native::make_native_display_backend(accepted_rm1, &status);
+  ASSERT_NE(rm1_backend, nullptr);
+  EXPECT_EQ(status, kPlutoStatusOk);
+  EXPECT_EQ(rm1_backend->driver_name(), "mxcfb_epdc");
 }
 
 TEST(NativePresenter, RejectsAttemptsToSpoofAnInternalDriverName) {
