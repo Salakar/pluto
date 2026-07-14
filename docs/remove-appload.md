@@ -96,8 +96,10 @@ an audit snapshot, not a permanent compatibility promise.
 
 ### 3.1 RM1
 
-- Kernel `5.4.70-v1.6.3-rm10x`; official matching kernel source commit
-  `d54fe67bf86e918468b936f97a2ec39f4f87a3d9`.
+- Kernel `5.4.70-v1.6.3-rm10x`. The closest published official kernel source
+  is reMarkable's `RM1XX_5.4.70_v1.6.2` commit
+  `d54fe67bf86e918468b936f97a2ec39f4f87a3d9`; reMarkable has not published a
+  byte-matching v1.6.3 ref, so the source gap is recorded rather than hidden.
 - `/proc/fb` reports `mxc_epdc_fb` at `/dev/fb0`.
 - Visible framebuffer is 1404x1872, virtual 1408x3840, RGB565, 2816-byte
   stride, current rotation 1.
@@ -117,15 +119,21 @@ an audit snapshot, not a permanent compatibility promise.
 - `/dev/fb0` is the LCDIF `mxsfb` path, not an EPDC update API.
 - The stock runtime programs a narrow, tall phase-scanout framebuffer rather
   than exposing the 1404x1872 logical image directly.
-- The audited unit uses
-  `/usr/share/remarkable/320_R467_AF4731_ED103TC2C6_VB3300-KCD_TC.wbf`.
-  The final profile must bind the exact WBF digest to the panel/FPL signature;
-  a filename alone is not sufficient.
-- The reference mode observed in existing research is 260x1408, 32 bpp, with
-  17 phase slots. Its constants derive a 1,464,320-byte phase slot, a
-  24,893,440-byte mapping, and an approximately 11.763 ms phase interval. Pluto
-  must re-measure these on the supported kernel/panel and must not treat
-  reverse-engineered constants as vendor guarantees.
+- The audited unit actively selects
+  `/var/lib/uboot/320_R405_AFA011_ED103TC2C5_VB3300-KCD_TC.wbf`, size 285,735
+  bytes, SHA-256
+  `79783d751ba066af12c6ac5aca46279fe7c79d4ef834105bd46824f870f9c6f8`,
+  for panel signature `ED103TC2C5`. The R467/C6 file under `/usr/share` is a
+  discovery candidate on this image, not an accepted fallback. The profile
+  binds active source, exact digest, and panel/FPL signature together.
+- The stock observer measured a 260x1408, 32-bpp `mxs-lcdif` mode with a
+  1,040-byte stride, virtual height 23,936, and 17 phase slots of 1,464,320
+  bytes each. The 24,893,440-byte slot footprint lives inside an exact
+  33,554,432-byte framebuffer mapping; Pluto must map the kernel-reported
+  allocation rather than the footprint. Observed stock pan cadence was 11.886
+  ms median and 11.933 ms p95. The 11.763 ms profile candidate remains
+  provisional until the native transport measures latch timing directly;
+  reverse-engineered constants are not vendor guarantees.
 - The official kernel's `prevent-frying-pan` path, blank/unblank sequencing,
   regulator control, current-frame completion, and final safe-hold buffer are
   safety requirements, not optional optimisations.
