@@ -1,0 +1,16 @@
+schema=1
+flutter=3.44.4
+engine=a10d8ac38de835021c8d2f920dbf50a920ccc030
+target=linux-arm64
+mode=release
+engine_source=https://github.com/flutter/flutter/tree/a10d8ac38de835021c8d2f920dbf50a920ccc030/engine
+gen_snapshot_source=https://storage.googleapis.com/flutter_infra_release/flutter/a10d8ac38de835021c8d2f920dbf50a920ccc030/linux-arm64-release/linux-arm64-flutter-gtk.zip
+icu_source=https://storage.googleapis.com/flutter_infra_release/flutter/a10d8ac38de835021c8d2f920dbf50a920ccc030/linux-arm64/artifacts.zip
+gn_args=--runtime-mode=release --target-os=linux --linux-cpu=arm64 --prebuilt-dart-sdk --no-lto --no-rbe --no-goma --embedder-for-target --disable-desktop-embeddings --no-build-engine-artifacts --no-build-glfw-shell --no-build-embedder-examples --no-enable-unittests
+
+d34a56164ede2c0ee793e6fe6d20e2b53fc5295e304d1ce636ef8c31a54e634b  LICENSE.artifacts.md
+432e8f190ea0edb09db8dde057532848d848159b98bac649db353c102fb70e23  LICENSE.embedder-archive.md
+c60421766d08e9bb85083be921a0e298d0a367d71bc1ad89f41b2b27da367da7  LICENSE.flutter_gtk.md
+d31a40644bba9bcd6885936b293bad40fd12e1432b3a5ca4e55f3a0ab0fa0866  gen_snapshot
+998367809a821d595928089c197b3f7959f0420f81f79d4d0daee53378492ed5  icudtl.dat
+93c5a21d58be76edf42d9746c32c8c076a76a552e667af7c953e3a14bc4c68a5  libflutter_engine.so

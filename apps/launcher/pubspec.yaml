@@ -1,0 +1,21 @@
+name: pluto_launcher
+description: Pluto's release-AOT launcher and device settings shell.
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ^3.12.0
+resolution: workspace
+dependencies:
+  flutter:
+    sdk: flutter
+  pluto_core: ^0.1.0
+  pluto_manifest: ^0.1.0
+  pluto_device: ^0.1.0
+  pluto_settings: ^0.1.0
+  pluto_pen: ^0.1.0
+  pluto_touch: ^0.1.0
+  pluto_ui: ^0.1.0
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter

@@ -1,0 +1,67 @@
+diff --git a/src/qtfb/FBController.cpp b/src/qtfb/FBController.cpp
+index f022c33..e60dd80 100644
+--- a/src/qtfb/FBController.cpp
++++ b/src/qtfb/FBController.cpp
+@@ -1,6 +1,7 @@
+ #include "FBController.h"
+ #include "fbmanagement.h"
+ #include "log.h"
++#include <QtMath>
+ 
+ void FBController::setFramebufferID(int fbId){
+     if(_framebufferID != fbId){
+@@ -34,11 +35,27 @@ void FBController::paint(QPainter *painter) {
+     QDEBUG << "FB Repaint triggered for " << _framebufferID << ". Status: " << _active;
+     // Do we have an SHM associated?
+     if(this->image && this->_active) {
+-        // Cool. Paint it.
++        // Cool. Paint it. Convert/blit only the dirty region: the scene
++        // graph clips the painter to the accumulated dirty rect, and a
++        // full-framebuffer conversion per repaint is what makes
++        // high-frequency partial updates expensive. When no clip is set
++        // (whole-item repaint), fall back to the full blit.
++        const QRectF clip = painter->clipBoundingRect();
+         if(_allowScaling) {
+-            painter->drawImage(QRect(0, 0, width(), height()), *image, image->rect());
++            if(!clip.isEmpty() && width() > 0 && height() > 0) {
++                const qreal sx = (qreal) image->width() / width();
++                const qreal sy = (qreal) image->height() / height();
++                const QRectF src(clip.x() * sx, clip.y() * sy, clip.width() * sx, clip.height() * sy);
++                painter->drawImage(clip, *image, src);
++            } else {
++                painter->drawImage(QRect(0, 0, width(), height()), *image, image->rect());
++            }
+         } else {
+-            painter->drawImage(0, 0, *image);
++            if(!clip.isEmpty()) {
++                painter->drawImage(clip, *image, clip);
++            } else {
++                painter->drawImage(0, 0, *image);
++            }
+         }
+     } else {
+         /*
+@@ -73,12 +90,17 @@ void FBController::associateSHM(QImage *image) {
+ void FBController::markedUpdate(const QRect &rect) {
+     isMidPaint = true;
+     if(_allowScaling && image) {
+-        update(QRect(
+-           (rect.x() / image->width()) * this->width(),
+-           (rect.y() / image->height()) * this->height(),
+-           (rect.width() / image->width()) * this->width(),
+-           (rect.height() / image->height()) * this->height()
+-        ));
++        // Multiply BEFORE dividing: integer division first truncated every
++        // partial rect to zero, and a null QRect tells Qt to repaint the
++        // WHOLE item (rm-appload issue #33). Same operand order as
++        // convertPointToQTFBPixels below. The far edge rounds UP so scaling
++        // never clips a stroke's border. A null rect stays null, so
++        // UPDATE_ALL keeps meaning "repaint everything".
++        const int x0 = qFloor(rect.x() * this->width() / image->width());
++        const int y0 = qFloor(rect.y() * this->height() / image->height());
++        const int x1 = qCeil((rect.x() + rect.width()) * this->width() / image->width());
++        const int y1 = qCeil((rect.y() + rect.height()) * this->height() / image->height());
++        update(QRect(x0, y0, x1 - x0, y1 - y0));
+     } else {
+         update(rect);
+     }

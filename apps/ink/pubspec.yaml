@@ -1,0 +1,31 @@
+name: paper_ink
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ^3.12.0
+resolution: workspace
+dependencies:
+  flutter:
+    sdk: flutter
+  pluto_core: ^0.1.0
+  pluto_ui: ^0.1.0
+  pluto_device: ^0.1.0
+  pluto_pen: ^0.1.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  assets:
+    - assets/pluto/icon.png
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-VariableFont.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-VariableFont.ttf
+    # pluto_ui's shared mono token uses the spaced family name.
+    - family: JetBrains Mono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-VariableFont.ttf

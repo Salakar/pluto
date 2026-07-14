@@ -1,0 +1,7 @@
+{
+  "name": "Pluto qtfb Diagnostic",
+  "application": "qtfb-probe",
+  "qtfb": true,
+  "aspectRatio": "move",
+  "disablesWindowedMode": true
+}

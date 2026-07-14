@@ -1,0 +1,20 @@
+schema: 1
+id: dev.pluto.ink
+name: Ink
+version: 0.1.0
+description: A full drawing studio for paper — canvas, brushes, layers, color.
+icon: assets/pluto/icon.png
+iconMono: assets/pluto/icon_mono.png
+entrypoint: lib/main.dart
+permissions:
+  - pen.raw
+  - touch.raw
+  - device.info
+  - display.refreshControl
+  - storage.shared
+display:
+  orientations: [portrait]
+  defaultOrientation: portrait
+  scale: auto
+  color: auto
+  refreshProfile: drawing

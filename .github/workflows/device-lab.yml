@@ -1,0 +1,44 @@
+name: Device Lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: SSH target for the connected Paper Pro Move
+        required: true
+        default: root@10.11.99.1
+      provision:
+        description: Provision and select the release launcher at boot
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  device-lab:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap the pinned SDK and workspace
+        run: ./tools/setup/setup.sh
+      - name: Export setup-managed tools
+        run: |
+          FLUTTER_VERSION="$(tr -d '[:space:]' < tools/pluto/pins/flutter.version)"
+          echo "$HOME/.pluto/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.pluto/sdk/$FLUTTER_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Build the AArch64 embedder
+        run: melos run build:embedder:device
+      - name: Assemble the standard release-AOT payload
+        run: melos run build:device-payload -- --standard
+      - name: Audit the connected device
+        run: pluto provision --device "${{ inputs.device }}" --status
+      - name: Provision the release-AOT payload
+        if: ${{ inputs.provision }}
+        run: >-
+          pluto provision --device "${{ inputs.device }}"
+          --payload-dir "$GITHUB_WORKSPACE/build/pluto-payload"
+      - name: Smoke every standard release-AOT app
+        if: ${{ inputs.provision }}
+        run: >-
+          bash tools/device/test/release-aot-hardware-smoke.sh
+          "${{ inputs.device }}"

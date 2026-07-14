@@ -1,0 +1,65 @@
+.DS_Store
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+build/
+# `build/` above matches ANY dir named build — re-include CLI sources.
+!tools/pluto/lib/src/build/
+# Build workflow sources are code; only their generated outputs stay ignored.
+!tools/build/
+!tools/build/**
+
+# Generated test and tool output.
+coverage/
+*.log
+*.profraw
+*.swp
+*.swo
+*~
+
+# Raw on-device capture evidence (large, device-specific)
+analysis/
+
+# Camera captures of the physical panel are verification evidence, never
+# source. Keep them out of the tree (tools/setup/camera/capture.sh writes
+# wherever you point it; use analysis/ or a scratch dir).
+/.pluto-devices.json
+*.jpg
+*.jpeg
+*.mp4
+*.mov
+
+# Local toolchain cache (large downloads, not committed)
+.pluto-cache/
+**/.toolcache/
+
+# Legacy/local embedder staging; clone-ready AOT payloads live in the tracked
+# root third_party/engine/<pin>/ directories instead.
+embedder/third_party/engine/
+embedder/build/
+
+
+# Flutter golden-test mismatch output (canonical test/goldens stay tracked).
+**/test/failures/
+**/test_goldens/failures/
+
+# Historical host JIT renderer proof (large engine bundle + frame PNGs).
+tools/legacy/host-jit-render-proof/bundle/
+tools/legacy/host-jit-render-proof/*.png
+tools/legacy/host-jit-render-proof/build/
+
+# Device diagnostic binaries are local build outputs.
+tools/device/diagnostics/qtfb/build/
+
+# Do not remove:
+.idea/
+*.iml
+
+# Machine-local agent settings; shared coordination belongs in agents_wip.txt.
+.claude
+agents_wip.txt
+tmp/
+build-mapped-*
+**/__pycache__/**

@@ -1,0 +1,31 @@
+name: paper_codex
+description: Paper Codex - an intelligent paper notebook that thinks with the OpenAI Codex CLI.
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ^3.12.0
+resolution: workspace
+dependencies:
+  flutter:
+    sdk: flutter
+  pluto_core: ^0.1.0
+  pluto_device: ^0.1.0
+  pluto_settings: ^0.1.0
+  pluto_ui: ^0.1.0
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+flutter:
+  assets:
+    - assets/pluto/icon.png
+  fonts:
+    - family: EBGaramond
+      fonts:
+        - asset: assets/fonts/EBGaramond-VariableFont_wght.ttf
+    - family: Caveat
+      fonts:
+        - asset: assets/fonts/Caveat-VariableFont_wght.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-VariableFont_wght.ttf

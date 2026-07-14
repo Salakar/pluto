@@ -1,0 +1,14 @@
+name: pluto_ui
+description: E-ink-safe Pluto UI tokens and widget scaffolding.
+version: 0.1.0
+environment:
+  sdk: ^3.12.0
+resolution: workspace
+dependencies:
+  flutter:
+    sdk: flutter
+  pluto_core: ^0.1.0
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter

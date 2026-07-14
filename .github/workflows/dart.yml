@@ -1,0 +1,15 @@
+name: Dart
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  dart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap the pinned SDK and workspace
+        run: ./tools/setup/setup.sh
+      - name: Run the repository quality gate
+        run: ./ci/check.sh

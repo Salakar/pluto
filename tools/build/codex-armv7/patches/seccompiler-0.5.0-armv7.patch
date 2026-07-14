@@ -1,0 +1,52 @@
+diff --git a/src/backend/bpf.rs b/src/backend/bpf.rs
+--- a/src/backend/bpf.rs
++++ b/src/backend/bpf.rs
+@@ -124,5 +124,8 @@
+ pub const AUDIT_ARCH_AARCH64: u32 = 183 | 0x8000_0000 | 0x4000_0000;
+ 
++// `#define AUDIT_ARCH_ARM (EM_ARM|__AUDIT_ARCH_LE)`
++pub const AUDIT_ARCH_ARM: u32 = 40 | 0x4000_0000;
++
+ // Architecture identifier for riscv64 LE.
+ // Defined as:
+ // `#define AUDIT_ARCH_RISCV64  (EM_RISCV|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)`
+diff --git a/src/backend/mod.rs b/src/backend/mod.rs
+--- a/src/backend/mod.rs
++++ b/src/backend/mod.rs
+@@ -25,7 +25,10 @@ use bpf::{
+     SECCOMP_RET_KILL_THREAD, SECCOMP_RET_LOG, SECCOMP_RET_TRACE, SECCOMP_RET_TRAP,
+ };
+ 
+-use bpf::{ARG_NUMBER_MAX, AUDIT_ARCH_AARCH64, AUDIT_ARCH_RISCV64, AUDIT_ARCH_X86_64, BPF_MAX_LEN};
++use bpf::{
++    ARG_NUMBER_MAX, AUDIT_ARCH_AARCH64, AUDIT_ARCH_ARM, AUDIT_ARCH_RISCV64,
++    AUDIT_ARCH_X86_64, BPF_MAX_LEN,
++};
+ 
+ pub use bpf::{sock_filter, BpfProgram, BpfProgramRef};
+ 
+@@ -83,6 +86,8 @@ pub enum TargetArch {
+     x86_64,
+     /// aarch64 arch
+     aarch64,
++    /// little-endian 32-bit ARM arch
++    arm,
+     /// riscv64 arch
+     riscv64,
+ }
+@@ -93,6 +98,7 @@ impl TargetArch {
+         match self {
+             TargetArch::x86_64 => AUDIT_ARCH_X86_64,
+             TargetArch::aarch64 => AUDIT_ARCH_AARCH64,
++            TargetArch::arm => AUDIT_ARCH_ARM,
+             TargetArch::riscv64 => AUDIT_ARCH_RISCV64,
+         }
+     }
+@@ -104,6 +110,7 @@ impl FromStr for TargetArch {
+         match input.to_lowercase().as_str() {
+             "x86_64" => Ok(TargetArch::x86_64),
+             "aarch64" => Ok(TargetArch::aarch64),
++            "arm" => Ok(TargetArch::arm),
+             "riscv64" => Ok(TargetArch::riscv64),
+             _ => Err(Error::InvalidTargetArch(input.to_string())),
+         }

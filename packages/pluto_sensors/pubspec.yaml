@@ -1,0 +1,14 @@
+name: pluto_sensors
+description: Flutter APIs for reMarkable motion sensors — accelerometer, tap, double-tap, and orientation.
+version: 0.1.0
+environment:
+  sdk: ^3.12.0
+resolution: workspace
+dependencies:
+  flutter:
+    sdk: flutter
+  meta: ^1.17.0
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter

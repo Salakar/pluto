@@ -1,0 +1,18 @@
+name: pluto_cli
+description: Standalone Pluto command line tool.
+publish_to: none
+version: 0.1.0
+executables:
+  pluto: pluto
+environment:
+  sdk: ^3.12.0
+dependencies:
+  args: ^2.6.0
+  crypto: ^3.0.0
+  flutter_tools:
+    sdk: flutter
+  pluto_manifest:
+    path: ../../packages/pluto_manifest
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.15

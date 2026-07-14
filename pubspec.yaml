@@ -1,0 +1,62 @@
+name: pluto_workspace
+publish_to: none
+environment:
+  sdk: ^3.12.0
+workspace:
+  - packages/pluto_core
+  - packages/pluto_manifest
+  - packages/pluto_provision
+  - packages/pluto_device
+  - packages/pluto_settings
+  - packages/pluto_pen
+  - packages/pluto_touch
+  - packages/pluto_sensors
+  - packages/pluto_ui
+  - apps/codex
+  - apps/ink
+  - apps/launcher
+  - apps/validation_lab
+  - apps/examples/counter
+  - apps/examples/motion_lab
+  - apps/examples/ink_lab
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  lints: ^6.0.0
+  melos: ^7.0.0
+
+melos:
+  scripts:
+    analyze:
+      run: |
+        set -e
+        dart analyze --fatal-infos .
+        (cd tools/pluto && dart analyze --fatal-infos .)
+    format:
+      run: |
+        set -e
+        dart format --set-exit-if-changed packages apps tools/pluto
+        if command -v clang-format >/dev/null 2>&1; then
+          find embedder -name '*.cc' -o -name '*.h' | xargs clang-format --dry-run --Werror
+        else
+          echo "clang-format not found; skipping native format"
+        fi
+    test:
+      run: |
+        set -e
+        melos exec --concurrency=1 --dir-exists=test --fail-fast -- \
+          'if grep -q "sdk: flutter" pubspec.yaml; then flutter test; else dart test; fi'
+        (cd tools/pluto && dart test)
+    goldens:
+      run: (cd apps/launcher && flutter test test_goldens/launcher_goldens_test.dart)
+    goldens:update:
+      run: (cd apps/launcher && flutter test --update-goldens test_goldens/launcher_goldens_test.dart)
+    bench:
+      run: echo "not yet implemented" && exit 0
+    build:embedder:host:
+      run: bash tools/build/embedder-host.sh
+    build:embedder:device:
+      run: bash tools/build/embedder-device.sh
+    build:device-payload:
+      run: bash tools/build/assemble-device-payload.sh
+    preview:
+      run: echo "not yet implemented" && exit 0

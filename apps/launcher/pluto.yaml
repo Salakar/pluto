@@ -1,0 +1,16 @@
+schema: 1
+id: dev.pluto.launcher
+name: Pluto Home
+version: 0.1.0
+icon: assets/pluto/icon.png
+entrypoint: lib/main.dart
+display:
+  orientations:
+    - portrait
+    - portraitDown
+    - landscapeLeft
+    - landscapeRight
+  defaultOrientation: portrait
+  scale: auto
+  color: auto
+  refreshProfile: ui

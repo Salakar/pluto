@@ -1,0 +1,13 @@
+schema: 1
+id: dev.pluto.examples.counter
+name: Counter
+version: 0.1.0
+description: Minimal WidgetsApp counter for Pluto release install acceptance.
+icon: assets/pluto/icon.png
+entrypoint: lib/main.dart
+display:
+  orientations: [portrait]
+  defaultOrientation: portrait
+  scale: auto
+  color: mono
+  refreshProfile: ui

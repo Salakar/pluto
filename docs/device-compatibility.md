@@ -1,0 +1,192 @@
+# Device compatibility
+
+Pluto exposes one device workflow across supported reMarkable tablets.
+`pluto devices --probe` verifies hardware identity, and every device-facing
+command uses that identity to select the correct release target, display path,
+and lifecycle integration internally.
+
+The table below is the compatibility contract. Recognition by the CLI is not
+the same as tested support, and success on one firmware must not be generalized
+to another firmware without validation.
+
+## Tested hardware and firmware
+
+| Device | Codename | Tested reMarkable OS | CPU / target | Internally selected integration | Validation status |
+| --- | --- | --- | --- | --- | --- |
+| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | AArch64 / `linux-arm64` | Direct SWTCON presenter and managed lifecycle | ✅ Reference device; release platform, Ink, and Codex validated |
+| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ARMv7l / `linux-arm` | Managed XOVI + AppLoad + QTFB integration | 🧪 Runtime and base real-panel path verified; final managed-control, Ink, and real Codex acceptance in progress |
+| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ARMv7l / `linux-arm` | Managed XOVI + AppLoad + QTFB integration | 🧪 Runtime and real-panel path verified; final provision, Ink, and real Codex acceptance in progress |
+| reMarkable Paper Pro | `ferrari` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
+| reMarkable Paper Pure | `tatsu` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
+
+The two newly brought-up devices are not marked complete merely because the
+embedder starts. Their final acceptance requires the normal CLI workflow,
+visible Home and Ink behavior, a real authenticated Codex request, launch and
+return behavior, logs, screenshots, and measured responsiveness on the
+physical panel. A fake Codex backend does not satisfy that bar.
+
+## One responsive application surface
+
+Home, Ink, Codex, and third-party Pluto applications are not device-specific
+ports. Every backend reports its actual surface dimensions and device pixel
+ratio to Flutter. App manifests keep `display.scale: auto` (also the default
+when omitted), and widgets lay out from live `MediaQuery` and parent
+constraints just as they do on other Flutter platforms.
+
+A numeric manifest scale is an explicit legacy compatibility override, not a
+device selector. Likewise, 954 x 1696 values in design systems, golden tests,
+document presets, or Move renderer research are reference coordinates with an
+explicit scope; they do not define the runtime viewport on another tablet.
+Compatibility acceptance therefore checks full-surface use, reflow, reachable
+controls, pen/touch coordinate mapping, and screenshots at the native metrics
+of each tested device.
+
+The release embedder reported these presenter metrics on the attached units:
+
+| Device | Native panel surface | Flutter device pixel ratio |
+| --- | ---: | ---: |
+| reMarkable Paper Pro Move | 954 x 1696 | 1.65 |
+| reMarkable 2 | 1404 x 1872 | 1.4125 |
+| reMarkable 1 | 1404 x 1872 | 1.4125 |
+
+Those are inputs to Flutter's normal logical-pixel model, not three separately
+authored app canvases. The same release Home, Ink, and Codex layouts reflow from
+the resulting constraints.
+
+## One public workflow
+
+For a prepared release checkout, users do not choose an integration:
+
+```bash
+DEVICE=root@10.11.99.1  # or this tablet's USB/Wi-Fi SSH endpoint
+
+pluto devices --device "$DEVICE" --probe
+pluto provision --device "$DEVICE"
+pluto install --device "$DEVICE" --release --force build/pluto/app.plap
+pluto run --device "$DEVICE" --release <app-id>
+pluto logs --device "$DEVICE"
+pluto screenshot --device "$DEVICE" -o shot.png
+pluto uninstall --device "$DEVICE" <app-id>
+```
+
+Probe output includes the verified native target and supported build modes, but
+keeps backend names as an implementation detail.
+
+The same recovery commands apply everywhere:
+
+```bash
+pluto provision --device "$DEVICE" --status
+pluto provision --device "$DEVICE" --restore-remarkable
+pluto provision --device "$DEVICE" --uninstall
+```
+
+Provisioning probes before writing, selects the matching preassembled payload,
+checks its target, verifies pinned engine checksums, and activates it
+transactionally. Supplying `--payload-dir` never overrides hardware identity;
+a mismatched payload is rejected before device files change.
+
+## Internal integration boundary
+
+The common CLI intentionally hides two hardware integrations:
+
+- `linux-arm64` uses the direct SWTCON presenter and Pluto's managed
+  supervisor, boot fallback, standby, and recovery services.
+- `linux-arm` keeps the stock display service alive. A managed XOVI/AppLoad
+  extension owns app lifecycle, while Pluto's QTFB presenter exchanges the
+  framebuffer, damage, pen, touch, and key events with it.
+
+Those are implementation backends, not separate Pluto products. Applications
+use the same Flutter engine pin, manifest, package integrity contract, Home,
+Ink, Codex UI, and device commands. Contributors may work on the backend
+components directly; users must not install XOVI, AppLoad, service overrides,
+or QTFB shims by hand. `pluto provision` owns their validation, activation,
+rollback, and removal.
+
+The `linux-arm` runtime is currently release AOT only. The `linux-arm64`
+runtime additionally supports profile AOT and explicitly requested debug/JIT.
+An unavailable development mode is rejected as a capability mismatch; normal
+release install, launch, inspection, and removal remain the same workflow.
+
+## Release artifact targeting
+
+Every application layout and `.plap` records exactly one target. The normal
+build command probes the same device and selects that target automatically:
+
+```bash
+pluto build package --device "$DEVICE" --release
+```
+
+Release automation may use `--target-platform linux-arm64` or
+`--target-platform linux-arm` as an advanced offline override. If `--device`
+is also present, a contradictory override is rejected. Install/provision
+validate the recorded target; the CLI never relabels, translates, or attempts
+to run an architecture-mismatched package.
+
+## ARMv7 ABI ceiling
+
+Both exact firmware tuples used for acceptance currently expose the following
+system-library symbol versions:
+
+| Tested device and firmware | Available GLIBC | Available GLIBCXX | Available CXXABI |
+| --- | ---: | ---: | ---: |
+| reMarkable 1 on 3.27.3.0, build `20260612085811` | 2.39 | 3.4.32 | 1.3.14 |
+| reMarkable 2 on 3.28.0.162, build `20260629074044` | 2.39 | 3.4.32 | 1.3.14 |
+
+Those observations do not define Pluto's compatibility baseline. Every shared
+`linux-arm` release binary is intentionally held to the more conservative
+upper limits GLIBC **2.35**, GLIBCXX **3.4.29**, and CXXABI **1.3.13**. It must
+also be ELF32 `EM_ARM`, EABI5, hard-float. This leaves compatibility margin for
+supported ARMv7 installations instead of allowing a build host or one newer
+firmware image to raise the runtime requirement silently.
+
+## Firmware-sensitive integration
+
+The QTFB/AppLoad integration touches firmware-private Qt/QML interfaces. Pluto
+therefore authenticates the integration bundle and requires a
+firmware-matched QML hash table before activation. Missing or unverified
+firmware data fails closed.
+
+A firmware update must repeat at least:
+
+1. immutable device and firmware probing;
+2. target and ABI validation of every native binary;
+3. QML compatibility and integration-control checks;
+4. guarded activation with rollback available;
+5. Home, Ink, and real Codex runs through the public CLI;
+6. logs, screenshots, camera evidence, and responsiveness measurements;
+7. restore and full-uninstall recovery checks.
+
+Only after those checks pass should the tested matrix gain the new firmware.
+
+## Safety and recovery internals
+
+Pluto never intentionally leaves a tablet without a working UI. The direct
+backend uses a transactional boot installer, fallback service, dead-man
+recovery, and a stock peer root for tethered recovery. The QTFB backend keeps
+the stock display owner active, validates its managed extension under a
+one-attempt guard, and rolls back failed activation; a tethered reboot returns
+to stock behavior.
+
+When developing either backend:
+
+- keep the tablet unlocked and tethered during activation;
+- never bypass target, checksum, firmware-table, or peer-credential gates;
+- reset a failed `xochitl.service` before a controlled restart, keep at least
+  three minutes between restart experiments, and batch changes;
+- verify both logs and the physical panel;
+- use the public restore/uninstall commands for the final recovery test.
+
+## Upstream provenance
+
+The managed QTFB integration builds on
+[XOVI](https://github.com/asivery/xovi),
+[AppLoad](https://github.com/asivery/rm-appload), and the archived
+[qtfb protocol/client](https://github.com/asivery/qtfb). The exact source,
+patch, toolchain, firmware authorization, and accepted-binary identities are
+locked in the tracked
+[`tools/integration` rebuild record](../tools/integration/README.md). These
+projects retain their own licenses and release contracts.
+
+The [reMarkable developer links](https://developer.remarkable.com/links)
+publish the official SDK/toolchain used to keep native binaries compatible
+with the tested firmware.

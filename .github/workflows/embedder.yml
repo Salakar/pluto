@@ -1,0 +1,34 @@
+name: Embedder
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  embedder:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [host-debug, host-asan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+      # PLUTO_FETCH_GTEST=ON pulls real GoogleTest via FetchContent; the
+      # in-repo compatibility shim only builds a subset of the suites. No
+      # device libraries are needed on host builds: libdrm is dlopen'd at
+      # runtime and the Flutter engine is loaded dynamically.
+      - name: Configure
+        working-directory: embedder
+        run: cmake --preset ${{ matrix.preset }} -DPLUTO_FETCH_GTEST=ON
+      - name: Build
+        working-directory: embedder
+        run: cmake --build --preset ${{ matrix.preset }}
+      # The gitignored .eink golden fixture is absent in CI: the panel golden
+      # test must report SKIPPED here (loudly), never a silent PASS.
+      - name: Test
+        working-directory: embedder
+        run: ctest --preset ${{ matrix.preset }}

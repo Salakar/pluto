@@ -1,0 +1,128 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "host-debug",
+      "displayName": "Host debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "host-asan",
+      "displayName": "Host AddressSanitizer",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "host-tsan",
+      "displayName": "Host ThreadSanitizer",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+      }
+    },
+    {
+      "name": "host-release",
+      "displayName": "Host release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "device-arm64",
+      "displayName": "Device arm64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/device-arm64",
+      "toolchainFile": "${sourceDir}/toolchain/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TRY_COMPILE_TARGET_TYPE": "STATIC_LIBRARY"
+      }
+    },
+    {
+      "name": "device-arm",
+      "displayName": "Device ARMv7 (reMarkable 1/2)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/device-arm",
+      "toolchainFile": "${sourceDir}/toolchain/arm-linux-gnueabi.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_TRY_COMPILE_TARGET_TYPE": "STATIC_LIBRARY"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug"
+    },
+    {
+      "name": "host-asan",
+      "configurePreset": "host-asan"
+    },
+    {
+      "name": "host-tsan",
+      "configurePreset": "host-tsan"
+    },
+    {
+      "name": "host-release",
+      "configurePreset": "host-release"
+    },
+    {
+      "name": "device-arm64",
+      "configurePreset": "device-arm64"
+    },
+    {
+      "name": "device-arm",
+      "configurePreset": "device-arm"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-asan",
+      "configurePreset": "host-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-tsan",
+      "configurePreset": "host-tsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-release",
+      "configurePreset": "host-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

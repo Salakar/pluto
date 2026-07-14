@@ -1,0 +1,19 @@
+name: Native
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable AArch64 containers
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Verify build workflow contracts
+        run: bash tools/build/test/embedder-build-workflow-test.sh
+      - name: Build and gate the device embedder
+        run: bash tools/build/embedder-device.sh

@@ -1,0 +1,28 @@
+renderer:
+  device: "reMarkable Paper Pro Move, 2x Cortex-A55, 954x1696 RGB565"
+  note: "Host benchmark numbers are indicative only; these p99 budgets are device targets."
+  damage:
+    BM-D1_full_frame_tile_diff_clean_ms_p99: 3.5
+    BM-D1_full_frame_tile_diff_5_percent_dirty_ms_p99: 4.0
+    BM-D1_full_frame_tile_diff_100_percent_dirty_ms_p99: 4.5
+    BM-D2_subtile_refine_copyback_typical_ms_p99: 1.0
+    BM-R1_rect_extract_checkerboard_ms_p99: 0.6
+  convert:
+    BM-Q1_fast_mono_bayer_512x512_ms_p99: 0.35
+    BM-Q2_gray16_bluenoise_512x512_ms_p99: 0.6
+    BM-Q3_cmyw_palette_lut_512x512_ms_p99: 1.0
+    BM-Q4_floyd_steinberg_full_panel_ms_p99: 25.0
+    BM-Q5_rotate90_convert_512x512_ms_p99: 1.0
+    BM-Q6_full_panel_convert_dither_ms_p99: 6.0
+  scheduler:
+    BM-S1_tick_under_1000_rects_per_second_us_p99: 100
+    BM-S2_steady_state_allocations: 0
+  pen_priority:
+    BM-PP1_hint_only_no_damage_us_p99: 1.0
+    BM-PP1_hover_association_16_dirty_records_us_p99: 5.0
+    BM-PP1_contact_association_16_dirty_records_us_p99: 5.0
+    BM-PP1_steady_state_allocations: 0
+    BM-PS1_preview_text_truth_submit_tick_us_p99: 20.0
+    BM-PS1_steady_state_allocations: 0
+  e2e:
+    BM-E2E_did_update_to_present_return_typical_ms_p99: 10.0

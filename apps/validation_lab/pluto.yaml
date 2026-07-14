@@ -1,0 +1,13 @@
+schema: 1
+id: dev.pluto.validation_lab
+name: Validation Lab
+version: 0.1.0
+description: Scripted e-ink renderer validation scenes for camera-rig comparison.
+icon: assets/pluto/icon.png
+entrypoint: lib/main.dart
+display:
+  orientations: [portrait]
+  defaultOrientation: portrait
+  scale: auto
+  color: auto
+  refreshProfile: ui
