@@ -295,7 +295,7 @@ void main() {
     expect(archive.buildMode, 'debug');
     expect(
       readTarEntries(archive.tarBytes).map((PlapEntry entry) => entry.path),
-      contains('bundle/flutter_assets/kernel_blob.bin'),
+      contains('targets/linux-arm64/bundle/flutter_assets/kernel_blob.bin'),
     );
   });
 
