@@ -232,6 +232,17 @@ static void cache_framebuffer_fd(int fd, bool is_framebuffer) {
                    __ATOMIC_RELEASE);
 }
 
+static bool descriptor_is_framebuffer_device(int fd) {
+  const int saved_errno = errno;
+  struct stat status;
+  const bool matches =
+      fstat(fd, &status) == 0 && S_ISCHR(status.st_mode) &&
+      (unsigned int)major(status.st_rdev) == PLUTO_REMARKABLE_FB_MAJOR &&
+      (unsigned int)minor(status.st_rdev) == PLUTO_REMARKABLE_FB_MINOR;
+  errno = saved_errno;
+  return matches;
+}
+
 static bool fd_is_framebuffer(int fd) {
   if (fd < 0) {
     return false;
@@ -241,13 +252,7 @@ static bool fd_is_framebuffer(int fd) {
     return true;
   }
 
-  const int saved_errno = errno;
-  struct stat status;
-  const bool matches =
-      fstat(fd, &status) == 0 && S_ISCHR(status.st_mode) &&
-      (unsigned int)major(status.st_rdev) == PLUTO_REMARKABLE_FB_MAJOR &&
-      (unsigned int)minor(status.st_rdev) == PLUTO_REMARKABLE_FB_MINOR;
-  errno = saved_errno;
+  const bool matches = descriptor_is_framebuffer_device(fd);
   if (matches) {
     cache_framebuffer_fd(fd, true);
   }
@@ -309,7 +314,8 @@ static int interposed_open(open_fn function, const char *path, int flags,
   const mode_t mode = has_mode ? (mode_t)va_arg(arguments, int) : 0;
   const int fd = call_open(function, path, flags, mode, has_mode);
   const int open_errno = errno;
-  if (g_enabled && !g_initializing && fd >= 0 && path_is_framebuffer(path)) {
+  if (g_enabled && !g_initializing && fd >= 0 && path_is_framebuffer(path) &&
+      descriptor_is_framebuffer_device(fd)) {
     cache_framebuffer_fd(fd, true);
     pluto_fb_observer_record_open(&g_runtime, fd, flags,
                                   PLUTO_FB_OBSERVER_FLAG_PATH_MATCH |
