@@ -1,5 +1,6 @@
 import '../process.dart';
 import '../ssh/device_transport.dart';
+import 'device_profile.dart';
 import 'remarkable_device.dart';
 
 /// Probes device metadata over SSH.
@@ -12,35 +13,40 @@ final class DeviceProbe {
 
   /// Returns a populated device model.
   ///
-  /// Set [allowHostnameFallback] to false before any write-authorizing
-  /// operation so a mutable hostname cannot impersonate supported hardware.
   Future<RemarkableDevice> probe({
     required String id,
     required String name,
-    bool allowHostnameFallback = true,
   }) async {
-    const List<String> immutableModelCommands = <String>[
-      'cat /sys/devices/soc0/machine',
-      'cat /proc/device-tree/model',
-      'cat /proc/device-tree/compatible',
-    ];
-    final List<String> immutableModelValues = await _readAllSuccessful(
-      immutableModelCommands,
+    final String machine =
+        await _readFirstSuccessful(const <String>[
+          'cat /sys/devices/soc0/machine',
+        ]) ??
+        '';
+    final String deviceTreeModel =
+        await _readFirstSuccessful(const <String>[
+          'cat /proc/device-tree/model',
+        ]) ??
+        '';
+    final String deviceTreeCompatible =
+        await _readFirstSuccessful(const <String>[
+          'cat /proc/device-tree/compatible',
+        ]) ??
+        '';
+    final String? architecture = _normalizeArchitecture(
+      await _readFirstSuccessful(const <String>['uname -m']),
     );
-    final String? model = immutableModelValues.isNotEmpty
-        ? _normalizeModel(immutableModelValues.join(' '))
-        : allowHostnameFallback
-        ? _normalizeModel(
-            await _readFirstSuccessful(const <String>['hostname']),
-          )
-        : null;
+    final DeviceProfile? profile = matchDeviceProfile(
+      DeviceIdentityEvidence(
+        machine: machine,
+        deviceTreeModel: deviceTreeModel,
+        deviceTreeCompatible: deviceTreeCompatible,
+        architecture: architecture ?? '',
+      ),
+    );
     final String? firmware = await _readFirstSuccessful(<String>[
       'cat /etc/version',
     ]);
     final String? firmwareVersion = await _readFirmwareVersion();
-    final String? architecture = await _readFirstSuccessful(<String>[
-      'uname -m',
-    ]);
     final bool provisioned = await _testPath('/home/root/pluto/VERSION');
     final bool xoviAvailable = await _testPath('/home/root/xovi');
     final bool appLoadAvailable = await _testPath(
@@ -50,8 +56,8 @@ final class DeviceProbe {
       id: id,
       name: name,
       endpoint: transport.endpoint,
-      model: model,
-      architecture: _normalizeArchitecture(architecture),
+      profile: profile,
+      architecture: architecture,
       firmwareBuild: firmware?.trim(),
       firmwareVersion: firmwareVersion,
       provisioned: provisioned,
@@ -68,18 +74,6 @@ final class DeviceProbe {
       }
     }
     return null;
-  }
-
-  Future<List<String>> _readAllSuccessful(List<String> commands) async {
-    final List<String> values = <String>[];
-    for (final String command in commands) {
-      final CommandResult result = await transport.exec(command);
-      final String value = result.stdout.trim();
-      if (result.isSuccess && value.isNotEmpty) {
-        values.add(value);
-      }
-    }
-    return values;
   }
 
   Future<bool> _testPath(String path) async {
@@ -120,27 +114,6 @@ final class DeviceProbe {
       }
     }
     return null;
-  }
-
-  String? _normalizeModel(String? raw) {
-    if (raw == null) {
-      return null;
-    }
-    final String lower = raw.toLowerCase();
-    final List<String> matches = <String>[
-      if (lower.contains('chiappa')) 'chiappa',
-      if (lower.contains('ferrari')) 'ferrari',
-      if (lower.contains('tatsu')) 'tatsu',
-      if (lower.contains('zero-sugar') ||
-          lower.contains('remarkable 2.0') ||
-          lower.contains('fsl,imx7d-sdb'))
-        'zero-sugar',
-      if (lower.contains('zero-gravitas') ||
-          lower.contains('remarkable 1.0') ||
-          lower.contains('fsl,imx6sl'))
-        'zero-gravitas',
-    ];
-    return matches.length == 1 ? matches.single : null;
   }
 
   String? _normalizeArchitecture(String? raw) {

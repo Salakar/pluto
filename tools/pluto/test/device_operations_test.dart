@@ -20,6 +20,7 @@ FakeTransport _deviceTransport(
   String host, {
   String machine = 'imx93-chiappa',
   String architecture = 'aarch64',
+  String? compatible,
   String firmwareBuild = '20260629074044',
   String firmwareVersion = '3.28.0.162',
   String xochitlDigest =
@@ -35,6 +36,19 @@ FakeTransport _deviceTransport(
     }
     if (command == 'uname -m') {
       return CommandResult(exitCode: 0, stdout: architecture);
+    }
+    if (command == 'cat /proc/device-tree/compatible') {
+      return CommandResult(
+        exitCode: 0,
+        stdout:
+            compatible ??
+            (machine.toLowerCase().contains('chiappa')
+                ? 'fsl,imx93'
+                : machine.toLowerCase().contains('remarkable 1') ||
+                      machine.toLowerCase().contains('zero-gravitas')
+                ? 'remarkable,zero-gravitas\u0000fsl,imx6sl'
+                : 'fsl,imx7d-sdb\u0000fsl,imx7d'),
+      );
     }
     if (command == 'cat /etc/version') {
       return CommandResult(exitCode: 0, stdout: firmwareBuild);
@@ -834,40 +848,32 @@ void main() {
     }
   });
 
-  test(
-    'provision accepts architecture aliases on direct-runtime models',
-    () async {
-      for (final ({String target, String machine, String architecture}) fixture
-          in <({String target, String machine, String architecture})>[
-            (
-              target: 'linux-arm64',
-              machine: 'imx93-chiappa',
-              architecture: 'aarch64',
-            ),
-            (
-              target: 'linux-arm64',
-              machine: 'imx93-chiappa',
-              architecture: 'arm64',
-            ),
-          ]) {
-        final FakeTransport transport = _deviceTransport(
-          'device',
-          machine: fixture.machine,
-          architecture: fixture.architecture,
-        );
+  test('provision accepts the exact generated target architecture', () async {
+    for (final ({String target, String machine, String architecture}) fixture
+        in <({String target, String machine, String architecture})>[
+          (
+            target: 'linux-arm64',
+            machine: 'imx93-chiappa',
+            architecture: 'aarch64',
+          ),
+        ]) {
+      final FakeTransport transport = _deviceTransport(
+        'device',
+        machine: fixture.machine,
+        architecture: fixture.architecture,
+      );
 
-        final DeviceOperationResult result =
-            await LiveDeviceOperations(transport).provision(
-              runtime: const <PayloadFile>[],
-              apps: const <PayloadApp>[],
-              payloadTarget: fixture.target,
-              bootDefault: false,
-            );
+      final DeviceOperationResult result = await LiveDeviceOperations(transport)
+          .provision(
+            runtime: const <PayloadFile>[],
+            apps: const <PayloadApp>[],
+            payloadTarget: fixture.target,
+            bootDefault: false,
+          );
 
-        expect(result.ok, isTrue, reason: '$fixture');
-      }
-    },
-  );
+      expect(result.ok, isTrue, reason: '$fixture');
+    }
+  });
 
   test('provision compatibility refusal occurs before remote writes', () async {
     for (final ({String target, String machine, String architecture}) fixture
@@ -927,15 +933,11 @@ void main() {
         'device',
         machine: 'reMarkable 2.0',
         architecture: 'armv7l',
+        compatible:
+            'remarkable,zero-gravitas\u0000fsl,imx6sl\u0000fsl,imx7d-sdb',
         execHandler: (String command) async {
           if (command == 'cat /proc/device-tree/model') {
             return const CommandResult(exitCode: 0, stdout: 'imx93-chiappa');
-          }
-          if (command == 'cat /proc/device-tree/compatible') {
-            return const CommandResult(
-              exitCode: 0,
-              stdout: 'remarkable,zero-sugar\u0000fsl,imx7d-sdb',
-            );
           }
           return const CommandResult(exitCode: 1);
         },

@@ -1,0 +1,124 @@
+{
+  "profiles": [
+    {
+      "id": "rm1",
+      "wireModel": "remarkable1",
+      "codename": "zero-gravitas",
+      "marketingName": "reMarkable 1",
+      "testedOs": "3.27.3.0",
+      "identity": {
+        "architectures": [
+          "armv7l"
+        ],
+        "boardTokens": [
+          "remarkable 1.0",
+          "remarkable 1.n",
+          "zero-gravitas"
+        ],
+        "compatibleTokens": [
+          "remarkable,zero-gravitas",
+          "fsl,imx6sl"
+        ]
+      },
+      "targetSlice": "linux-arm",
+      "displayDriver": "mxcfb_epdc",
+      "panel": {
+        "width": 1404,
+        "height": 1872,
+        "dpi": 226,
+        "sourcePixelFormat": "rgb565",
+        "color": false
+      },
+      "buildModes": [
+        "release"
+      ],
+      "capabilities": [
+        "pen",
+        "touch",
+        "refresh-control",
+        "real-completion"
+      ]
+    },
+    {
+      "id": "rm2",
+      "wireModel": "remarkable2",
+      "codename": "zero-sugar",
+      "marketingName": "reMarkable 2",
+      "testedOs": "3.28.0.162",
+      "identity": {
+        "architectures": [
+          "armv7l"
+        ],
+        "boardTokens": [
+          "remarkable 2.0",
+          "remarkable 2.n",
+          "zero-sugar"
+        ],
+        "compatibleTokens": [
+          "fsl,imx7d-sdb"
+        ]
+      },
+      "targetSlice": "linux-arm",
+      "displayDriver": "lcdif_tcon",
+      "panel": {
+        "width": 1404,
+        "height": 1872,
+        "dpi": 226,
+        "sourcePixelFormat": "rgb565",
+        "color": false
+      },
+      "buildModes": [
+        "release"
+      ],
+      "capabilities": [
+        "pen",
+        "touch",
+        "refresh-control",
+        "real-completion"
+      ]
+    },
+    {
+      "id": "move",
+      "wireModel": "paperProMove",
+      "codename": "chiappa",
+      "marketingName": "reMarkable Paper Pro Move",
+      "testedOs": "3.28.0.162",
+      "identity": {
+        "architectures": [
+          "aarch64"
+        ],
+        "boardTokens": [
+          "chiappa"
+        ],
+        "compatibleTokens": [
+          "fsl,imx93"
+        ]
+      },
+      "targetSlice": "linux-arm64",
+      "displayDriver": "gallery3_drm",
+      "panel": {
+        "width": 954,
+        "height": 1696,
+        "dpi": 264,
+        "sourcePixelFormat": "rgb565",
+        "color": true
+      },
+      "buildModes": [
+        "release",
+        "profile",
+        "debug"
+      ],
+      "capabilities": [
+        "pen",
+        "touch",
+        "frontlight",
+        "refresh-control",
+        "real-completion",
+        "color-quantization",
+        "overlap-supersession",
+        "exact-color-handoff",
+        "hot-reload"
+      ]
+    }
+  ]
+}

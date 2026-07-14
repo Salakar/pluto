@@ -24,6 +24,9 @@ Future<CommandResult> _moveExecHandler(String command) async {
   if (command == 'uname -m') {
     return const CommandResult(exitCode: 0, stdout: 'aarch64');
   }
+  if (command == 'cat /proc/device-tree/compatible') {
+    return const CommandResult(exitCode: 0, stdout: 'fsl,imx93');
+  }
   return const CommandResult(exitCode: 0);
 }
 
@@ -33,6 +36,9 @@ Future<CommandResult> _rm2ExecHandler(String command) async {
   }
   if (command == 'uname -m') {
     return const CommandResult(exitCode: 0, stdout: 'armv7l');
+  }
+  if (command == 'cat /proc/device-tree/compatible') {
+    return const CommandResult(exitCode: 0, stdout: 'fsl,imx7d-sdb');
   }
   if (command == 'cat /etc/version') {
     return const CommandResult(exitCode: 0, stdout: '20260629074044');
@@ -55,7 +61,9 @@ Future<CommandResult> _rm2ExecHandler(String command) async {
 
 FakeExecHandler _moveExecWith(FakeExecHandler fallback) =>
     (String command) async {
-      if (command == 'cat /sys/devices/soc0/machine' || command == 'uname -m') {
+      if (command == 'cat /sys/devices/soc0/machine' ||
+          command == 'cat /proc/device-tree/compatible' ||
+          command == 'uname -m') {
         return _moveExecHandler(command);
       }
       return fallback(command);
@@ -63,6 +71,7 @@ FakeExecHandler _moveExecWith(FakeExecHandler fallback) =>
 
 Future<CommandResult> _rm2ControlExecHandler(String command) async {
   if (command == 'cat /sys/devices/soc0/machine' ||
+      command == 'cat /proc/device-tree/compatible' ||
       command == 'uname -m' ||
       command == 'cat /etc/version' ||
       command == 'cat /usr/share/remarkable/update.conf' ||

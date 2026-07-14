@@ -183,6 +183,9 @@ final class _LocalShellTransport implements DeviceTransport {
     if (command == 'uname -m') {
       return const CommandResult(exitCode: 0, stdout: 'aarch64\n');
     }
+    if (command == 'cat /proc/device-tree/compatible') {
+      return const CommandResult(exitCode: 0, stdout: 'fsl,imx93\n');
+    }
     final ProcessResult result = await Process.run('sh', <String>[
       '-c',
       command,

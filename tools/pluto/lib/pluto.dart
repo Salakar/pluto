@@ -11,6 +11,7 @@ export 'src/commands.dart';
 export 'src/config/paths.dart';
 export 'src/config/pins.dart';
 export 'src/device/device_probe.dart';
+export 'src/device/device_profile.dart';
 export 'src/device/remarkable_device.dart';
 export 'src/device/remarkable_discovery.dart';
 export 'src/doctor/doctor.dart';

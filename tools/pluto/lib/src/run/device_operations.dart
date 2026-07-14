@@ -1961,11 +1961,9 @@ final class LiveDeviceOperations {
         'SSH connection to the device failed',
       );
     }
-    return DeviceProbe(transport: transport).probe(
-      id: transport.endpoint.id,
-      name: transport.endpoint.id,
-      allowHostnameFallback: false,
-    );
+    return DeviceProbe(
+      transport: transport,
+    ).probe(id: transport.endpoint.id, name: transport.endpoint.id);
   }
 
   void _validateDirectRuntimeDevice(

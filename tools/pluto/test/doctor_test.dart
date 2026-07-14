@@ -106,6 +106,12 @@ final class _DoctorHarness {
         if (command == 'cat /sys/devices/soc0/machine') {
           return const CommandResult(exitCode: 0, stdout: 'chiappa');
         }
+        if (command == 'cat /proc/device-tree/compatible') {
+          return const CommandResult(exitCode: 0, stdout: 'fsl,imx93');
+        }
+        if (command == 'uname -m') {
+          return const CommandResult(exitCode: 0, stdout: 'aarch64');
+        }
         if (command == 'cat /etc/version') {
           return const CommandResult(exitCode: 0, stdout: '20260629074044');
         }

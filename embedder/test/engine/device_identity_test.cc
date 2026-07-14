@@ -7,6 +7,7 @@
 #include <fstream>
 #include <string>
 
+#include "generated/device_profiles.h"
 #include "gtest/gtest.h"
 
 namespace {
@@ -14,7 +15,7 @@ namespace {
 namespace fs = std::filesystem;
 
 class TempIdentityTree {
- public:
+public:
   TempIdentityTree() {
     static std::atomic<int> counter{0};
     root_ = fs::temp_directory_path() /
@@ -28,59 +29,58 @@ class TempIdentityTree {
     fs::remove_all(root_, error);
   }
 
-  fs::path path(const char* name) const { return root_ / name; }
+  fs::path path(const char *name) const { return root_ / name; }
 
-  void write(const char* name, const std::string& value) {
+  void write(const char *name, const std::string &value) {
     std::ofstream output(path(name), std::ios::binary | std::ios::trunc);
     output.write(value.data(), static_cast<std::streamsize>(value.size()));
   }
 
- private:
+private:
   fs::path root_;
 };
 
-TEST(DeviceIdentity, MapsKnownImmutableHardwareNamesToWireModels) {
-  struct Fixture {
-    const char* identity;
-    const char* model;
-    const char* codename;
-  };
-  const Fixture fixtures[] = {
-      {"reMarkable 1.0", "remarkable1", "zero-gravitas"},
-      {"fsl,imx6sl", "remarkable1", "zero-gravitas"},
-      {"reMarkable 2.0", "remarkable2", "zero-sugar"},
-      {"imx93-chiappa", "paperProMove", "chiappa"},
-      {"imx8mm-ferrari", "paperPro", "ferrari"},
-      {"reMarkable,tatsu", "paperPure", "tatsu"},
-  };
-
-  for (const Fixture& fixture : fixtures) {
+TEST(DeviceIdentity, AcceptsEveryGeneratedConjunctiveIdentityFixture) {
+  for (const pluto::GeneratedDeviceIdentityFixture &fixture :
+       pluto::kGeneratedAcceptedDeviceIdentityFixtures) {
     const pluto::RemarkableDeviceIdentity identity =
-        pluto::classify_remarkable_device_identity(fixture.identity);
-    EXPECT_EQ(identity.model, fixture.model) << fixture.identity;
-    EXPECT_EQ(identity.codename, fixture.codename) << fixture.identity;
+        pluto::classify_remarkable_device_identity({
+            .machine = std::string(fixture.machine),
+            .device_tree_model = std::string(fixture.device_tree_model),
+            .device_tree_compatible =
+                std::string(fixture.device_tree_compatible),
+            .architecture = std::string(fixture.architecture),
+        });
+    ASSERT_EQ(identity.profile_id, fixture.profile_id);
+    const pluto::GeneratedDeviceProfile *profile =
+        pluto::generated_device_profile_by_id(fixture.profile_id);
+    ASSERT_NE(profile, nullptr);
+    EXPECT_EQ(identity.model, profile->wire_model);
+    EXPECT_EQ(identity.codename, profile->codename);
   }
 }
 
-TEST(DeviceIdentity, UnknownHardwareFailsClosed) {
-  const pluto::RemarkableDeviceIdentity identity =
-      pluto::classify_remarkable_device_identity("unrecognized tablet");
-  EXPECT_EQ(identity.model, "unknown");
-  EXPECT_TRUE(identity.codename.empty());
-}
-
-TEST(DeviceIdentity, ConflictingImmutableEvidenceFailsClosed) {
-  const pluto::RemarkableDeviceIdentity identity =
-      pluto::classify_remarkable_device_identity(
-          "imx93-chiappa remarkable 2.0");
-  EXPECT_EQ(identity.model, "unknown");
-  EXPECT_TRUE(identity.codename.empty());
+TEST(DeviceIdentity, RejectsEveryGeneratedIncompleteOrConflictingFixture) {
+  for (const pluto::GeneratedDeviceIdentityFixture &fixture :
+       pluto::kGeneratedRejectedDeviceIdentityFixtures) {
+    const pluto::RemarkableDeviceIdentity identity =
+        pluto::classify_remarkable_device_identity({
+            .machine = std::string(fixture.machine),
+            .device_tree_model = std::string(fixture.device_tree_model),
+            .device_tree_compatible =
+                std::string(fixture.device_tree_compatible),
+            .architecture = std::string(fixture.architecture),
+        });
+    EXPECT_TRUE(identity.profile_id.empty());
+    EXPECT_EQ(identity.model, "unknown");
+    EXPECT_TRUE(identity.codename.empty());
+  }
 }
 
 TEST(DeviceIdentity, ProbeCombinesAllImmutableSourcesAndHandlesNulData) {
   TempIdentityTree tree;
-  tree.write("machine", "generic i.MX7 board\n");
-  tree.write("model", "reMarkable tablet\n");
+  tree.write("machine", "reMarkable 2.0\n");
+  tree.write("model", "reMarkable 2.n\n");
   std::string compatible = "fsl,imx7d-sdb";
   compatible.push_back('\0');
   compatible.append("fsl,imx7d");
@@ -91,8 +91,10 @@ TEST(DeviceIdentity, ProbeCombinesAllImmutableSourcesAndHandlesNulData) {
           .soc_machine = tree.path("machine").string(),
           .device_tree_model = tree.path("model").string(),
           .device_tree_compatible = tree.path("compatible").string(),
+          .architecture_override = "armv7l",
       });
 
+  EXPECT_EQ(identity.profile_id, "rm2");
   EXPECT_EQ(identity.model, "remarkable2");
   EXPECT_EQ(identity.codename, "zero-sugar");
 }
@@ -104,10 +106,12 @@ TEST(DeviceIdentity, MissingIdentityFilesFailClosed) {
           .soc_machine = tree.path("missing-machine").string(),
           .device_tree_model = tree.path("missing-model").string(),
           .device_tree_compatible = tree.path("missing-compatible").string(),
+          .architecture_override = "armv7l",
       });
 
+  EXPECT_TRUE(identity.profile_id.empty());
   EXPECT_EQ(identity.model, "unknown");
   EXPECT_TRUE(identity.codename.empty());
 }
 
-}  // namespace
+} // namespace

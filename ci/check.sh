@@ -21,6 +21,8 @@ export PATH="$PLUTO_SDK/bin:$PLUTO_SDK/bin/cache/dart-sdk/bin:$PATH"
 export PATH="${PUB_CACHE:-$HOME/.pub-cache}/bin:$PATH"
 
 bash tools/setup/test/setup_test.sh
+dart analyze --fatal-infos tools/codegen/generate_device_profiles.dart
+dart tools/codegen/generate_device_profiles.dart --check
 bash -n tools/setup/camera/capture.sh
 python3 -m unittest discover -s tools/setup/camera/test -p 'test_*.py'
 for script in tools/device/*.sh tools/device/test/*.sh; do
@@ -42,7 +44,8 @@ bash tools/device/test/pluto-session-switcher_test.sh
 bash tools/device/test/pluto-session-power-menu_test.sh
 bash tools/device/test/pluto-boot-hook_test.sh
 bash tools/device/test/pluto-boot-install_test.sh
-dart format --set-exit-if-changed packages apps tools/pluto
+sh tools/device/test/device-profiles_test.sh
+dart format --set-exit-if-changed packages apps tools/pluto tools/codegen
 melos run analyze
 melos run test
 melos run goldens

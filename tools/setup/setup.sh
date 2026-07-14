@@ -325,6 +325,11 @@ main() {
   validate_sdk "$sdk_dir" "$flutter_version" "$engine_version"
   sdk_dir="$(cd "$sdk_dir" && pwd)"
 
+  printf 'Validating generated device profiles\n'
+  env HOME="${TMPDIR:-/tmp}" DART_DISABLE_ANALYTICS=1 \
+    "$sdk_dir/bin/cache/dart-sdk/bin/dart" \
+    "$root/tools/codegen/generate_device_profiles.dart" --check
+
   if [[ "$verify_only" -eq 1 ]]; then
     printf 'Setup verified: Flutter %s, engine %s, linux-arm64 and linux-arm AOT artifacts.\n' \
       "$flutter_version" "$engine_version"
