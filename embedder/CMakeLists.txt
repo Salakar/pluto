@@ -99,6 +99,7 @@ add_library(
     src/presenter/native/mxcfb/mxcfb_backend.cc
     src/presenter/native/mxcfb/mxcfb_device.cc
     src/presenter/native/native_presenter.cc
+    src/presenter/native/rm2/wbf_decoder.cc
     src/presenter/png_encoder.cc
     src/presenter/qtfb/qtfb_client.cc
     src/presenter/qtfb/qtfb_presenter.cc
@@ -162,6 +163,15 @@ target_link_libraries(pluto-embedder PRIVATE pluto_embedder_core)
 target_compile_features(pluto-embedder PRIVATE cxx_std_20)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(pluto-embedder PRIVATE -Wl,--export-dynamic-symbol=pluto_*)
+endif()
+
+if(NOT CMAKE_CROSSCOMPILING)
+  add_executable(pluto_wbf_inspect tools/wbf_inspect.cc)
+  target_link_libraries(pluto_wbf_inspect PRIVATE pluto_embedder_core)
+  target_compile_features(pluto_wbf_inspect PRIVATE cxx_std_20)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(pluto_wbf_inspect PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
 endif()
 
 add_executable(pluto_renderer_bench bench/renderer/simple_bench.cc)
@@ -480,6 +490,40 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
       target_compile_options(pluto_embedder_core_test PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME pluto_embedder_core_test COMMAND pluto_embedder_core_test)
+  endif()
+
+  if(DEFINED PLUTO_RENDERER_GTEST_MAIN)
+    add_executable(
+      pluto_wbf_decoder_test
+      test/presenter/wbf_decoder_test.cc
+    )
+    target_link_libraries(
+      pluto_wbf_decoder_test
+      PRIVATE
+        pluto_embedder_core
+        ${PLUTO_RENDERER_GTEST_MAIN}
+    )
+    gtest_discover_tests(pluto_wbf_decoder_test)
+  else()
+    add_executable(
+      pluto_wbf_decoder_test
+      test/presenter/wbf_decoder_test.cc
+      test/renderer/gtest_main.cc
+    )
+    target_include_directories(pluto_wbf_decoder_test PRIVATE test/renderer)
+    target_link_libraries(pluto_wbf_decoder_test PRIVATE pluto_embedder_core)
+    add_test(NAME pluto_wbf_decoder_test COMMAND pluto_wbf_decoder_test)
+  endif()
+  target_compile_features(pluto_wbf_decoder_test PRIVATE cxx_std_20)
+  target_compile_definitions(
+    pluto_wbf_decoder_test
+    PRIVATE
+      PLUTO_RM2_WBF_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../analysis/native-cutover/rm2/vendor/active.wbf"
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+      pluto_wbf_decoder_test PRIVATE -Wall -Wextra -Wpedantic
+    )
   endif()
 
   # Keep the bundle's corruption/atomicity/large exact-color tests independently
