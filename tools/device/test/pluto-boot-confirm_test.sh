@@ -361,6 +361,51 @@ upgrade_available 0" "$(/bin/cat "$SET_LOG")" \
 assert_eq idle "$(sed -n "s/^PLUTO_OWNER_STATE='\([^']*\)'$/\1/p" "$OWNER")" \
   "disarm did not persist idle ownership"
 
+# SIGTERM can arrive after ExecStartPre=begin but before the session binds.
+# Only that exact same-boot, same-invocation, still-unbound attempt may use the
+# tuple-free cancellation path; it disarms first and retires the marker last.
+reset_attempt
+write_owner rm1 prepared
+seed_uboot 0 9
+run_recovery begin >/dev/null || fail "begin before unbound cancel failed"
+: > "$SET_LOG"
+unbound_cancel=$(run_recovery cancel-unbound) || fail "unbound cancel failed"
+assert_eq 'state=cancelled-unbound/profile=rm1/nonce=attempt-one' \
+  "$unbound_cancel" "unbound cancel receipt drifted"
+assert_eq "bootcount 0
+upgrade_available 0" "$(/bin/cat "$SET_LOG")" \
+  "unbound cancel did not disarm commit-last"
+assert_eq idle "$(sed -n "s/^PLUTO_OWNER_STATE='\([^']*\)'$/\1/p" "$OWNER")" \
+  "unbound cancel did not persist idle ownership"
+[ ! -e "$ATTEMPT" ] || fail "unbound cancel left its attempt marker"
+
+reset_attempt
+write_owner rm1 prepared
+seed_uboot 0 9
+run_recovery begin >/dev/null || fail "begin before invocation drift failed"
+: > "$SET_LOG"
+PLUTO_TEST_INVOCATION=other-invocation
+expect_rejected cancel-unbound
+unset PLUTO_TEST_INVOCATION
+[ -e "$ATTEMPT" ] || fail "invocation drift retired the unbound attempt"
+[ ! -s "$SET_LOG" ] || fail "invocation drift disarmed the unbound attempt"
+assert_eq 1 "$(/bin/cat "$ENV_DIR/upgrade_available")" \
+  "invocation drift cleared the recovery flag"
+
+printf 'boot-two\n' > "$TMP/boot-id"
+expect_rejected cancel-unbound
+printf 'boot-one\n' > "$TMP/boot-id"
+[ -e "$ATTEMPT" ] || fail "boot drift retired the unbound attempt"
+[ ! -s "$SET_LOG" ] || fail "boot drift disarmed the unbound attempt"
+
+run_recovery bind rm1 "$$" >/dev/null || fail "bind before cancel rejection failed"
+: > "$SET_LOG"
+expect_rejected cancel-unbound
+[ -e "$ATTEMPT" ] || fail "bound cancel-unbound retired the attempt"
+[ ! -s "$SET_LOG" ] || fail "bound cancel-unbound disarmed recovery"
+assert_eq 1 "$(/bin/cat "$ENV_DIR/upgrade_available")" \
+  "bound cancel-unbound cleared the recovery flag"
+
 # The full U-Boot boot attempt is bound to a live systemd/service/app tuple and
 # fresh nonce paths. Commit flags are last in both arm and confirm directions.
 reset_attempt
@@ -425,8 +470,9 @@ expect_rejected confirm rm1 "$$" "$OTHER_PID" attempt-one "$READY" "$HEALTH"
 expect_rejected confirm rm1 "$$" "$APP_PID" wrong-nonce "$READY" "$HEALTH"
 expect_rejected confirm rm1 "$$" "$APP_PID" attempt-one "$READY.other" "$HEALTH"
 expect_rejected confirm rm1 "$$" "$APP_PID" attempt-one "$READY" "$HEALTH.other"
-PLUTO_TEST_INVOCATION=other-invocation expect_rejected confirm rm1 "$$" \
-  "$APP_PID" attempt-one "$READY" "$HEALTH"
+PLUTO_TEST_INVOCATION=other-invocation
+expect_rejected confirm rm1 "$$" "$APP_PID" attempt-one "$READY" "$HEALTH"
+unset PLUTO_TEST_INVOCATION
 printf 'boot-two\n' > "$TMP/boot-id"
 expect_rejected confirm rm1 "$$" "$APP_PID" attempt-one "$READY" "$HEALTH"
 printf 'boot-one\n' > "$TMP/boot-id"
