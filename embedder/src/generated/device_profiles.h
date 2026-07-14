@@ -17,7 +17,14 @@ enum class NativeDisplayDriverKind {
   kLcdifTcon,
   kGallery3Drm,
 };
-enum class GeneratedRecoveryStrategy { kUbootEnv, kLpgprHelper };
+enum class GeneratedBootConfirmationStrategy {
+  kUbootEnv,
+  kLpgprCounter,
+};
+enum class GeneratedBootFailureStrategy {
+  kUbootEnvForceReboot,
+  kUnverified,
+};
 
 struct GeneratedPanelProfile {
   int width;
@@ -48,7 +55,9 @@ struct GeneratedDisplayContract {
 };
 
 struct GeneratedRecoveryContract {
-  GeneratedRecoveryStrategy strategy;
+  GeneratedBootConfirmationStrategy confirmation_strategy;
+  GeneratedBootFailureStrategy failure_strategy;
+  bool boot_default_enabled;
   std::string_view mmc_device;
   std::optional<std::array<std::uint32_t, 2>> root_partitions;
   std::optional<std::uint32_t> expected_boot_limit;
@@ -291,7 +300,9 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .bezel_redraw_enable_path = "",
                     .recovery =
                         {
-                            .strategy = GeneratedRecoveryStrategy::kUbootEnv,
+                            .confirmation_strategy = GeneratedBootConfirmationStrategy::kUbootEnv,
+                            .failure_strategy = GeneratedBootFailureStrategy::kUbootEnvForceReboot,
+                            .boot_default_enabled = true,
                             .mmc_device = "/dev/mmcblk1",
                             .root_partitions = std::array<std::uint32_t, 2>{2, 3},
                             .expected_boot_limit = 1,
@@ -368,7 +379,9 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .bezel_redraw_enable_path = "",
                     .recovery =
                         {
-                            .strategy = GeneratedRecoveryStrategy::kUbootEnv,
+                            .confirmation_strategy = GeneratedBootConfirmationStrategy::kUbootEnv,
+                            .failure_strategy = GeneratedBootFailureStrategy::kUbootEnvForceReboot,
+                            .boot_default_enabled = true,
                             .mmc_device = "/dev/mmcblk2",
                             .root_partitions = std::array<std::uint32_t, 2>{2, 3},
                             .expected_boot_limit = 1,
@@ -445,7 +458,9 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .bezel_redraw_enable_path = "/sys/bus/iio/devices/iio:device3/events/in_accel0_gesture_doubletap_en",
                     .recovery =
                         {
-                            .strategy = GeneratedRecoveryStrategy::kLpgprHelper,
+                            .confirmation_strategy = GeneratedBootConfirmationStrategy::kLpgprCounter,
+                            .failure_strategy = GeneratedBootFailureStrategy::kUnverified,
+                            .boot_default_enabled = false,
                             .mmc_device = "",
                             .root_partitions = std::nullopt,
                             .expected_boot_limit = std::nullopt,

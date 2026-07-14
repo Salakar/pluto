@@ -65,8 +65,8 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
   fail "rm1 power-key path drifted"
 [ -z "$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS" ] ||
   fail "rm1 incorrectly gained a frontlight path"
-[ "$PLUTO_PROFILE_RECOVERY_STRATEGY:$PLUTO_PROFILE_RECOVERY_MMC_DEVICE:$PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS:$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT" = \
-    'uboot_env:/dev/mmcblk1:2,3:1' ] ||
+[ "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY:$PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY:$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED:$PLUTO_PROFILE_RECOVERY_MMC_DEVICE:$PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS:$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT" = \
+    'uboot_env:uboot_env_force_reboot:1:/dev/mmcblk1:2,3:1' ] ||
   fail "rm1 U-Boot recovery contract drifted"
 [ -z "$PLUTO_PROFILE_RECOVERY_HELPER$PLUTO_PROFILE_RECOVERY_COUNTER_DIR" ] ||
   fail "rm1 incorrectly gained the Move LPGPR helper"
@@ -106,8 +106,8 @@ esac
 [ "$PLUTO_PROFILE_POWER_KEY_DEVICE" = \
     /dev/input/by-path/platform-30370000.snvs:snvs-powerkey-event ] ||
   fail "rm2 power-key path drifted"
-[ "$PLUTO_PROFILE_RECOVERY_STRATEGY:$PLUTO_PROFILE_RECOVERY_MMC_DEVICE:$PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS:$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT" = \
-    'uboot_env:/dev/mmcblk2:2,3:1' ] ||
+[ "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY:$PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY:$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED:$PLUTO_PROFILE_RECOVERY_MMC_DEVICE:$PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS:$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT" = \
+    'uboot_env:uboot_env_force_reboot:1:/dev/mmcblk2:2,3:1' ] ||
   fail "rm2 U-Boot recovery contract drifted"
 
 pluto_profile_load move || fail "could not load Move runtime profile"
@@ -131,8 +131,9 @@ move_sources=$(pluto_profile_waveform_sources) ||
 [ "$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS" = \
     /sys/class/backlight/rm_frontlight/brightness ] ||
   fail "Move frontlight path drifted"
-[ "$PLUTO_PROFILE_RECOVERY_STRATEGY" = lpgpr_helper ] ||
-  fail "Move recovery strategy drifted"
+[ "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY:$PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY:$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED" = \
+    lpgpr_counter:unverified:0 ] ||
+  fail "Move gated recovery strategies drifted"
 [ "$PLUTO_PROFILE_RECOVERY_HELPER" = \
     /usr/sbin/rm-reset-boot-count.sh ] ||
   fail "Move boot-confirmation helper drifted"

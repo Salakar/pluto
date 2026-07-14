@@ -28,13 +28,22 @@ enum NativeDisplayDriverKind {
   gallery3Drm,
 }
 
-/// Hardware-specific boot recovery and stable-confirmation mechanism.
-enum BootRecoveryStrategy {
+/// Hardware-specific stable-boot confirmation mechanism.
+enum BootConfirmationStrategy {
   /// U-Boot environment selects A/B MMC root partitions.
   ubootEnv,
 
   /// Vendor helper clears the active LPGPR root error counter.
-  lpgprHelper,
+  lpgprCounter,
+}
+
+/// Hardware-specific action taken when the boot-default service fails.
+enum BootFailureStrategy {
+  /// Arm the U-Boot fallback counter and force an immediate reboot.
+  ubootEnvForceReboot,
+
+  /// Failure and reboot behavior has not passed the hardware acceptance gate.
+  unverified,
 }
 
 /// Immutable physical panel facts.
@@ -135,7 +144,9 @@ final class DisplayContract {
 final class BootRecoveryContract {
   /// Creates an immutable recovery contract.
   const BootRecoveryContract({
-    required this.strategy,
+    required this.confirmationStrategy,
+    required this.failureStrategy,
+    required this.bootDefaultEnabled,
     required this.mmcDevice,
     required this.rootPartitions,
     required this.expectedBootLimit,
@@ -143,8 +154,14 @@ final class BootRecoveryContract {
     required this.counterDirectory,
   });
 
-  /// Recovery mechanism selected for this hardware family.
-  final BootRecoveryStrategy strategy;
+  /// Stable-boot confirmation selected for this hardware family.
+  final BootConfirmationStrategy confirmationStrategy;
+
+  /// Failure action selected for this hardware family.
+  final BootFailureStrategy failureStrategy;
+
+  /// Whether the complete failure/reboot path has passed its device gate.
+  final bool bootDefaultEnabled;
 
   /// MMC device prefix used by U-Boot root partition values.
   final String? mmcDevice;

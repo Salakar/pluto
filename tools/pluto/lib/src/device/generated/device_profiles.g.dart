@@ -64,7 +64,9 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       bezelRedrawIioPath: null,
       bezelRedrawEnablePath: null,
       recovery: BootRecoveryContract(
-        strategy: BootRecoveryStrategy.ubootEnv,
+        confirmationStrategy: BootConfirmationStrategy.ubootEnv,
+        failureStrategy: BootFailureStrategy.ubootEnvForceReboot,
+        bootDefaultEnabled: true,
         mmcDevice: '/dev/mmcblk1',
         rootPartitions: <int>[2, 3],
         expectedBootLimit: 1,
@@ -148,7 +150,9 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       bezelRedrawIioPath: null,
       bezelRedrawEnablePath: null,
       recovery: BootRecoveryContract(
-        strategy: BootRecoveryStrategy.ubootEnv,
+        confirmationStrategy: BootConfirmationStrategy.ubootEnv,
+        failureStrategy: BootFailureStrategy.ubootEnvForceReboot,
+        bootDefaultEnabled: true,
         mmcDevice: '/dev/mmcblk2',
         rootPartitions: <int>[2, 3],
         expectedBootLimit: 1,
@@ -235,7 +239,9 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       bezelRedrawEnablePath:
           '/sys/bus/iio/devices/iio:device3/events/in_accel0_gesture_doubletap_en',
       recovery: BootRecoveryContract(
-        strategy: BootRecoveryStrategy.lpgprHelper,
+        confirmationStrategy: BootConfirmationStrategy.lpgprCounter,
+        failureStrategy: BootFailureStrategy.unverified,
+        bootDefaultEnabled: false,
         mmcDevice: null,
         rootPartitions: null,
         expectedBootLimit: null,

@@ -63,7 +63,7 @@ POWER_OFF_COMMAND="${PLUTO_POWER_OFF_COMMAND:-systemctl poweroff}"
 # Falls back to the launcher when unset or when the app cannot start.
 DEFAULT_APP_FILE="$ROOT/state/default-app"
 PROFILE_FILE="${PLUTO_PROFILE_FILE:-$ROOT/share/device-profiles.sh}"
-BOOT_CONFIRM_DISPATCHER="${PLUTO_BOOT_CONFIRM_DISPATCHER:-$ROOT/bin/pluto-boot-confirm.sh}"
+BOOT_CONFIRM_DISPATCHER="${PLUTO_BOOT_CONFIRM_DISPATCHER:-/usr/libexec/pluto-boot-recovery}"
 BACKLIGHT_BRIGHTNESS="${PLUTO_BACKLIGHT_BRIGHTNESS:-}"
 VPDD_TIMEOUT_FILE="${PLUTO_VPDD_TIMEOUT_FILE:-}"
 SUSPEND_COMMAND="${PLUTO_SUSPEND_COMMAND:-}"
@@ -242,10 +242,10 @@ configure_profile() {
       log "profile rejected: regulator idle path is unreadable: $VPDD_TIMEOUT_FILE"
       return 78
     fi
-    [ -x "$BOOT_CONFIRM_DISPATCHER" ] || {
+    if [ -f "$BOOT_DROPIN" ] && [ ! -x "$BOOT_CONFIRM_DISPATCHER" ]; then
       log "profile rejected: boot confirmation dispatcher is missing: $BOOT_CONFIRM_DISPATCHER"
       return 78
-    }
+    fi
   fi
   if [ -n "$WAVEFORM" ]; then
     PRESENTER_OPTS="$PRESENTER_OPTS,eink=$WAVEFORM"
@@ -277,8 +277,8 @@ confirm_boot_after_ready() {
         log "boot confirmation unavailable: missing $BOOT_CONFIRM_DISPATCHER"
         return 69
       fi
-      recovery_receipt="$("$BOOT_CONFIRM_DISPATCHER")" || {
-        log "boot confirmation strategy failed: $PLUTO_PROFILE_RECOVERY_STRATEGY"
+      recovery_receipt="$("$BOOT_CONFIRM_DISPATCHER" confirm)" || {
+        log "boot confirmation strategy failed: $PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY"
         return 70
       }
       case "$recovery_receipt" in

@@ -12,6 +12,8 @@ PEER="$TMP/peer"
 DEVICE_HOME="$TMP/home"
 BIN="$TMP/bin"
 SYSTEMCTL_LOG="$TMP/systemctl.log"
+BOOT_ENV_DIR="$TMP/boot-env"
+BOOT_SET_LOG="$TMP/boot-set.log"
 
 cleanup() { rm -rf "$TMP"; }
 trap cleanup 0
@@ -69,6 +71,7 @@ expect_rejected() {
 
 mkdir -p \
   "$BIN" \
+  "$BOOT_ENV_DIR" \
   "$DEVICE_HOME" \
   "$LIVE/usr/lib/systemd/system" \
   "$PEER/usr/lib/systemd/system" \
@@ -88,17 +91,33 @@ SH
 cat > "$BIN/fw_printenv" <<'SH'
 #!/bin/sh
 [ "$1" = -n ] && [ "$#" -eq 2 ] || exit 64
-case "$2" in
-  active_partition) printf '2\n' ;;
-  fallback_partition) printf '3\n' ;;
-  bootlimit) printf '1\n' ;;
-  *) exit 1 ;;
-esac
+cat "$PLUTO_TEST_BOOT_ENV_DIR/$2"
 SH
-chmod +x "$BIN/systemctl" "$BIN/pkill" "$BIN/fw_printenv"
+cat > "$BIN/fw_setenv" <<'SH'
+#!/bin/sh
+[ "$#" -eq 2 ] || exit 64
+case "$1:$2" in
+  bootcount:0|bootcount:1|upgrade_available:0|upgrade_available:1) ;;
+  *) exit 64 ;;
+esac
+printf '%s %s\n' "$1" "$2" >> "$PLUTO_TEST_BOOT_SET_LOG"
+printf '%s\n' "$2" > "$PLUTO_TEST_BOOT_ENV_DIR/$1"
+SH
+cat > "$BIN/sync" <<'SH'
+#!/bin/sh
+exit 0
+SH
+chmod +x "$BIN/systemctl" "$BIN/pkill" "$BIN/fw_printenv" \
+  "$BIN/fw_setenv" "$BIN/sync"
+printf '2\n' > "$BOOT_ENV_DIR/active_partition"
+printf '3\n' > "$BOOT_ENV_DIR/fallback_partition"
+printf '1\n' > "$BOOT_ENV_DIR/bootlimit"
+printf '0\n' > "$BOOT_ENV_DIR/bootcount"
+printf '0\n' > "$BOOT_ENV_DIR/upgrade_available"
+: > "$BOOT_SET_LOG"
 printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-embedder"
 printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-session.sh"
-printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-boot-confirm.sh"
+cp "$HERE/../pluto-boot-confirm.sh" "$ROOT/bin/pluto-boot-confirm.sh"
 chmod +x "$ROOT/bin/pluto-embedder" "$ROOT/bin/pluto-session.sh" \
   "$ROOT/bin/pluto-boot-confirm.sh"
 : > "$ROOT/engine/release/libflutter_engine.so"
@@ -140,6 +159,7 @@ if env \
     PLUTO_TESTING=1 \
     PLUTO_TEST_PROFILE_ID=rm1 \
     PLUTO_FW_PRINTENV="$BIN/fw_printenv" \
+    PLUTO_TEST_BOOT_ENV_DIR="$BOOT_ENV_DIR" \
     PLUTO_CMDLINE_FILE="$TMP/cmdline" \
       sh "$INSTALLER" install > "$TMP/uboot-peer.out" 2>&1; then
   fail "non-block U-Boot peer partition was accepted"
@@ -158,6 +178,15 @@ boot_env() {
     PLUTO_PEER_ROOT="$PEER" \
     PLUTO_SYSTEMCTL="$BIN/systemctl" \
     PLUTO_TEST_SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+    PLUTO_PROFILE_FILE="$HERE/../generated/device-profiles.sh" \
+    PLUTO_TESTING=1 \
+    PLUTO_TEST_PROFILE_ID="${PLUTO_TEST_PROFILE_ID:-rm1}" \
+    PLUTO_FW_PRINTENV="$BIN/fw_printenv" \
+    PLUTO_FW_SETENV="$BIN/fw_setenv" \
+    PLUTO_CMDLINE_FILE="$TMP/cmdline" \
+    PLUTO_SYNC="$BIN/sync" \
+    PLUTO_TEST_BOOT_ENV_DIR="$BOOT_ENV_DIR" \
+    PLUTO_TEST_BOOT_SET_LOG="$BOOT_SET_LOG" \
     "$@"
 }
 
@@ -178,6 +207,25 @@ LIVE_DROPIN="$LIVE/usr/lib/systemd/system/xochitl.service.d/zz-pluto.conf"
 PEER_DROPIN="$PEER/usr/lib/systemd/system/xochitl.service.d/zz-pluto.conf"
 cmp -s "$TMP/expected-dropin" "$LIVE_DROPIN" ||
   fail "live-slot drop-in does not match fixture"
+RECOVERY_HANDLER="$LIVE/usr/libexec/pluto-boot-recovery"
+RECOVERY_CONFIG="$LIVE/usr/lib/pluto/boot-recovery.conf"
+RECOVERY_UNIT="$LIVE/usr/lib/systemd/system/pluto-boot-failure.service"
+[ -x "$RECOVERY_HANDLER" ] && [ -f "$RECOVERY_CONFIG" ] &&
+  [ -f "$RECOVERY_UNIT" ] ||
+  fail "rootfs recovery handler/config/service were not installed"
+if grep -F "$ROOT" "$RECOVERY_HANDLER" "$RECOVERY_CONFIG" \
+    "$RECOVERY_UNIT" >/dev/null; then
+  fail "rootfs failure recovery retained a /home runtime dependency"
+fi
+grep -q '^ExecStart=/usr/libexec/pluto-boot-recovery failure$' \
+  "$RECOVERY_UNIT" || fail "failure service does not use the rootfs handler"
+grep -q '^OnFailure=pluto-boot-failure.service$' "$LIVE_DROPIN" ||
+  fail "boot override does not route failure to Pluto recovery"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 1 ] ||
+  fail "boot override was published without an armed U-Boot transaction"
+tail -n 2 "$BOOT_SET_LOG" > "$TMP/install-arm-tail"
+[ "$(cat "$TMP/install-arm-tail")" = "bootcount 0
+upgrade_available 1" ] || fail "installer did not commit arm flag last"
 [ ! -e "$PEER_DROPIN" ] ||
   fail "install replaced the peer slot's stock rescue UI"
 if grep -q '^ExecStartPost=' "$LIVE_DROPIN"; then
@@ -204,6 +252,14 @@ boot_env sh "$INSTALLER" uninstall >/dev/null ||
   fail "fixture A/B uninstall failed"
 [ ! -e "$LIVE_DROPIN" ] || fail "live-slot drop-in survived uninstall"
 [ ! -e "$PEER_DROPIN" ] || fail "peer-slot drop-in survived uninstall"
+[ ! -e "$RECOVERY_HANDLER" ] && [ ! -e "$RECOVERY_CONFIG" ] &&
+  [ ! -e "$RECOVERY_UNIT" ] ||
+  fail "rootfs recovery artifacts survived uninstall"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 0 ] ||
+  fail "uninstall did not disarm after restoring stock"
+tail -n 2 "$BOOT_SET_LOG" > "$TMP/uninstall-disarm-tail"
+[ "$(cat "$TMP/uninstall-disarm-tail")" = "bootcount 0
+upgrade_available 0" ] || fail "uninstall did not clear recovery flag last"
 expect_legacy_units_removed "$LIVE" "live-slot uninstall"
 expect_legacy_units_removed "$PEER" "peer-slot uninstall"
 [ -e "$LIVE/usr/lib/systemd/system/unrelated.service" ] &&
@@ -215,7 +271,123 @@ expect_legacy_units_removed "$PEER" "peer-slot uninstall"
 grep -q '^restart xochitl.service$' "$SYSTEMCTL_LOG" ||
   fail "stock xochitl was not restarted"
 
+reset_boot_environment() {
+  printf '0\n' > "$BOOT_ENV_DIR/bootcount"
+  printf '0\n' > "$BOOT_ENV_DIR/upgrade_available"
+  : > "$BOOT_SET_LOG"
+}
+
+expect_installer_power_loss() {  # action boundary
+  action=$1
+  boundary=$2
+  set +e
+  PLUTO_TEST_POWER_LOSS_AT="$boundary" \
+    boot_env sh "$INSTALLER" "$action" > "$TMP/power-loss.out" 2>&1
+  result=$?
+  set -e
+  [ "$result" -eq 97 ] ||
+    fail "$action/$boundary returned $result instead of 97"
+}
+
+# Installation power-loss boundaries never expose an unarmed Pluto override.
+reset_boot_environment
+expect_installer_power_loss install recovery_handler_durable
+[ ! -e "$LIVE_DROPIN" ] ||
+  fail "handler staging boundary exposed the Pluto override"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 0 ] ||
+  fail "handler staging boundary armed recovery early"
+[ -x "$RECOVERY_HANDLER" ] && [ -f "$RECOVERY_CONFIG" ] ||
+  fail "handler staging boundary is not rootfs durable"
+boot_env sh "$INSTALLER" uninstall >/dev/null ||
+  fail "could not recover handler staging boundary"
+
+reset_boot_environment
+expect_installer_power_loss install recovery_armed
+[ ! -e "$LIVE_DROPIN" ] ||
+  fail "armed boundary exposed the Pluto override early"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 1 ] ||
+  fail "armed boundary did not commit fallback"
+boot_env sh "$INSTALLER" uninstall >/dev/null ||
+  fail "could not recover armed installation boundary"
+
+reset_boot_environment
+expect_installer_power_loss install boot_override_durable
+[ -f "$LIVE_DROPIN" ] || fail "override durable boundary lost override"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 1 ] ||
+  fail "override was durable without armed fallback"
+boot_env sh "$INSTALLER" uninstall >/dev/null ||
+  fail "could not recover override durable boundary"
+
+# A normal activation error runs the rollback transaction: publish stock,
+# disarm flag-last, then remove the rootfs recovery assets.
+reset_boot_environment
+if PLUTO_TEST_FAILURE_AT=boot_override_publish \
+    boot_env sh "$INSTALLER" install > "$TMP/rollback.out" 2>&1; then
+  fail "injected boot-override activation failure was accepted"
+fi
+[ ! -e "$LIVE_DROPIN" ] || fail "activation rollback retained override"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 0 ] ||
+  fail "activation rollback retained armed recovery"
+[ ! -e "$RECOVERY_HANDLER" ] && [ ! -e "$RECOVERY_CONFIG" ] &&
+  [ ! -e "$RECOVERY_UNIT" ] ||
+  fail "activation rollback retained rootfs recovery artifacts"
+unset PLUTO_TEST_FAILURE_AT
+
+# Uninstall keeps recovery armed until the stock override is durable, and does
+# not remove rootfs recovery assets until after the disarm commit.
+reset_boot_environment
+boot_env sh "$INSTALLER" install >/dev/null ||
+  fail "fixture install before uninstall fault failed"
+expect_installer_power_loss uninstall stock_override_durable
+[ ! -e "$LIVE_DROPIN" ] || fail "stock durable boundary retained override"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 1 ] ||
+  fail "stock durable boundary disarmed too early"
+[ -x "$RECOVERY_HANDLER" ] && [ -f "$RECOVERY_CONFIG" ] ||
+  fail "stock durable boundary removed recovery assets early"
+boot_env sh "$INSTALLER" uninstall >/dev/null ||
+  fail "could not resume stock durable uninstall"
+
+reset_boot_environment
+boot_env sh "$INSTALLER" install >/dev/null ||
+  fail "fixture reinstall before disarm fault failed"
+expect_installer_power_loss uninstall recovery_disarmed
+[ ! -e "$LIVE_DROPIN" ] || fail "disarm boundary retained override"
+[ "$(cat "$BOOT_ENV_DIR/upgrade_available")" = 0 ] ||
+  fail "disarm boundary did not clear fallback"
+[ -x "$RECOVERY_HANDLER" ] && [ -f "$RECOVERY_CONFIG" ] ||
+  fail "disarm boundary removed recovery assets before its commit"
+boot_env sh "$INSTALLER" uninstall >/dev/null ||
+  fail "could not resume disarm boundary uninstall"
+
+# Move can still be staged and explicitly run, but boot-default activation is
+# fail-closed until its failure/reboot behavior is measured on hardware.
+reset_boot_environment
+PLUTO_TEST_PROFILE_ID=move boot_env sh "$INSTALLER" validate >/dev/null ||
+  fail "Move manual/no-boot-default payload staging was rejected"
+if PLUTO_TEST_PROFILE_ID=move boot_env sh "$INSTALLER" install \
+    > "$TMP/move-install.out" 2>&1; then
+  fail "Move accepted boot-default activation with unverified failure recovery"
+fi
+grep -q 'boot default is gated off for move' "$TMP/move-install.out" ||
+  fail "Move boot-default rejection did not explain the recovery gate"
+[ ! -e "$LIVE_DROPIN" ] || fail "Move gate wrote a boot override"
+[ ! -s "$BOOT_SET_LOG" ] || fail "Move gate mutated U-Boot state"
+PLUTO_TEST_PROFILE_ID=move boot_env sh "$INSTALLER" uninstall >/dev/null ||
+  fail "Move no-boot-default stock staging failed"
+[ ! -s "$BOOT_SET_LOG" ] ||
+  fail "Move --no-boot-default path armed or disarmed recovery"
+unset PLUTO_TEST_PROFILE_ID
+
+# The same stock-staging path on a fresh RM root must not touch a vendor/stock
+# U-Boot transaction that Pluto does not own.
+reset_boot_environment
+boot_env sh "$INSTALLER" uninstall >/dev/null ||
+  fail "RM no-boot-default stock staging failed"
+[ ! -s "$BOOT_SET_LOG" ] ||
+  fail "fresh RM --no-boot-default path mutated U-Boot recovery"
+
 # Full uninstall must delegate to that same A/B flow before deleting ROOT.
+reset_boot_environment
 boot_env sh "$INSTALLER" install >/dev/null ||
   fail "fixture reinstall failed"
 cp "$INSTALLER" "$ROOT/bin/pluto-boot-install.sh"

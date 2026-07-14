@@ -68,10 +68,22 @@ cat > "$TMP/bin/reset-boot-count" <<'RESET_BOOT_COUNT'
 #!/bin/sh
 count=$(cat "$PLUTO_TEST_BOOT_CONFIRM_COUNT" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$PLUTO_TEST_BOOT_CONFIRM_COUNT"
-part=$(cat "$PLUTO_PROFILE_RECOVERY_COUNTER_DIR/root_part")
-printf '0\n' > "$PLUTO_PROFILE_RECOVERY_COUNTER_DIR/root${part}_errcnt"
+part=$(cat "$PLUTO_TEST_RECOVERY_COUNTER_DIR/root_part")
+printf '0\n' > "$PLUTO_TEST_RECOVERY_COUNTER_DIR/root${part}_errcnt"
 RESET_BOOT_COUNT
 : > "$TMP/zz-pluto.conf"
+cat > "$TMP/boot-recovery.conf" <<EOF
+PLUTO_RECOVERY_SCHEMA='1'
+PLUTO_RECOVERY_PROFILE_ID='move'
+PLUTO_RECOVERY_CONFIRMATION_STRATEGY='lpgpr_counter'
+PLUTO_RECOVERY_FAILURE_STRATEGY='unverified'
+PLUTO_RECOVERY_BOOT_DEFAULT_ENABLED='0'
+PLUTO_RECOVERY_MMC_DEVICE=''
+PLUTO_RECOVERY_ROOT_PARTITIONS=''
+PLUTO_RECOVERY_BOOT_LIMIT=''
+PLUTO_RECOVERY_HELPER='$TMP/bin/reset-boot-count'
+PLUTO_RECOVERY_COUNTER_DIR='$TMP/lpgpr'
+EOF
 
 cat > "$ROOT/bin/pluto-embedder" <<'EMBEDDER'
 #!/bin/sh
@@ -119,6 +131,7 @@ PLUTO_RUN_DIR="$CTL" \
 PLUTO_BOOT_DROPIN="$TMP/zz-pluto.conf" \
 PLUTO_STOCK_XOCHITL="$TMP/bin/xochitl" \
 PLUTO_BOOT_CONFIRM_DISPATCHER="$HERE/../pluto-boot-confirm.sh" \
+PLUTO_BOOT_RECOVERY_CONFIG="$TMP/boot-recovery.conf" \
 PLUTO_TEST_RECOVERY_HELPER="$TMP/bin/reset-boot-count" \
 PLUTO_TEST_RECOVERY_COUNTER_DIR="$TMP/lpgpr" \
 PLUTO_BOOT_CONFIRM_DELAY=0 \
@@ -191,7 +204,7 @@ done
   fail "vendor boot confirmation did not run exactly once"
 [ "$(cat "$TMP/lpgpr/roota_errcnt")" -eq 0 ] ||
   fail "vendor boot confirmation did not reset the selected root counter"
-grep -q '^part=a/counter=roota_errcnt confirmed_at=' \
+grep -q '^state=confirmed/part=a/counter=roota_errcnt confirmed_at=' \
   "$ROOT/state/boot-confirmed" ||
   fail "verified boot confirmation receipt was not recorded"
 [ "$(cat "$TMP/stock-pid")" -eq "$EXPECTED_STOCK_PID" ] ||

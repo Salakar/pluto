@@ -96,14 +96,18 @@ final class _Runtime {
 
 final class _Recovery {
   _Recovery(Map<String, Object?> json)
-    : strategy = _string(json, 'strategy'),
+    : confirmationStrategy = _string(json, 'confirmationStrategy'),
+      failureStrategy = _string(json, 'failureStrategy'),
+      bootDefaultEnabled = _boolean(json, 'bootDefaultEnabled'),
       mmcDevice = _optionalString(json, 'mmcDevice'),
       rootPartitions = _optionalIntegers(json, 'rootPartitions'),
       expectedBootLimit = _optionalPositiveInteger(json, 'expectedBootLimit'),
       helperPath = _optionalString(json, 'helperPath'),
       counterDirectory = _optionalString(json, 'counterDirectory');
 
-  final String strategy;
+  final String confirmationStrategy;
+  final String failureStrategy;
+  final bool bootDefaultEnabled;
   final String? mmcDevice;
   final List<int>? rootPartitions;
   final int? expectedBootLimit;
@@ -579,30 +583,37 @@ void _validateDisplayContract(_Profile profile) {
 
 void _validateRecoveryContract(_Profile profile) {
   final _Recovery recovery = profile.runtime.recovery;
-  switch (recovery.strategy) {
+  switch (recovery.confirmationStrategy) {
     case 'uboot_env':
       if (recovery.mmcDevice == null ||
           !RegExp(r'^/dev/mmcblk[0-9]+$').hasMatch(recovery.mmcDevice!) ||
           recovery.rootPartitions == null ||
           recovery.rootPartitions!.length != 2 ||
           recovery.rootPartitions!.toSet().length != 2 ||
+          recovery.rootPartitions!.any((int partition) => partition <= 0) ||
           recovery.expectedBootLimit == null ||
+          recovery.failureStrategy != 'uboot_env_force_reboot' ||
+          !recovery.bootDefaultEnabled ||
           recovery.helperPath != null ||
           recovery.counterDirectory != null) {
         _fail('${profile.id} U-Boot environment recovery contract is invalid');
       }
       break;
-    case 'lpgpr_helper':
+    case 'lpgpr_counter':
       if (recovery.mmcDevice != null ||
           recovery.rootPartitions != null ||
           recovery.expectedBootLimit != null ||
+          recovery.failureStrategy != 'unverified' ||
+          recovery.bootDefaultEnabled ||
           recovery.helperPath == null ||
-          recovery.counterDirectory == null) {
+          !recovery.helperPath!.startsWith('/') ||
+          recovery.counterDirectory == null ||
+          !recovery.counterDirectory!.startsWith('/')) {
         _fail('${profile.id} LPGPR helper recovery contract is invalid');
       }
       break;
     default:
-      _fail('${profile.id} recovery strategy is unsupported');
+      _fail('${profile.id} confirmation strategy is unsupported');
   }
 }
 
@@ -635,9 +646,14 @@ String _cpp(List<_Profile> profiles) {
     ..writeln('  kLcdifTcon,')
     ..writeln('  kGallery3Drm,')
     ..writeln('};')
-    ..writeln(
-      'enum class GeneratedRecoveryStrategy { kUbootEnv, kLpgprHelper };',
-    )
+    ..writeln('enum class GeneratedBootConfirmationStrategy {')
+    ..writeln('  kUbootEnv,')
+    ..writeln('  kLpgprCounter,')
+    ..writeln('};')
+    ..writeln('enum class GeneratedBootFailureStrategy {')
+    ..writeln('  kUbootEnvForceReboot,')
+    ..writeln('  kUnverified,')
+    ..writeln('};')
     ..writeln()
     ..writeln('struct GeneratedPanelProfile {')
     ..writeln('  int width;')
@@ -668,7 +684,9 @@ String _cpp(List<_Profile> profiles) {
     ..writeln('};')
     ..writeln()
     ..writeln('struct GeneratedRecoveryContract {')
-    ..writeln('  GeneratedRecoveryStrategy strategy;')
+    ..writeln('  GeneratedBootConfirmationStrategy confirmation_strategy;')
+    ..writeln('  GeneratedBootFailureStrategy failure_strategy;')
+    ..writeln('  bool boot_default_enabled;')
     ..writeln('  std::string_view mmc_device;')
     ..writeln('  std::optional<std::array<std::uint32_t, 2>> root_partitions;')
     ..writeln('  std::optional<std::uint32_t> expected_boot_limit;')
@@ -888,7 +906,13 @@ String _cpp(List<_Profile> profiles) {
       ..writeln('                    .recovery =')
       ..writeln('                        {')
       ..writeln(
-        '                            .strategy = GeneratedRecoveryStrategy::${_cppRecoveryStrategy(profile.runtime.recovery.strategy)},',
+        '                            .confirmation_strategy = GeneratedBootConfirmationStrategy::${_cppConfirmationStrategy(profile.runtime.recovery.confirmationStrategy)},',
+      )
+      ..writeln(
+        '                            .failure_strategy = GeneratedBootFailureStrategy::${_cppFailureStrategy(profile.runtime.recovery.failureStrategy)},',
+      )
+      ..writeln(
+        '                            .boot_default_enabled = ${profile.runtime.recovery.bootDefaultEnabled},',
       )
       ..writeln(
         '                            .mmc_device = ${_cppString(profile.runtime.recovery.mmcDevice ?? '')},',
@@ -1175,7 +1199,13 @@ String _dart(List<_Profile> profiles) {
       )
       ..writeln('          recovery: BootRecoveryContract(')
       ..writeln(
-        '            strategy: BootRecoveryStrategy.${_dartRecoveryStrategy(profile.runtime.recovery.strategy)},',
+        '            confirmationStrategy: BootConfirmationStrategy.${_dartConfirmationStrategy(profile.runtime.recovery.confirmationStrategy)},',
+      )
+      ..writeln(
+        '            failureStrategy: BootFailureStrategy.${_dartFailureStrategy(profile.runtime.recovery.failureStrategy)},',
+      )
+      ..writeln(
+        '            bootDefaultEnabled: ${profile.runtime.recovery.bootDefaultEnabled},',
       )
       ..writeln(
         '            mmcDevice: ${_dartNullableString(profile.runtime.recovery.mmcDevice)},',
@@ -1368,7 +1398,13 @@ String _shell(List<_Profile> profiles) {
         "      PLUTO_PROFILE_BEZEL_REDRAW_ENABLE=${_shellString(profile.runtime.bezelRedrawEnablePath ?? '')}",
       )
       ..writeln(
-        "      PLUTO_PROFILE_RECOVERY_STRATEGY=${_shellString(profile.runtime.recovery.strategy)}",
+        "      PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY=${_shellString(profile.runtime.recovery.confirmationStrategy)}",
+      )
+      ..writeln(
+        "      PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY=${_shellString(profile.runtime.recovery.failureStrategy)}",
+      )
+      ..writeln(
+        "      PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED=${_shellString(profile.runtime.recovery.bootDefaultEnabled ? '1' : '0')}",
       )
       ..writeln(
         "      PLUTO_PROFILE_RECOVERY_MMC_DEVICE=${_shellString(profile.runtime.recovery.mmcDevice ?? '')}",
@@ -1432,7 +1468,9 @@ String _shell(List<_Profile> profiles) {
     ..writeln('  export PLUTO_PROFILE_VPDD_TIMEOUT')
     ..writeln('  export PLUTO_PROFILE_BEZEL_REDRAW_IIO')
     ..writeln('  export PLUTO_PROFILE_BEZEL_REDRAW_ENABLE')
-    ..writeln('  export PLUTO_PROFILE_RECOVERY_STRATEGY')
+    ..writeln('  export PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY')
+    ..writeln('  export PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY')
+    ..writeln('  export PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED')
     ..writeln('  export PLUTO_PROFILE_RECOVERY_MMC_DEVICE')
     ..writeln('  export PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS')
     ..writeln('  export PLUTO_PROFILE_RECOVERY_BOOT_LIMIT')
@@ -1535,12 +1573,14 @@ String _markdown(List<_Profile> profiles) {
   final StringBuffer output = StringBuffer()
     ..writeln('<!-- GENERATED FILE: edit config/device_profiles.json. -->')
     ..writeln(
-      '| Device | Profile | Codename | Tested OS | Target | Native driver | Panel | Scanout contract | Build modes |',
+      '| Device | Profile | Codename | Tested OS | Target | Native driver | Panel | Scanout contract | Recovery | Boot default | Build modes |',
     )
-    ..writeln('| --- | --- | --- | --- | --- | --- | ---: | --- | --- |');
+    ..writeln(
+      '| --- | --- | --- | --- | --- | --- | ---: | --- | --- | --- | --- |',
+    );
   for (final _Profile profile in profiles) {
     output.writeln(
-      '| ${profile.marketingName} | `${profile.id}` | `${profile.codename}` | ${profile.testedOs} | `${profile.targetSlice}` | `${profile.displayDriver}` | ${profile.panel.width} × ${profile.panel.height} @ ${profile.panel.dpi} dpi | ${_displaySummary(profile.runtime.display)} | ${profile.buildModes.map((String mode) => '`$mode`').join(', ')} |',
+      '| ${profile.marketingName} | `${profile.id}` | `${profile.codename}` | ${profile.testedOs} | `${profile.targetSlice}` | `${profile.displayDriver}` | ${profile.panel.width} × ${profile.panel.height} @ ${profile.panel.dpi} dpi | ${_displaySummary(profile.runtime.display)} | `${profile.runtime.recovery.confirmationStrategy}` / `${profile.runtime.recovery.failureStrategy}` | ${profile.runtime.recovery.bootDefaultEnabled ? 'enabled' : 'staging only'} | ${profile.buildModes.map((String mode) => '`$mode`').join(', ')} |',
     );
   }
   return output.toString();
@@ -1645,10 +1685,16 @@ String _cppOptionalIntArray2(List<int>? values) => values == null
     ? 'std::nullopt'
     : 'std::array<std::uint32_t, 2>{${values.join(', ')}}';
 
-String _cppRecoveryStrategy(String value) => switch (value) {
+String _cppConfirmationStrategy(String value) => switch (value) {
   'uboot_env' => 'kUbootEnv',
-  'lpgpr_helper' => 'kLpgprHelper',
-  _ => throw StateError('unvalidated recovery strategy $value'),
+  'lpgpr_counter' => 'kLpgprCounter',
+  _ => throw StateError('unvalidated confirmation strategy $value'),
+};
+
+String _cppFailureStrategy(String value) => switch (value) {
+  'uboot_env_force_reboot' => 'kUbootEnvForceReboot',
+  'unverified' => 'kUnverified',
+  _ => throw StateError('unvalidated failure strategy $value'),
 };
 
 String _dartString(String value) => jsonEncode(value).replaceAll('"', "'");
@@ -1661,10 +1707,16 @@ String _dartNullableInt(int? value) => value == null ? 'null' : '$value';
 String _dartNullableIntList(List<int>? values) =>
     values == null ? 'null' : '<int>[${values.join(', ')}]';
 
-String _dartRecoveryStrategy(String value) => switch (value) {
+String _dartConfirmationStrategy(String value) => switch (value) {
   'uboot_env' => 'ubootEnv',
-  'lpgpr_helper' => 'lpgprHelper',
-  _ => throw StateError('unvalidated recovery strategy $value'),
+  'lpgpr_counter' => 'lpgprCounter',
+  _ => throw StateError('unvalidated confirmation strategy $value'),
+};
+
+String _dartFailureStrategy(String value) => switch (value) {
+  'uboot_env_force_reboot' => 'ubootEnvForceReboot',
+  'unverified' => 'unverified',
+  _ => throw StateError('unvalidated failure strategy $value'),
 };
 
 String _dartStringList(List<String> values) =>

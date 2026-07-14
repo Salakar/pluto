@@ -76,7 +76,9 @@
         "bezelRedrawIioPath": null,
         "bezelRedrawEnablePath": null,
         "recovery": {
-          "strategy": "uboot_env",
+          "confirmationStrategy": "uboot_env",
+          "failureStrategy": "uboot_env_force_reboot",
+          "bootDefaultEnabled": true,
           "mmcDevice": "/dev/mmcblk1",
           "rootPartitions": [
             2,
@@ -174,7 +176,9 @@
         "bezelRedrawIioPath": null,
         "bezelRedrawEnablePath": null,
         "recovery": {
-          "strategy": "uboot_env",
+          "confirmationStrategy": "uboot_env",
+          "failureStrategy": "uboot_env_force_reboot",
+          "bootDefaultEnabled": true,
           "mmcDevice": "/dev/mmcblk2",
           "rootPartitions": [
             2,
@@ -269,7 +273,9 @@
         "bezelRedrawIioPath": "/dev/iio:device3",
         "bezelRedrawEnablePath": "/sys/bus/iio/devices/iio:device3/events/in_accel0_gesture_doubletap_en",
         "recovery": {
-          "strategy": "lpgpr_helper",
+          "confirmationStrategy": "lpgpr_counter",
+          "failureStrategy": "unverified",
+          "bootDefaultEnabled": false,
           "mmcDevice": null,
           "rootPartitions": null,
           "expectedBootLimit": null,

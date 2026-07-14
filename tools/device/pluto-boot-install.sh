@@ -24,7 +24,9 @@ SYSTEMCTL="${PLUTO_SYSTEMCTL:-systemctl}"
 PEER_ROOT_OVERRIDE="${PLUTO_PEER_ROOT:-}"
 PROFILE_FILE="${PLUTO_PROFILE_FILE:-$ROOT/share/device-profiles.sh}"
 FW_PRINTENV="${PLUTO_FW_PRINTENV:-/usr/sbin/fw_printenv}"
+FW_SETENV="${PLUTO_FW_SETENV:-/usr/sbin/fw_setenv}"
 CMDLINE_FILE="${PLUTO_CMDLINE_FILE:-/proc/cmdline}"
+SYNC="${PLUTO_SYNC:-sync}"
 
 log() { printf '[pluto-boot %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -33,7 +35,7 @@ rootfs_rw() {
   mount -o remount,rw / 2>/dev/null || die "cannot remount rootfs rw"
 }
 rootfs_ro() {
-  sync
+  "$SYNC" || die "cannot sync rootfs transaction"
   [ -n "$SYSTEM_ROOT" ] || mount -o remount,ro / 2>/dev/null || true
 }
 
@@ -43,7 +45,7 @@ require_payload() {
   [ -x "$ROOT/bin/pluto-embedder" ] || die "missing $ROOT/bin/pluto-embedder"
   [ -x "$ROOT/bin/pluto-session.sh" ] || die "missing $ROOT/bin/pluto-session.sh"
   [ -x "$ROOT/bin/pluto-boot-confirm.sh" ] ||
-    die "missing $ROOT/bin/pluto-boot-confirm.sh"
+    die "missing boot-recovery state machine: $ROOT/bin/pluto-boot-confirm.sh"
   [ -d "$ROOT/launcher/bundle" ] || die "missing launcher bundle at $ROOT/launcher/bundle"
   [ -f "$ROOT/launcher/bundle/lib/app.so" ] || \
     [ -f "$ROOT/launcher/bundle/app.so" ] || \
@@ -72,7 +74,7 @@ with_base_etc() {  # $1 = shell snippet operating on $BW
   BW="$BS/multi-user.target.wants"
   rc=0
   eval "$1" || rc=1
-  sync
+  "$SYNC" || rc=1
   umount "$BIND" 2>/dev/null || rc=1
   rmdir "$BIND" 2>/dev/null || true
   return "$rc"
@@ -89,6 +91,16 @@ DROPIN_REL="$DROPIN_DIR_REL/zz-pluto.conf"
 # The supervisor to run at boot. Defaults to the canonical runtime layout; the
 # CLI passes PLUTO_SUPERVISOR to match wherever the runtime was staged.
 SUPERVISOR="${PLUTO_SUPERVISOR:-$ROOT/bin/pluto-session.sh}"
+
+# Recovery must survive a missing or corrupt /home mount. The payload copy is
+# only the installer source; the active state machine, immutable contract, and
+# OnFailure service all live in the selected rootfs.
+RECOVERY_HANDLER_REL=/usr/libexec/pluto-boot-recovery
+RECOVERY_CONFIG_REL=/usr/lib/pluto/boot-recovery.conf
+RECOVERY_FAILURE_UNIT_REL="$UNIT_DIR_REL/pluto-boot-failure.service"
+RECOVERY_HANDLER="$SYSTEM_ROOT$RECOVERY_HANDLER_REL"
+RECOVERY_CONFIG="$SYSTEM_ROOT$RECOVERY_CONFIG_REL"
+RECOVERY_FAILURE_UNIT="$SYSTEM_ROOT$RECOVERY_FAILURE_UNIT_REL"
 
 # Older Pluto revisions installed separate services. Those units race the
 # xochitl.service override and can start a second supervisor after boot. Remove
@@ -125,7 +137,7 @@ remove_legacy_base_etc() {
 # and U-Boot active/fallback variables. This is the only hardware branch in the
 # common boot installer.
 load_recovery_profile() {
-  [ -n "${PLUTO_PROFILE_RECOVERY_STRATEGY:-}" ] && return 0
+  [ -n "${PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY:-}" ] && return 0
   [ -r "$PROFILE_FILE" ] || {
     log "generated device profile is missing: $PROFILE_FILE"
     return 1
@@ -151,8 +163,8 @@ boot_env_value() {
 
 peer_root_dev() {  # echoes the inactive slot's block device, or empty
   load_recovery_profile || return 0
-  case "$PLUTO_PROFILE_RECOVERY_STRATEGY" in
-    lpgpr_helper)
+  case "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY" in
+    lpgpr_counter)
       ra="$(readlink -f /dev/disk/by-partlabel/root_a 2>/dev/null)"
       rb="$(readlink -f /dev/disk/by-partlabel/root_b 2>/dev/null)"
       [ -n "$ra" ] && [ -n "$rb" ] || return 0
@@ -185,18 +197,112 @@ peer_root_dev() {  # echoes the inactive slot's block device, or empty
   esac
 }
 
+write_assignment() {  # $1 = fixed key, $2 = generated value
+  escaped="$(printf '%s' "$2" | sed "s/'/'\\\\''/g")" || return 1
+  printf "%s='%s'\n" "$1" "$escaped"
+}
+
+write_recovery_assets_under() {  # active rootfs only
+  handler_tmp="$RECOVERY_HANDLER.tmp.$$"
+  config_tmp="$RECOVERY_CONFIG.tmp.$$"
+  unit_tmp="$RECOVERY_FAILURE_UNIT.tmp.$$"
+  mkdir -p "$(dirname "$RECOVERY_HANDLER")" \
+    "$(dirname "$RECOVERY_CONFIG")" "$UNIT_DIR" || return 1
+
+  cp "$ROOT/bin/pluto-boot-confirm.sh" "$handler_tmp" || return 1
+  chmod 0755 "$handler_tmp" || return 1
+  mv "$handler_tmp" "$RECOVERY_HANDLER" || return 1
+
+  {
+    write_assignment PLUTO_RECOVERY_SCHEMA 1
+    write_assignment PLUTO_RECOVERY_PROFILE_ID "$PLUTO_PROFILE_ID"
+    write_assignment PLUTO_RECOVERY_CONFIRMATION_STRATEGY \
+      "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY"
+    write_assignment PLUTO_RECOVERY_FAILURE_STRATEGY \
+      "$PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY"
+    write_assignment PLUTO_RECOVERY_BOOT_DEFAULT_ENABLED \
+      "$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED"
+    write_assignment PLUTO_RECOVERY_MMC_DEVICE \
+      "$PLUTO_PROFILE_RECOVERY_MMC_DEVICE"
+    write_assignment PLUTO_RECOVERY_ROOT_PARTITIONS \
+      "$PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS"
+    write_assignment PLUTO_RECOVERY_BOOT_LIMIT \
+      "$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT"
+    write_assignment PLUTO_RECOVERY_HELPER \
+      "$PLUTO_PROFILE_RECOVERY_HELPER"
+    write_assignment PLUTO_RECOVERY_COUNTER_DIR \
+      "$PLUTO_PROFILE_RECOVERY_COUNTER_DIR"
+  } > "$config_tmp" || return 1
+  chmod 0600 "$config_tmp" || return 1
+  mv "$config_tmp" "$RECOVERY_CONFIG" || return 1
+
+  cat > "$unit_tmp" <<EOF || return 1
+[Unit]
+Description=Pluto boot-default failure recovery
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=$RECOVERY_HANDLER_REL failure
+EOF
+  chmod 0644 "$unit_tmp" || return 1
+  mv "$unit_tmp" "$RECOVERY_FAILURE_UNIT" || return 1
+}
+
+remove_recovery_assets_under() {
+  rm -f "$RECOVERY_FAILURE_UNIT" "$RECOVERY_CONFIG" \
+    "$RECOVERY_HANDLER" || return 1
+  rmdir "$(dirname "$RECOVERY_CONFIG")" 2>/dev/null || true
+}
+
+run_recovery_action() {  # $1 = typed state-machine action
+  [ -x "$RECOVERY_HANDLER" ] || {
+    log "rootfs recovery handler is missing: $RECOVERY_HANDLER"
+    return 1
+  }
+  [ -f "$RECOVERY_CONFIG" ] && [ ! -L "$RECOVERY_CONFIG" ] || {
+    log "rootfs recovery contract is missing: $RECOVERY_CONFIG"
+    return 1
+  }
+  PLUTO_BOOT_RECOVERY_CONFIG="$RECOVERY_CONFIG" \
+    PLUTO_FW_PRINTENV="$FW_PRINTENV" \
+    PLUTO_FW_SETENV="$FW_SETENV" \
+    PLUTO_CMDLINE_FILE="$CMDLINE_FILE" \
+    PLUTO_SYSTEMCTL="$SYSTEMCTL" \
+    PLUTO_SYNC="$SYNC" \
+      "$RECOVERY_HANDLER" "$1"
+}
+
+power_loss_at() {
+  [ "${PLUTO_TESTING:-0}" = 1 ] || return 0
+  [ "${PLUTO_TEST_POWER_LOSS_AT:-}" = "$1" ] || return 0
+  log "injected power loss at durable boundary: $1"
+  exit 97
+}
+
+failure_at() {
+  [ "${PLUTO_TESTING:-0}" = 1 ] || return 1
+  [ "${PLUTO_TEST_FAILURE_AT:-}" = "$1" ] || return 1
+  log "injected transaction failure at: $1"
+  return 0
+}
+
 # Writes the drop-in under a given root mountpoint ("" = live /). Returns
 # nonzero on write failure so callers can report per-slot.
 write_dropin_under() {  # $1 = root prefix (e.g. "" or /tmp/pluto-peer)
   d="$1$DROPIN_DIR_REL"
+  target="$1$DROPIN_REL"
+  temporary="$target.tmp.$$"
   mkdir -p "$d" || return 1
-  cat > "$1$DROPIN_REL" <<EOF || return 1
+  failure_at boot_override_publish && return 1
+  cat > "$temporary" <<EOF || return 1
 # Installed by Pluto: run the Pluto session supervisor instead of xochitl.
 [Unit]
 # The supervisor and all release-AOT payloads live on the persistent home mount.
 RequiresMountsFor=$ROOT
-# Never drop to emergency.target if Pluto exits; the supervisor self-recovers.
+# Replace stock failure handling with Pluto's rootfs-resident A/B fallback.
 OnFailure=
+OnFailure=pluto-boot-failure.service
 
 [Service]
 # Stock xochitl expects sd_notify watchdog heartbeats and restarts on failure.
@@ -208,7 +314,8 @@ Environment=PLUTO_ROOT=$ROOT
 ExecStart=
 ExecStart=$SUPERVISOR start
 EOF
-  return 0
+  chmod 0644 "$temporary" || return 1
+  mv "$temporary" "$target"
 }
 
 install_boot_under() {  # $1 = root prefix
@@ -264,7 +371,7 @@ restore_peer_stock_slot() {
   else
     log "peer slot $peer: stock-rescue cleanup failed"
   fi
-  sync
+  "$SYNC" || removed=0
   unmounted=0
   if umount "$PM" 2>/dev/null || umount -l "$PM" 2>/dev/null; then
     unmounted=1
@@ -279,29 +386,77 @@ restore_peer_stock_slot() {
   return 1
 }
 
+remove_recovery_assets_durable() {
+  rootfs_rw
+  removed=1
+  remove_recovery_assets_under || removed=0
+  rootfs_ro
+  [ "$removed" -eq 1 ]
+}
+
+rollback_armed_install() {
+  # Restore the stock unit first. Only after that rootfs change is durable may
+  # we clear the U-Boot transaction flag.
+  rootfs_rw
+  stock_restored=1
+  remove_boot_artifacts_under "$SYSTEM_ROOT" || stock_restored=0
+  remove_legacy_base_etc || stock_restored=0
+  rootfs_ro
+  [ "$stock_restored" -eq 1 ] || return 1
+  run_recovery_action disarm || return 1
+  remove_recovery_assets_durable
+}
+
 do_install() {
   mkdir -p "$STATE"
   require_payload
   [ -x "$SUPERVISOR" ] || die "supervisor not found/executable: $SUPERVISOR"
+  load_recovery_profile || die "cannot load generated recovery profile"
+  [ "$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED" = 1 ] ||
+    die "boot default is gated off for $PLUTO_PROFILE_ID; use --no-boot-default"
   # Preserve the peer as a stock rescue root before changing the selected one.
   # If this cannot be verified, do not install a boot override at all.
   restore_peer_stock_slot || die "cannot preserve peer-slot stock rescue"
+
+  # Transaction phase 1: make the recovery code/config/service durable while
+  # stock xochitl is still the live boot target.
+  log "staging rootfs boot recovery before arming $PLUTO_PROFILE_ID"
+  rootfs_rw
+  "$SYSTEMCTL" disable pluto.service pluto-fallback.service 2>/dev/null || true
+  staged=1
+  remove_legacy_units_under "$SYSTEM_ROOT" || staged=0
+  remove_legacy_base_etc || staged=0
+  write_recovery_assets_under || staged=0
+  rootfs_ro
+  if [ "$staged" -ne 1 ]; then
+    remove_recovery_assets_durable || true
+    die "stage rootfs boot recovery"
+  fi
+  power_loss_at recovery_handler_durable
+
+  # Transaction phase 2: bootcount is written first and upgrade_available is
+  # the commit flag. The stock unit remains live at this boundary.
+  if ! run_recovery_action arm; then
+    if run_recovery_action disarm; then
+      remove_recovery_assets_durable || true
+    fi
+    die "arm U-Boot fallback transaction"
+  fi
+  power_loss_at recovery_armed
+
+  # Transaction phase 3: atomically publish the Pluto xochitl override only
+  # after the fallback transaction and rootfs failure handler are durable.
   log "installing live-slot boot override: xochitl.service -> $SUPERVISOR"
   rootfs_rw
-  # Disable by name first so systemd drops any overlay enablement link. Do not
-  # stop a currently running legacy session mid-provision; deletion plus the
-  # daemon reload prevents it from returning on the next boot.
-  "$SYSTEMCTL" disable pluto.service pluto-fallback.service 2>/dev/null || true
   install_boot_under "$SYSTEM_ROOT" || {
     rootfs_ro
-    die "install boot override / remove legacy units (live slot)"
-  }
-  remove_legacy_base_etc || {
-    rootfs_ro
-    die "remove persistent legacy service enablement (live slot)"
+    rollback_armed_install ||
+      die "activation failed and automatic stock rollback was incomplete"
+    die "install boot override (live slot)"
   }
   rootfs_ro
-  log "live slot: boot override installed; legacy units removed"
+  power_loss_at boot_override_durable
+  log "live slot: armed boot override installed; legacy units removed"
   "$SYSTEMCTL" daemon-reload || true
   # A previous watchdog loop may have exhausted the firmware unit's start
   # limit. The corrected non-restarting override must be startable immediately.
@@ -314,6 +469,14 @@ do_install() {
 
 do_uninstall() {
   log "restoring stock reMarkable UI (removing boot override, both slots)"
+  had_recovery=0
+  if [ -e "$RECOVERY_CONFIG" ] || [ -e "$RECOVERY_HANDLER" ] ||
+     [ -e "$RECOVERY_FAILURE_UNIT" ]; then
+    had_recovery=1
+  fi
+
+  # The stock service override must be durably restored before disarming. A
+  # power loss at this point boots stock, while leaving the rescue flag armed.
   rootfs_rw
   "$SYSTEMCTL" disable pluto.service pluto-fallback.service 2>/dev/null || true
   live_removed=1
@@ -321,6 +484,16 @@ do_uninstall() {
   remove_legacy_base_etc || live_removed=0
   rootfs_ro
   [ "$live_removed" -eq 1 ] || die "live-slot boot override removal failed"
+  power_loss_at stock_override_durable
+
+  if [ "$had_recovery" -eq 1 ]; then
+    run_recovery_action disarm ||
+      die "stock is durable but Pluto recovery could not be disarmed"
+    power_loss_at recovery_disarmed
+  fi
+  remove_recovery_assets_durable ||
+    die "remove rootfs boot-recovery artifacts"
+
   peer_removed=0
   restore_peer_stock_slot && peer_removed=1
   "$SYSTEMCTL" daemon-reload || true
@@ -340,6 +513,8 @@ do_status() {
     "$([ "$installed" = yes ] && echo 'Pluto supervisor' || echo 'stock xochitl')"
   printf 'xochitl.service active: %s\n' "$("$SYSTEMCTL" is-active xochitl.service 2>/dev/null)"
   printf 'boots first: %s\n' "$([ "$installed" = yes ] && echo Pluto || echo xochitl)"
+  printf 'rootfs recovery installed: %s\n' \
+    "$([ -x "$RECOVERY_HANDLER" ] && [ -f "$RECOVERY_CONFIG" ] && echo yes || echo no)"
   [ -f "$STATE/boot-mode" ] && printf 'boot-mode: %s\n' "$(cat "$STATE/boot-mode")"
 }
 

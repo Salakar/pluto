@@ -2,8 +2,9 @@
 [Unit]
 # The supervisor and all release-AOT payloads live on the persistent home mount.
 RequiresMountsFor=@ROOT@
-# Never drop to emergency.target if Pluto exits; the supervisor self-recovers.
+# Replace stock failure handling with Pluto's rootfs-resident A/B fallback.
 OnFailure=
+OnFailure=pluto-boot-failure.service
 
 [Service]
 # Stock xochitl expects sd_notify watchdog heartbeats and restarts on failure.
