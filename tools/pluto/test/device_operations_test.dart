@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:pluto_cli/src/build/package_builder.dart';
 import 'package:pluto_cli/src/build/plap_reader.dart';
+import 'package:pluto_cli/src/build/tar_writer.dart';
 import 'package:pluto_cli/src/artifacts/checksums.dart';
 import 'package:pluto_cli/src/errors.dart';
 import 'package:pluto_cli/src/process.dart';
@@ -15,6 +16,8 @@ import 'package:test/test.dart';
 import 'support/aot_fixture.dart';
 
 const String root = LiveDeviceOperations.defaultDeviceRoot;
+const List<int> _armIconBytes = <int>[0x41, 0x52, 0x4d];
+const List<int> _arm64IconBytes = <int>[0x41, 0x52, 0x4d, 0x36, 0x34];
 
 FakeTransport _deviceTransport(
   String host, {
@@ -291,59 +294,118 @@ Future<File> _writePlap(
   Directory temp, {
   String appId = 'dev.example.notes',
   bool gzipped = false,
-  String? runtimeType,
   String buildMode = 'release',
   String target = 'linux-arm64',
+  bool includeBothTargets = false,
 }) async {
   final bool isDebug = buildMode == 'debug';
-  final String effectiveRuntimeType =
-      runtimeType ?? (isDebug ? 'flutter-kernel' : 'flutter-aot');
-  final PlapPackage package =
-      await const PlapPackageBuilder(compressor: NoopCompressor()).build(
-        source: MemoryPackageSource(<PackageEntry>[
+  final String runtimeType = isDebug ? 'flutter-kernel' : 'flutter-aot';
+  MemoryPackageSource sourceFor(String sliceTarget) =>
+      MemoryPackageSource(<PackageEntry>[
+        PackageEntry(
+          path: 'manifest.json',
+          bytes: Uint8List.fromList(
+            utf8.encode(
+              '{"id":"$appId","name":"Notes",'
+              '"icon":"assets/pluto/icon.png","runtime":'
+              '{"type":"$runtimeType",'
+              '${isDebug ? '' : '"appElf":"lib/app.so",'}'
+              '"assets":"flutter_assets"}}',
+            ),
+          ),
+        ),
+        if (isDebug)
           PackageEntry(
-            path: 'manifest.json',
-            bytes: Uint8List.fromList(
-              utf8.encode(
-                '{"id":"$appId","name":"Notes","runtime":'
-                '{"type":"$effectiveRuntimeType",'
-                '${isDebug ? '' : '"appElf":"lib/app.so",'}'
-                '"assets":"flutter_assets"}}',
+            path: 'bundle/flutter_assets/kernel_blob.bin',
+            bytes: Uint8List.fromList(<int>[1, 2, 3]),
+          )
+        else
+          PackageEntry(
+            path: 'bundle/lib/app.so',
+            bytes: sliceTarget == 'linux-arm'
+                ? releaseArmAotElf()
+                : buildMode == 'profile'
+                ? profileAotElf()
+                : releaseAotElf(),
+          ),
+        PackageEntry(
+          path: 'bundle/flutter_assets/AssetManifest.bin',
+          bytes: Uint8List.fromList(<int>[4, 5, 6]),
+        ),
+        PackageEntry(
+          path: 'assets/pluto/icon.png',
+          bytes: Uint8List.fromList(
+            sliceTarget == 'linux-arm' ? _armIconBytes : _arm64IconBytes,
+          ),
+        ),
+      ]);
+  final List<String> targets = includeBothTargets
+      ? const <String>['linux-arm64', 'linux-arm']
+      : <String>[target];
+  final PlapPackage package =
+      await const PlapPackageBuilder(compressor: NoopCompressor()).buildSlices(
+        slices: <PackageSliceSource>[
+          for (final String sliceTarget in targets)
+            PackageSliceSource(
+              source: sourceFor(sliceTarget),
+              metadata: PackageMetadata(
+                flutterVersion: '3.44.4',
+                engineCommit: 'abc',
+                plutoVersion: '0.1.0',
+                buildMode: buildMode,
+                engineFlavor: buildMode,
+                target: sliceTarget,
               ),
             ),
-          ),
-          if (isDebug)
-            PackageEntry(
-              path: 'bundle/flutter_assets/kernel_blob.bin',
-              bytes: Uint8List.fromList(<int>[1, 2, 3]),
-            )
-          else
-            PackageEntry(
-              path: 'bundle/lib/app.so',
-              bytes: target == 'linux-arm'
-                  ? releaseArmAotElf()
-                  : buildMode == 'profile'
-                  ? profileAotElf()
-                  : releaseAotElf(),
-            ),
-          PackageEntry(
-            path: 'bundle/flutter_assets/AssetManifest.bin',
-            bytes: Uint8List.fromList(<int>[4, 5, 6]),
-          ),
-        ]),
-        metadata: PackageMetadata(
-          flutterVersion: '3.44.4',
-          engineCommit: 'abc',
-          plutoVersion: '0.1.0',
-          buildMode: buildMode,
-          engineFlavor: buildMode,
-          target: target,
-        ),
+        ],
       );
   final File plap = File('${temp.path}/app.plap');
   await plap.writeAsBytes(gzipped ? gzip.encode(package.bytes) : package.bytes);
   return plap;
 }
+
+File _writeRawPlap(Directory temp, String name, List<PackageEntry> payload) {
+  final Map<String, String> hashes = <String, String>{
+    for (final PackageEntry entry in payload)
+      entry.path: sha256Bytes(entry.bytes),
+  };
+  final Uint8List integrity = Uint8List.fromList(
+    utf8.encode(
+      jsonEncode(<String, Object?>{
+        'compression': 'none',
+        'createdBy': 'pluto legacy-fixture',
+        'files': hashes,
+        'treeSha256': sha256Tree(hashes),
+      }),
+    ),
+  );
+  final Uint8List bytes = const TarArchiveWriter().write(<TarFileEntry>[
+    for (final PackageEntry entry in payload)
+      TarFileEntry(path: entry.path, bytes: entry.bytes),
+    TarFileEntry(path: 'INTEGRITY.json', bytes: integrity),
+  ]);
+  return File('${temp.path}/$name.plap')..writeAsBytesSync(bytes);
+}
+
+Uint8List _legacyManifest(String runtimeType) => Uint8List.fromList(
+  utf8.encode(
+    '{"id":"dev.example.notes","runtime":{"type":"$runtimeType",'
+    '"appElf":"lib/app.so","assets":"flutter_assets"}}',
+  ),
+);
+
+Uint8List _releaseMetadata(String target) => Uint8List.fromList(
+  utf8.encode(
+    jsonEncode(<String, Object?>{
+      'schema': 1,
+      'buildMode': 'release',
+      'engineFlavor': 'release',
+      'flutterVersion': '3.44.4',
+      'engineCommit': 'abc',
+      'target': target,
+    }),
+  ),
+);
 
 PayloadApp _writeCooperativeLauncher(Directory temp) {
   final Directory bundle = Directory('${temp.path}/launcher/bundle')
@@ -2007,7 +2069,10 @@ void main() {
   test('installPackage extracts and commits through the transaction', () async {
     final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
     addTearDown(() => temp.deleteSync(recursive: true));
-    final File plap = await _writePlap(temp);
+    final File plap = await _writePlap(temp, includeBothTargets: true);
+    final PlapTargetSlice selected = (await PlapArchive.read(
+      plap.path,
+    )).sliceForTarget('linux-arm64');
 
     final FakeTransport transport = _moveTransport('h');
     final LiveDeviceOperations ops = LiveDeviceOperations(transport);
@@ -2015,21 +2080,39 @@ void main() {
 
     expect(result.ok, isTrue);
     expect(result.message, contains('dev.example.notes'));
-    expect(
-      transport.uploads.any(
-        (FakeUpload u) =>
-            u.remotePath.startsWith('$root/staging/.upload-dev.example.notes.'),
+    final FakeUpload uploadedTar = transport.uploads.singleWhere(
+      (FakeUpload upload) => upload.remotePath.startsWith(
+        '$root/staging/.upload-dev.example.notes.',
       ),
-      isTrue,
-      reason: 'decompressed tar streamed to staging',
+    );
+    expect(uploadedTar.bytes, orderedEquals(selected.installTarBytes));
+    final Map<String, Uint8List> selectedEntries = <String, Uint8List>{
+      for (final PlapEntry entry in readTarEntries(uploadedTar.bytes))
+        entry.path: entry.bytes,
+    };
+    expect(selectedEntries.keys.toSet(), <String>{
+      'manifest.json',
+      'build-metadata.json',
+      'bundle/lib/app.so',
+      'bundle/flutter_assets/AssetManifest.bin',
+      'assets/pluto/icon.png',
+    });
+    expect(
+      selectedEntries.keys.any((String path) => path.startsWith('targets/')),
+      isFalse,
     );
     expect(
-      transport.uploads.any(
-        (FakeUpload u) => u.remotePath.endsWith('/install.json.pending'),
-      ),
-      isTrue,
-      reason: 'install record staged for the transaction',
+      selectedEntries['assets/pluto/icon.png'],
+      orderedEquals(_arm64IconBytes),
     );
+    final FakeUpload installUpload = transport.uploads.singleWhere(
+      (FakeUpload upload) =>
+          upload.remotePath.endsWith('/install.json.pending'),
+    );
+    final Map<String, Object?> install =
+        jsonDecode(utf8.decode(installUpload.bytes)) as Map<String, Object?>;
+    expect(install['sizeBytes'], selected.installTarBytes.length);
+    expect(install['payload'], selected.payloadHashes);
     expect(
       transport.commands.any(
         (String c) =>
@@ -2179,7 +2262,10 @@ void main() {
     () async {
       final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
       addTearDown(() => temp.deleteSync(recursive: true));
-      final File plap = await _writePlap(temp, target: 'linux-arm');
+      final File plap = await _writePlap(temp, includeBothTargets: true);
+      final PlapTargetSlice selected = (await PlapArchive.read(
+        plap.path,
+      )).sliceForTarget('linux-arm');
       final FakeTransport transport = _cooperativeTransport('device');
 
       final DeviceOperationResult result = await LiveDeviceOperations(
@@ -2210,6 +2296,34 @@ void main() {
       );
       expect(transport.uploads, isNotEmpty);
       expect(transport.directoryUploads, isEmpty);
+      final FakeUpload uploadedTar = transport.uploads.singleWhere(
+        (FakeUpload upload) =>
+            upload.remotePath.contains('/staging/.upload-dev.example.notes.'),
+      );
+      expect(uploadedTar.bytes, orderedEquals(selected.installTarBytes));
+      final Map<String, Uint8List> selectedEntries = <String, Uint8List>{
+        for (final PlapEntry entry in readTarEntries(uploadedTar.bytes))
+          entry.path: entry.bytes,
+      };
+      expect(
+        selectedEntries['assets/pluto/icon.png'],
+        orderedEquals(_armIconBytes),
+      );
+      expect(
+        selectedEntries.keys.any((String path) => path.startsWith('targets/')),
+        isFalse,
+      );
+      final FakeUpload icon = transport.uploads.singleWhere(
+        (FakeUpload upload) => upload.remotePath.endsWith('/icon.png'),
+      );
+      expect(icon.bytes, orderedEquals(_armIconBytes));
+      final FakeUpload installUpload = transport.uploads.singleWhere(
+        (FakeUpload upload) => upload.remotePath.endsWith('/install.json'),
+      );
+      final Map<String, Object?> install =
+          jsonDecode(utf8.decode(installUpload.bytes)) as Map<String, Object?>;
+      expect(install['sizeBytes'], selected.installTarBytes.length);
+      expect(install['payload'], selected.payloadHashes);
     },
   );
 
@@ -2299,7 +2413,7 @@ void main() {
   );
 
   test(
-    'installPackage refuses an ARM64 package on RM2 before writes',
+    'installPackage rejects a package missing the probed target slice',
     () async {
       final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
       addTearDown(() => temp.deleteSync(recursive: true));
@@ -2312,7 +2426,16 @@ void main() {
 
       await expectLater(
         LiveDeviceOperations(transport).installPackage(plap.path),
-        throwsA(isA<DeviceOperationException>()),
+        throwsA(
+          isA<ArtifactVerificationException>().having(
+            (ArtifactVerificationException error) => error.message,
+            'message',
+            allOf(
+              contains('no linux-arm slice'),
+              contains('available: linux-arm64'),
+            ),
+          ),
+        ),
       );
 
       expect(transport.commands, isNotEmpty);
@@ -2415,11 +2538,17 @@ void main() {
           in <({String target, String? name, int? type})>[
             (target: 'manifest.json', name: '../escape', type: null),
             (
-              target: 'bundle/flutter_assets/AssetManifest.bin',
+              target:
+                  'targets/linux-arm64/bundle/flutter_assets/'
+                  'AssetManifest.bin',
               name: 'manifest.json',
               type: null,
             ),
-            (target: 'bundle/lib/app.so', name: null, type: 0x32),
+            (
+              target: 'targets/linux-arm64/bundle/lib/app.so',
+              name: null,
+              type: 0x32,
+            ),
           ]) {
         final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
         addTearDown(() => temp.deleteSync(recursive: true));
@@ -2445,29 +2574,99 @@ void main() {
     },
   );
 
-  test('installPackage reads gzip-compressed packages', () async {
+  test('installPackage hard-rejects gzip before device I/O', () async {
     final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
     addTearDown(() => temp.deleteSync(recursive: true));
     final File plap = await _writePlap(temp, gzipped: true);
-    final PlapArchive archive = await PlapArchive.read(plap.path);
-    expect(archive.appId, 'dev.example.notes');
-    expect(
-      readTarEntries(
-        archive.tarBytes,
-      ).any((PlapEntry e) => e.path == 'bundle/lib/app.so'),
-      isTrue,
+    final FakeTransport transport = FakeTransport(
+      endpoint: const DeviceEndpoint(host: 'h'),
     );
+
+    await expectLater(
+      LiveDeviceOperations(transport).installPackage(plap.path),
+      throwsA(
+        isA<ArtifactVerificationException>().having(
+          (ArtifactVerificationException error) => error.message,
+          'message',
+          contains('Gzip .plap packages are not supported'),
+        ),
+      ),
+    );
+
+    expect(transport.commands, isEmpty);
+    expect(transport.uploads, isEmpty);
   });
 
-  test('package reader accepts legacy AOT runtime enum spelling', () async {
+  test('installPackage hard-rejects legacy runtime spelling', () async {
     final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
     addTearDown(() => temp.deleteSync(recursive: true));
-    final File plap = await _writePlap(temp, runtimeType: 'flutterAot');
+    const String prefix = 'targets/linux-arm64/';
+    final File plap = _writeRawPlap(temp, 'legacy-runtime', <PackageEntry>[
+      PackageEntry(path: 'manifest.json', bytes: _legacyManifest('flutterAot')),
+      PackageEntry(
+        path: '${prefix}build-metadata.json',
+        bytes: _releaseMetadata('linux-arm64'),
+      ),
+      PackageEntry(path: '${prefix}bundle/lib/app.so', bytes: releaseAotElf()),
+      PackageEntry(
+        path: '${prefix}bundle/flutter_assets/AssetManifest.bin',
+        bytes: Uint8List.fromList(<int>[1]),
+      ),
+    ]);
+    final FakeTransport transport = FakeTransport(
+      endpoint: const DeviceEndpoint(host: 'h'),
+    );
 
-    final PlapArchive archive = await PlapArchive.read(plap.path);
+    await expectLater(
+      LiveDeviceOperations(transport).installPackage(plap.path),
+      throwsA(
+        isA<ArtifactVerificationException>().having(
+          (ArtifactVerificationException error) => error.message,
+          'message',
+          contains('runtime flutterAot does not match'),
+        ),
+      ),
+    );
 
-    expect(archive.buildMode, 'release');
-    expect(archive.engineFlavor, 'release');
+    expect(transport.commands, isEmpty);
+    expect(transport.uploads, isEmpty);
+  });
+
+  test('installPackage hard-rejects the old flat archive layout', () async {
+    final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    final File plap = _writeRawPlap(temp, 'legacy-flat', <PackageEntry>[
+      PackageEntry(
+        path: 'manifest.json',
+        bytes: _legacyManifest('flutter-aot'),
+      ),
+      PackageEntry(
+        path: 'build-metadata.json',
+        bytes: _releaseMetadata('linux-arm64'),
+      ),
+      PackageEntry(path: 'bundle/lib/app.so', bytes: releaseAotElf()),
+      PackageEntry(
+        path: 'bundle/flutter_assets/AssetManifest.bin',
+        bytes: Uint8List.fromList(<int>[1]),
+      ),
+    ]);
+    final FakeTransport transport = FakeTransport(
+      endpoint: const DeviceEndpoint(host: 'h'),
+    );
+
+    await expectLater(
+      LiveDeviceOperations(transport).installPackage(plap.path),
+      throwsA(
+        isA<ArtifactVerificationException>().having(
+          (ArtifactVerificationException error) => error.message,
+          'message',
+          contains('Non-canonical top-level package path'),
+        ),
+      ),
+    );
+
+    expect(transport.commands, isEmpty);
+    expect(transport.uploads, isEmpty);
   });
 
   test('installPackage rejects the launcher id', () async {

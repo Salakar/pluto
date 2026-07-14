@@ -2320,7 +2320,7 @@ final class LiveDeviceOperations {
     }
   }
 
-  Uint8List? _packageIconBytes(PlapArchive archive) {
+  Uint8List? _packageIconBytes(PlapArchive archive, PlapTargetSlice slice) {
     final Object? rawPath = archive.manifest['icon'];
     if (rawPath == null) {
       return null;
@@ -2332,7 +2332,7 @@ final class LiveDeviceOperations {
       );
     }
     final PlapEntry? entry = readTarEntries(
-      archive.tarBytes,
+      slice.installTarBytes,
     ).where((PlapEntry entry) => entry.path == rawPath).firstOrNull;
     if (entry == null) {
       throw DeviceOperationException(
@@ -2345,6 +2345,7 @@ final class LiveDeviceOperations {
 
   Future<DeviceOperationResult> _installCooperativePackage(
     PlapArchive archive,
+    PlapTargetSlice slice,
     String plapPath, {
     required bool force,
     required bool launch,
@@ -2379,7 +2380,7 @@ final class LiveDeviceOperations {
       'mkdir -p ${_q(stagedApp)} ${_q(stagedEntry)}',
     );
     await transport.uploadFileBytes(
-      bytes: archive.tarBytes,
+      bytes: slice.installTarBytes,
       remotePath: upload,
     );
     await _run(
@@ -2390,10 +2391,10 @@ final class LiveDeviceOperations {
       bytes: _installRecord(
         appId,
         plapPath.split(Platform.pathSeparator).last,
-        buildMode: archive.buildMode,
-        engineFlavor: archive.engineFlavor,
-        sizeBytes: archive.tarBytes.length,
-        payload: archive.payloadHashes,
+        buildMode: slice.buildMode,
+        engineFlavor: slice.engineFlavor,
+        sizeBytes: slice.installTarBytes.length,
+        payload: slice.payloadHashes,
       ),
       remotePath: '$stagedApp/install.json',
     );
@@ -2407,7 +2408,7 @@ final class LiveDeviceOperations {
       ),
       remotePath: '$stagedEntry/external.manifest.json',
     );
-    final Uint8List? icon = _packageIconBytes(archive);
+    final Uint8List? icon = _packageIconBytes(archive, slice);
     if (icon != null) {
       await transport.uploadFileBytes(
         bytes: icon,
@@ -2494,16 +2495,20 @@ final class LiveDeviceOperations {
       );
     }
     final RemarkableDevice device = await _probeWriteTarget();
+    final String? selectedTarget = device.buildTarget;
+    if (selectedTarget == null) {
+      throw DeviceOperationException(
+        'device model is not supported for app install',
+        'Detected ${device.model ?? 'an unknown model'} at '
+            '${transport.endpoint.sshTarget}. A write-authorizing model must '
+            'come from SoC or device-tree metadata; hostname is not trusted. '
+            'No device files were changed.',
+      );
+    }
+    final PlapTargetSlice slice = archive.sliceForTarget(selectedTarget);
     if (device.runtimeBackend == PlutoRuntimeBackend.cooperative) {
       _validateCooperativeRuntimeDevice(device, operation: 'app install');
-      if (archive.target != _cooperativeTarget) {
-        throw DeviceOperationException(
-          'package target does not match the connected device',
-          'Expected $_cooperativeTarget, got ${archive.target}. No device '
-              'files were changed.',
-        );
-      }
-      if (archive.buildMode != 'release' || archive.engineFlavor != 'release') {
+      if (slice.buildMode != 'release' || slice.engineFlavor != 'release') {
         throw const DeviceOperationException(
           'this device requires a release AOT package',
           'Build and install the app with --release.',
@@ -2511,18 +2516,11 @@ final class LiveDeviceOperations {
       }
       return _installCooperativePackage(
         archive,
+        slice,
         plapPath,
         force: force,
         launch: launch,
         setDefault: setDefault,
-      );
-    }
-    if (archive.target != _directTarget) {
-      _validateDirectRuntimeDevice(device, operation: 'app install');
-      throw DeviceOperationException(
-        'package target does not match the connected device',
-        'Expected $_directTarget, got ${archive.target}. No device files '
-            'were changed.',
       );
     }
     _validateDirectRuntimeDevice(device, operation: 'direct app install');
@@ -2547,7 +2545,7 @@ final class LiveDeviceOperations {
       '${_q('$deviceRoot/state')}',
     );
     await transport.uploadFileBytes(
-      bytes: archive.tarBytes,
+      bytes: slice.installTarBytes,
       remotePath: tarPath,
     );
     await _run(
@@ -2559,10 +2557,10 @@ final class LiveDeviceOperations {
       bytes: _installRecord(
         appId,
         plapPath.split(Platform.pathSeparator).last,
-        buildMode: archive.buildMode,
-        engineFlavor: archive.engineFlavor,
-        sizeBytes: archive.tarBytes.length,
-        payload: archive.payloadHashes,
+        buildMode: slice.buildMode,
+        engineFlavor: slice.engineFlavor,
+        sizeBytes: slice.installTarBytes.length,
+        payload: slice.payloadHashes,
       ),
       remotePath: '$stageDir/install.json.pending',
     );
