@@ -207,7 +207,8 @@ public:
                                 PlutoRefreshClass cls = kPlutoRefreshFast);
 
   // Completion entry (drained from FrameRenderer's CompletionQueue).
-  void notify_completion(uint64_t frame_id);
+  // Returns true only when |frame_id| retires a currently accepted present.
+  bool notify_completion(uint64_t frame_id);
 
   // Retires timeout/synthetic fences without dispatching queued work. A pixel
   // reset uses this while ordinary damage is intentionally held behind it.
@@ -240,6 +241,9 @@ public:
   // -- introspection (SettlePlanner + tests) ----------------------------
   bool user_work_pending() const; // pen or generic user damage queued
   bool anything_inflight() const { return inflight_count_ != 0; }
+  // Sticky evidence that a presenter promising real completions missed the
+  // common fence deadline. A timeout must never count as presenter progress.
+  bool real_completion_overdue() const { return real_completion_overdue_; }
   bool settle_work_pending() const; // settle queued or in flight
   bool idle() const;
 
@@ -436,6 +440,7 @@ private:
   size_t parked_count_ = 0;
   std::array<Inflight, k_max_inflight> inflight_ = {};
   size_t inflight_count_ = 0;
+  bool real_completion_overdue_ = false;
   std::array<PlutoRect, k_max_pending_per_class> scratch_rects_ = {};
   std::array<PendingPenPreview, k_max_pending_pen_preview> pen_preview_queue_ =
       {};

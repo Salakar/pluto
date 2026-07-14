@@ -64,6 +64,7 @@ void print_usage() {
          "Options:\n"
          "  [--engine=<so>] [--icu-data=<dat>] [--aot-elf=<so>] "
          "[--ready-file=<absolute-path>] "
+         "[--health-file=<absolute-path>] "
          "[--presenter=null|host-png] [--run-duration-ms=<ms>] "
          "[--rotation=0|90|180|270] [--allowed-rotations=<csv>] "
          "[--auto-rotate] "
@@ -160,6 +161,13 @@ int main(int argc, char** argv) {
       if (config.ready_file_path.empty() ||
           !std::filesystem::path(config.ready_file_path).is_absolute()) {
         std::cerr << "--ready-file must be a non-empty absolute path\n";
+        return 2;
+      }
+    } else if (starts_with(arg, "--health-file=")) {
+      config.health_file_path = after_equals(arg);
+      if (config.health_file_path.empty() ||
+          !std::filesystem::path(config.health_file_path).is_absolute()) {
+        std::cerr << "--health-file must be a non-empty absolute path\n";
         return 2;
       }
     } else if (starts_with(arg, "--presenter=")) {

@@ -33,6 +33,8 @@
 
 namespace pluto {
 
+class HealthFilePublisher;
+
 // Mirrors the stock reMarkable GhostControlMode vocabulary. Production
 // BlinkNow/BlinkLater append the complete BleachNow rail policy to prevent
 // residual yellowing. No operation selects the slow INIT/mode-0 waveform.
@@ -98,6 +100,9 @@ struct FrameRendererConfig {
   // Absolute path atomically published after the first successful
   // presenter present() return. Empty disables readiness publication.
   std::string ready_file_path;
+  // Absolute launch-nonce-specific liveness path. When set, the renderer
+  // requires real presenter completions and a presenter-loop health probe.
+  std::string health_file_path;
   bool start_presenter_thread = true;
   // Production EngineHost publishes native-panel proximity metadata directly
   // before Flutter pointer delivery. When true, FrameRenderer keeps only its
@@ -125,6 +130,9 @@ struct FrameRendererConfig {
   // renderer mutex is held at this boundary. Production posts shutdown onto
   // the platform event loop so the supervisor can restart on the cold path.
   std::function<void()> on_presenter_device_lost;
+  // Fatal atomic-publication edge for the supervisor liveness record.
+  // Production posts shutdown onto the platform loop.
+  std::function<void()> on_health_file_failure;
   // TEST-ONLY deterministic policy clock. Timeout/fence accounting always
   // keeps the real steady clock; this hook controls only timestamps consumed
   // by renderer classification, debt, quiescence, and scheduling decisions.
@@ -352,7 +360,8 @@ private:
   void record_frame(const PlutoFramePacket &packet);
   void run_presenter_loop();
   void tick_locked(uint64_t now_us);
-  bool poll_presenter_health_locked();
+  bool poll_presenter_health_locked(uint64_t now_us, bool *presenter_idle);
+  void maybe_publish_health_locked(uint64_t now_us, bool presenter_idle);
   void sync_pen_focus_locked(uint64_t now_us);
   void publish_presenter_pen_focus_locked(const PlutoRect &logical_focus,
                                           bool contact, uint64_t sequence);
@@ -413,6 +422,7 @@ private:
   AutoGhostbuster auto_ghostbuster_;
   SettlePlanner settle_planner_;
   std::unique_ptr<RegionScheduler> scheduler_;
+  std::unique_ptr<HealthFilePublisher> health_file_;
   // The renderer core: fused tile pass writing through into the frame
   // ledger, presented via the ABI bridge.
   FrameLedger ledger_;
@@ -461,6 +471,11 @@ private:
   std::atomic<bool> wake_{false};
   std::atomic<bool> presenter_device_lost_notified_{false};
   uint64_t next_presenter_health_poll_us_ = 0;
+  uint64_t next_health_publish_us_ = 0;
+  uint64_t presenter_completion_count_ = 0;
+  uint64_t health_published_completion_count_ = 0;
+  bool presenter_supports_health_contract_ = false;
+  bool health_file_failed_ = false;
   CompletionQueue completion_queue_;
   std::atomic<size_t> dropped_completions_{0};
   static constexpr uint8_t kTouchInputBit = 1u << 0;

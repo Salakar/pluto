@@ -47,6 +47,7 @@ TEST(EngineHostConfig, DefaultsToReleaseAot) {
   EXPECT_EQ(static_cast<int>(config.mode),
             static_cast<int>(pluto::EngineMode::kRelease));
   EXPECT_TRUE(config.ready_file_path.empty());
+  EXPECT_TRUE(config.health_file_path.empty());
   EXPECT_FALSE(config.dpr_explicitly_set);
 }
 
@@ -155,6 +156,18 @@ TEST(EngineHostConfig, RejectsRelativeReadyFileBeforeStartup) {
   EXPECT_FALSE(host.initialize(&error));
   EXPECT_EQ(error,
             "startup configuration failed: --ready-file must be an absolute "
+            "path");
+}
+
+TEST(EngineHostConfig, RejectsRelativeHealthFileBeforeStartup) {
+  pluto::EngineHostConfig config;
+  config.health_file_path = "relative/health";
+  pluto::EngineHost host(std::move(config));
+  std::string error;
+
+  EXPECT_FALSE(host.initialize(&error));
+  EXPECT_EQ(error,
+            "startup configuration failed: --health-file must be an absolute "
             "path");
 }
 

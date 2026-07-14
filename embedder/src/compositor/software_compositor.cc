@@ -16,6 +16,7 @@
 
 #include "renderer/quantize.h"
 #include "renderer/rect_utils.h"
+#include "runtime/health_file.h"
 
 namespace pluto {
 namespace {
@@ -518,6 +519,10 @@ size_t CompletionQueue::size_approx_for_testing() const {
 
 FrameRenderer::FrameRenderer(const FrameRendererConfig &config)
     : config_(config) {
+  if (!config_.health_file_path.empty()) {
+    health_file_ =
+        std::make_unique<HealthFilePublisher>(config_.health_file_path);
+  }
   open_frame_recorder();
   configure(config.width, config.height, config.format);
   valid_ = components_valid();
@@ -527,11 +532,16 @@ FrameRenderer::FrameRenderer(const FrameRendererConfig &config)
 }
 
 bool FrameRenderer::components_valid() const {
+  const bool health_contract_valid =
+      config_.health_file_path.empty() ||
+      (std::filesystem::path(config_.health_file_path).is_absolute() &&
+       health_file_ != nullptr && presenter_supports_health_contract_);
   return !presenter_focus_clear_fault_ && scheduler_ != nullptr &&
          scheduler_->valid() && ledger_.valid() && ladder_.valid() &&
          scroll_detect_.valid() && guard_band_.valid() &&
          settle_planner_.valid() && pen_render_policy_.valid() &&
-         (!config_.enable_auto_ghostbuster || auto_ghostbuster_.valid());
+         (!config_.enable_auto_ghostbuster || auto_ghostbuster_.valid()) &&
+         health_contract_valid;
 }
 
 FrameRenderer::~FrameRenderer() { shutdown(); }
@@ -545,6 +555,10 @@ void FrameRenderer::configure(uint32_t width, uint32_t height,
                  "pluto: refusing renderer reconfigure during pixel reset\n");
     return;
   }
+  presenter_completion_count_ = 0;
+  health_published_completion_count_ = 0;
+  presenter_supports_health_contract_ = false;
+  next_health_publish_us_ = 0;
   // Never forget a fallback reservation owned by the previous geometry. In
   // production host-direct mode native-panel coordinates survive logical
   // reconfiguration and EngineHost owns the lifecycle terminal edge. A failed
@@ -667,6 +681,10 @@ void FrameRenderer::configure(uint32_t width, uint32_t height,
     }
   }
   display_info_available_ = have_display_info;
+  presenter_supports_health_contract_ =
+      have_display_info && scheduler_config.presenter_reports_completion &&
+      presenter_has_wait_idle_hook(config_.presenter_ops) &&
+      config_.start_presenter_thread;
 
   AbiPresentBridgeConfig bridge_config{};
   bridge_config.width = width_;
@@ -2612,7 +2630,11 @@ bool FrameRenderer::clear_presenter_pen_focus_locked(bool force) {
   return true;
 }
 
-bool FrameRenderer::poll_presenter_health_locked() {
+bool FrameRenderer::poll_presenter_health_locked(uint64_t now_us,
+                                                 bool *presenter_idle) {
+  if (presenter_idle != nullptr) {
+    *presenter_idle = false;
+  }
   if (presenter_device_lost_notified_.load(std::memory_order_acquire)) {
     return true;
   }
@@ -2622,7 +2644,6 @@ bool FrameRenderer::poll_presenter_health_locked() {
     return false;
   }
   constexpr uint64_t kHealthPollIntervalUs = 250'000;
-  const uint64_t now_us = monotonic_us();
   if (next_presenter_health_poll_us_ != 0 &&
       now_us < next_presenter_health_poll_us_) {
     return false;
@@ -2630,7 +2651,11 @@ bool FrameRenderer::poll_presenter_health_locked() {
   next_presenter_health_poll_us_ = now_us > UINT64_MAX - kHealthPollIntervalUs
                                        ? UINT64_MAX
                                        : now_us + kHealthPollIntervalUs;
-  if (ops->wait_idle(presenter, 0) != kPlutoStatusDeviceLost) {
+  const PlutoStatus status = ops->wait_idle(presenter, 0);
+  if (status != kPlutoStatusDeviceLost) {
+    if (presenter_idle != nullptr && status == kPlutoStatusOk) {
+      *presenter_idle = true;
+    }
     return false;
   }
   notify_presenter_device_lost();
@@ -2639,11 +2664,29 @@ bool FrameRenderer::poll_presenter_health_locked() {
 
 void FrameRenderer::tick_locked(uint64_t now_us) {
   drain_completions_locked();
+  if (scheduler_ != nullptr) {
+    scheduler_->poll_completions(now_us);
+    if (health_file_ != nullptr && scheduler_->real_completion_overdue()) {
+      health_file_failed_ = true;
+      valid_ = false;
+      std::fprintf(stderr,
+                   "pluto: presenter completion exceeded health deadline\n");
+      if (config_.on_health_file_failure) {
+        config_.on_health_file_failure();
+      }
+      return;
+    }
+  }
   // Async scan/color faults can arise after present() returned Ok. A bounded
   // nonblocking health sample closes that otherwise silent failure edge even
   // when no later frame is queued. Four polls per second is negligible beside
   // the existing 25 Hz idle renderer tick.
-  if (poll_presenter_health_locked()) {
+  bool presenter_idle = false;
+  if (poll_presenter_health_locked(now_us, &presenter_idle)) {
+    return;
+  }
+  maybe_publish_health_locked(now_us, presenter_idle);
+  if (health_file_failed_) {
     return;
   }
   if (advance_pixel_reset_locked(now_us)) {
@@ -2952,8 +2995,13 @@ bool FrameRenderer::advance_pixel_reset_locked(uint64_t now_us) {
 void FrameRenderer::drain_completions_locked() {
   uint64_t frame_id = 0;
   while (completion_queue_.pop(&frame_id)) {
-    if (scheduler_ != nullptr) {
-      scheduler_->notify_completion(frame_id);
+    if (scheduler_ != nullptr && scheduler_->notify_completion(frame_id)) {
+      // A callback is only health evidence when it names a present that this
+      // scheduler actually accepted. Stale/unknown callbacks cannot arm the
+      // supervisor record.
+      if (presenter_completion_count_ != UINT64_MAX) {
+        ++presenter_completion_count_;
+      }
     }
   }
   const size_t dropped =
@@ -2964,6 +3012,37 @@ void FrameRenderer::drain_completions_locked() {
                  "completions\n",
                  dropped);
   }
+}
+
+void FrameRenderer::maybe_publish_health_locked(uint64_t now_us,
+                                                bool presenter_idle) {
+  // Leave one health-poll interval of scheduling margin below the supervisor
+  // contract's one-second observed cadence.
+  constexpr uint64_t kHealthPublishIntervalUs = 750'000;
+  const bool completion_progressed =
+      presenter_completion_count_ > health_published_completion_count_;
+  if (health_file_ == nullptr || health_file_failed_ ||
+      presenter_completion_count_ == 0 ||
+      (!presenter_idle && !completion_progressed) ||
+      (next_health_publish_us_ != 0 && now_us < next_health_publish_us_)) {
+    return;
+  }
+
+  int error_code = 0;
+  if (!health_file_->publish(now_us, &error_code)) {
+    health_file_failed_ = true;
+    valid_ = false;
+    std::fprintf(stderr, "pluto: health publish failed for %s: %s\n",
+                 config_.health_file_path.c_str(), std::strerror(error_code));
+    if (config_.on_health_file_failure) {
+      config_.on_health_file_failure();
+    }
+    return;
+  }
+  health_published_completion_count_ = presenter_completion_count_;
+  next_health_publish_us_ = now_us > UINT64_MAX - kHealthPublishIntervalUs
+                                ? UINT64_MAX
+                                : now_us + kHealthPublishIntervalUs;
 }
 
 void FrameRenderer::mark_ready_after_present_locked() {

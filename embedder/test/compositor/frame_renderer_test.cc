@@ -363,6 +363,32 @@ std::string read_file(const std::filesystem::path &path) {
                      std::istreambuf_iterator<char>());
 }
 
+struct ParsedHealthRecord {
+  long pid = 0;
+  uint64_t sequence = 0;
+  uint64_t monotonic_ms = 0;
+};
+
+bool parse_health_record(const std::string &record, ParsedHealthRecord *out) {
+  if (out == nullptr) {
+    return false;
+  }
+  unsigned long long sequence = 0;
+  unsigned long long monotonic_ms = 0;
+  int consumed = 0;
+  const int fields =
+      std::sscanf(record.c_str(), "pid=%ld seq=%llu mono_ms=%llu%n", &out->pid,
+                  &sequence, &monotonic_ms, &consumed);
+  if (fields != 3 || consumed < 0 ||
+      static_cast<size_t>(consumed) + 1 != record.size() ||
+      record[static_cast<size_t>(consumed)] != '\n') {
+    return false;
+  }
+  out->sequence = static_cast<uint64_t>(sequence);
+  out->monotonic_ms = static_cast<uint64_t>(monotonic_ms);
+  return true;
+}
+
 // The diff runs after quantization: a sub-quantum RGB change (different
 // bytes, identical luma) quantizes to identical levels and produces ZERO
 // scheduler activity -- no damage, no diffed frame, no present.
@@ -1722,6 +1748,195 @@ TEST(FrameRendererTest, FirstSuccessfulPresentPublishesReadyMarkerOnce) {
   std::fill(pixels.begin(), pixels.end(), 0xffff);
   ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 3000)));
   EXPECT_EQ(read_file(ready.marker()), "owned-by-observer\n");
+}
+
+TEST(FrameRendererTest,
+     HealthStartsAfterRealCompletionAndAdvancesWhileUiIsStatic) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  TempReadyMarker health("health-cadence");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  uint64_t frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
+    frame_id = g_mono_capture.frame_id_history.back();
+  }
+
+  // Presenter acceptance alone is not enough to arm liveness.
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  EXPECT_FALSE(std::filesystem::exists(health.marker()));
+  renderer.notify_present_complete(frame_id);
+
+  ParsedHealthRecord first{};
+  const auto first_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < first_deadline) {
+    if (std::filesystem::exists(health.marker()) &&
+        parse_health_record(read_file(health.marker()), &first)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(first.pid, static_cast<long>(::getpid()));
+  ASSERT_EQ(first.sequence, 1u);
+
+  // No more Flutter frames or presenter completions are supplied. The same
+  // renderer/presenter-loop health tick must still advance the record.
+  ParsedHealthRecord later{};
+  const auto cadence_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < cadence_deadline) {
+    if (parse_health_record(read_file(health.marker()), &later) &&
+        later.sequence > first.sequence) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_GT(later.sequence, first.sequence);
+  EXPECT_GE(later.monotonic_ms, first.monotonic_ms);
+}
+
+TEST(FrameRendererTest,
+     HealthDoesNotAdvanceOnPermanentBusyWithoutCompletionProgress) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+    g_mono_capture.wait_idle_status = kPlutoStatusTimeout;
+  }
+  TempReadyMarker health("health-busy");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  uint64_t frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
+    frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(frame_id);
+
+  ParsedHealthRecord first{};
+  const auto first_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < first_deadline) {
+    if (parse_health_record(read_file(health.marker()), &first)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(first.sequence, 1u);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1250));
+  ParsedHealthRecord stalled{};
+  ASSERT_TRUE(parse_health_record(read_file(health.marker()), &stalled));
+  EXPECT_EQ(stalled.sequence, first.sequence);
+
+  // Leave the fake presenter internally consistent for renderer teardown.
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.wait_idle_status = kPlutoStatusOk;
+  }
+}
+
+TEST(FrameRendererTest, MissingRealCompletionTriggersFatalHealthDeadline) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  TempReadyMarker health("health-overdue");
+  std::atomic<size_t> fatal_callbacks{0};
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  config.on_health_file_failure = [&fatal_callbacks] {
+    fatal_callbacks.fetch_add(1, std::memory_order_release);
+  };
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (fatal_callbacks.load(std::memory_order_acquire) == 0u &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(fatal_callbacks.load(std::memory_order_acquire), 1u);
+  EXPECT_FALSE(renderer.valid());
+  EXPECT_FALSE(std::filesystem::exists(health.marker()));
+}
+
+TEST(FrameRendererTest, HealthPublicationFailureRequestsFatalShutdownOnce) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  TempReadyMarker health("health-failure");
+  const auto missing_path =
+      health.marker().parent_path() / "missing" / "health";
+  std::atomic<size_t> fatal_callbacks{0};
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = missing_path.string();
+  config.on_health_file_failure = [&fatal_callbacks] {
+    fatal_callbacks.fetch_add(1, std::memory_order_release);
+  };
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  uint64_t frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
+    frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(frame_id);
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (fatal_callbacks.load(std::memory_order_acquire) == 0u &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(fatal_callbacks.load(std::memory_order_acquire), 1u);
+  EXPECT_FALSE(renderer.valid());
+  EXPECT_FALSE(std::filesystem::exists(missing_path));
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  EXPECT_EQ(fatal_callbacks.load(std::memory_order_acquire), 1u);
+}
+
+TEST(FrameRendererTest, HealthRequiresCompletionCapablePresenterLoop) {
+  reset_mono_capture();
+  TempReadyMarker health("health-capabilities");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+
+  FrameRenderer renderer(config);
+  EXPECT_FALSE(renderer.valid());
+  EXPECT_FALSE(std::filesystem::exists(health.marker()));
 }
 
 TEST(FrameRendererTest, EmptyReadyPathLeavesPresentBehaviorUnchanged) {

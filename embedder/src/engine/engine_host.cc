@@ -210,6 +210,14 @@ bool EngineHost::initialize(std::string *error) {
     }
     return false;
   }
+  if (!config_.health_file_path.empty() &&
+      !std::filesystem::path(config_.health_file_path).is_absolute()) {
+    if (error != nullptr) {
+      *error = "startup configuration failed: --health-file must be an "
+               "absolute path";
+    }
+    return false;
+  }
   setenv("MALLOC_ARENA_MAX", "2", 0);
 
   trace_startup("load engine");
@@ -1703,6 +1711,7 @@ bool EngineHost::setup_renderer(std::string *error) {
   renderer_config.presenter_ops = presenter_ops_;
   renderer_config.presenter = presenter_;
   renderer_config.ready_file_path = config_.ready_file_path;
+  renderer_config.health_file_path = config_.health_file_path;
   renderer_config.start_presenter_thread = true;
   renderer_config.presenter_pen_focus_from_host =
       presenter_has_pen_focus_hook(presenter_ops_);
@@ -1725,6 +1734,15 @@ bool EngineHost::setup_renderer(std::string *error) {
     event_loop_.post_closure([this] {
       std::cerr << "presenter: device lost; stopping for cold supervisor "
                    "restart\n";
+      request_shutdown();
+    });
+  };
+  renderer_config.on_health_file_failure = [this] {
+    // The record is the supervisor's proof that this exact renderer process
+    // and presenter loop are advancing. Stop rather than running unmonitored;
+    // the supervisor's independent stale deadline remains the final backstop.
+    event_loop_.post_closure([this] {
+      std::cerr << "renderer: health publication failed; stopping\n";
       request_shutdown();
     });
   };

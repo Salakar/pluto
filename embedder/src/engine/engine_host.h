@@ -46,6 +46,10 @@ struct EngineHostConfig {
   // require an absolute path; FrameRenderer publishes it atomically after
   // the first presenter acceptance.
   std::string ready_file_path;
+  // Optional native renderer liveness record. The supervisor supplies a
+  // launch-nonce-specific absolute path and requires progress from the real
+  // presenter health loop after a completed frame.
+  std::string health_file_path;
   std::string presenter_name = "null";
   std::string presenter_options;
   PlutoPixelFormat pixel_format = kPlutoPixelFormatRgb565;

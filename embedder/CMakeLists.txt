@@ -128,6 +128,7 @@ add_library(
     src/presenter/swtcon/xochitl_selector16.cc
     src/runtime/direct_control_server.cc
     src/runtime/event_loop.cc
+    src/runtime/health_file.cc
     src/runtime/lifecycle.cc
     src/runtime/sha256.cc
     src/runtime/vsync_pacer.cc
@@ -445,6 +446,7 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
     test/presenter/png_encoder_test.cc
     test/presenter/native_presenter_test.cc
     test/runtime/sha256_test.cc
+    test/runtime/health_file_test.cc
     test/runtime/vsync_pacer_test.cc
     test/sensors/iio_test.cc
   )
