@@ -105,12 +105,24 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
   }
   last_error_.clear();
 
+  const GeneratedDisplayContract &display = profile.runtime.display;
   if (profile.display_driver != NativeDisplayDriverKind::kMxcfbEpdc ||
       profile.target_slice != DeviceTargetSlice::kLinuxArm ||
       profile.runtime.display_device != kExpectedFramebuffer ||
       profile.panel.source_pixel_format != kExpectedPixelFormat ||
       profile.panel.color || profile.panel.width <= 0 ||
-      profile.panel.height <= 0) {
+      profile.panel.height <= 0 ||
+      display.scanout_width !=
+          static_cast<std::uint32_t>(profile.panel.width) ||
+      display.scanout_height !=
+          static_cast<std::uint32_t>(profile.panel.height) ||
+      !display.virtual_width.has_value() ||
+      !display.virtual_height.has_value() ||
+      !display.stride_bytes.has_value() || !display.rotation.has_value() ||
+      display.bits_per_pixel != 16 || display.buffer_slots.has_value() ||
+      display.slot_bytes.has_value() ||
+      display.phase_interval_nanoseconds.has_value() ||
+      display.damage_alignment_pixels == 0) {
     return fail(kPlutoStatusUnsupported,
                 "generated profile is not the RM1 MXCFB contract");
   }
@@ -150,39 +162,40 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
                 "fb0 does not expose packed true-color pixels");
   }
 
-  const std::uint32_t expected_width =
-      static_cast<std::uint32_t>(profile.panel.width);
-  const std::uint32_t expected_height =
-      static_cast<std::uint32_t>(profile.panel.height);
-  if (variable.xres != expected_width || variable.yres != expected_height ||
-      variable.xres_virtual < variable.xres ||
-      variable.yres_virtual < variable.yres || variable.xoffset != 0 ||
-      variable.yoffset != 0) {
+  if (variable.xres != display.scanout_width ||
+      variable.yres != display.scanout_height ||
+      variable.xres_virtual != *display.virtual_width ||
+      variable.yres_virtual != *display.virtual_height ||
+      variable.xoffset != 0 || variable.yoffset != 0) {
     close();
     return fail(kPlutoStatusUnsupported,
                 "fb0 geometry does not match the generated RM1 profile");
   }
-  if (variable.rotate != uapi::kFramebufferRotateClockwise) {
+  if (variable.rotate != *display.rotation) {
     close();
     return fail(kPlutoStatusUnsupported,
                 "fb0 rotation is not the pinned RM1 clockwise layout");
   }
-  if (variable.bits_per_pixel != 16 || variable.grayscale != 0 ||
-      !field_is(variable.red, 11, 5) || !field_is(variable.green, 5, 6) ||
-      !field_is(variable.blue, 0, 5) || !field_is(variable.transp, 0, 0)) {
+  if (variable.bits_per_pixel != display.bits_per_pixel ||
+      variable.grayscale != 0 || !field_is(variable.red, 11, 5) ||
+      !field_is(variable.green, 5, 6) || !field_is(variable.blue, 0, 5) ||
+      !field_is(variable.transp, 0, 0)) {
     close();
     return fail(kPlutoStatusUnsupported,
                 "fb0 pixel layout is not the pinned RM1 RGB565 layout");
   }
 
-  const std::uint64_t expected_stride =
-      static_cast<std::uint64_t>(variable.xres_virtual) *
+  const std::uint64_t packed_stride =
+      static_cast<std::uint64_t>(*display.virtual_width) *
       kExpectedBytesPerPixel;
-  const std::uint64_t visible_allocation =
-      static_cast<std::uint64_t>(fixed.line_length) * variable.yres_virtual;
-  if (expected_stride > std::numeric_limits<std::uint32_t>::max() ||
-      fixed.line_length != expected_stride || fixed.smem_len == 0 ||
-      visible_allocation > fixed.smem_len) {
+  const std::uint64_t exact_allocation =
+      static_cast<std::uint64_t>(*display.stride_bytes) *
+      *display.virtual_height;
+  if (packed_stride > std::numeric_limits<std::uint32_t>::max() ||
+      *display.stride_bytes != packed_stride ||
+      fixed.line_length != *display.stride_bytes ||
+      exact_allocation > std::numeric_limits<std::uint32_t>::max() ||
+      fixed.smem_len != exact_allocation) {
     close();
     return fail(kPlutoStatusUnsupported,
                 "fb0 stride or framebuffer allocation is inconsistent");

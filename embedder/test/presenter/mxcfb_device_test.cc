@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -223,6 +224,17 @@ TEST(MxcfbDevice, RejectsAProfileForAnotherDisplayDriverBeforeOpen) {
   EXPECT_FALSE(device.is_open());
 }
 
+TEST(MxcfbDevice, RejectsIncompleteGeneratedDisplayContractBeforeOpen) {
+  FakeMxcfbSyscalls fake;
+  pluto::GeneratedDeviceProfile incomplete = rm1_profile();
+  incomplete.runtime.display.virtual_width = std::nullopt;
+  MxcfbDevice device(&fake);
+
+  EXPECT_EQ(device.open(incomplete), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.open_count, 0);
+  EXPECT_FALSE(device.is_open());
+}
+
 TEST(MxcfbDevice, ReportsMissingFramebufferAsDeviceLost) {
   FakeMxcfbSyscalls fake;
   fake.open_error = ENOENT;
@@ -255,9 +267,30 @@ TEST(MxcfbDevice, RejectsWrongGeometry) {
   EXPECT_EQ(fake.mmap_count, 0);
 }
 
+TEST(MxcfbDevice, RejectsWrongVirtualGeometry) {
+  FakeMxcfbSyscalls fake;
+  fake.variable.yres_virtual = kRm1VirtualHeight + 1;
+  fake.fixed.smem_len = fake.fixed.line_length * fake.variable.yres_virtual;
+  MxcfbDevice device(&fake);
+
+  EXPECT_EQ(device.open(rm1_profile()), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.close_count, 1);
+  EXPECT_EQ(fake.mmap_count, 0);
+}
+
 TEST(MxcfbDevice, RejectsWrongStride) {
   FakeMxcfbSyscalls fake;
   fake.fixed.line_length -= 2;
+  MxcfbDevice device(&fake);
+
+  EXPECT_EQ(device.open(rm1_profile()), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.close_count, 1);
+  EXPECT_EQ(fake.mmap_count, 0);
+}
+
+TEST(MxcfbDevice, RejectsLargerThanPinnedFramebufferAllocation) {
+  FakeMxcfbSyscalls fake;
+  ++fake.fixed.smem_len;
   MxcfbDevice device(&fake);
 
   EXPECT_EQ(device.open(rm1_profile()), kPlutoStatusUnsupported);
