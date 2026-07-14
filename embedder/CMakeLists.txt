@@ -96,6 +96,7 @@ add_library(
     src/ffi/dart_dl.cc
     src/glass_handoff.cc
     src/presenter/host_preview.cc
+    src/presenter/native/mxcfb/mxcfb_device.cc
     src/presenter/native/native_presenter.cc
     src/presenter/png_encoder.cc
     src/presenter/qtfb/qtfb_client.cc
@@ -428,6 +429,7 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
     test/engine/engine_loader_test.cc
     test/engine/lifecycle_test.cc
     test/engine/qtfb_input_bridge_test.cc
+    test/presenter/mxcfb_device_test.cc
     test/presenter/png_encoder_test.cc
     test/presenter/native_presenter_test.cc
     test/runtime/sha256_test.cc
