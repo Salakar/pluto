@@ -6,6 +6,9 @@ HOST_SCRIPT="$ROOT/tools/build/embedder-host.sh"
 DEVICE_SCRIPT="$ROOT/tools/build/embedder-device.sh"
 ARM_DEVICE_SCRIPT="$ROOT/tools/build/embedder-device-arm.sh"
 PAYLOAD_SCRIPT="$ROOT/tools/build/assemble-device-payload.sh"
+CONTROL_CLIENT_SOURCE="$ROOT/tools/device/pluto-controlctl.c"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/pluto-controlctl-test.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 fail() {
   echo "FAIL: $*" >&2
@@ -27,6 +30,24 @@ bash -n \
   "$ROOT/tools/build/embedder-device-arm-container.sh" \
   "$ROOT/tools/build/verify-device-elf.sh"
 
+[[ -f "$CONTROL_CLIENT_SOURCE" ]] || fail "generic control client source is missing"
+if grep -q '^#define DEFAULT_SOCKET' "$CONTROL_CLIENT_SOURCE"; then
+  fail "generic control client still has an implicit socket default"
+fi
+cc -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror \
+  "$CONTROL_CLIENT_SOURCE" -o "$TMP/pluto-controlctl"
+[[ "$("$TMP/pluto-controlctl" --help)" == \
+  "usage: pluto-controlctl --socket PATH --request JSON" ]] ||
+  fail "generic control client help is wrong"
+set +e
+CONTROL_WITHOUT_SOCKET="$("$TMP/pluto-controlctl" --request '{}' 2>&1)"
+CONTROL_WITHOUT_SOCKET_STATUS=$?
+set -e
+[[ "$CONTROL_WITHOUT_SOCKET_STATUS" -eq 64 ]] ||
+  fail "generic control client accepted a request without --socket"
+assert_contains "$CONTROL_WITHOUT_SOCKET" \
+  "usage: pluto-controlctl --socket PATH --request JSON"
+
 HOST_DRY_RUN="$(bash "$HOST_SCRIPT" --dry-run)"
 assert_contains "$HOST_DRY_RUN" "cmake --preset host-debug"
 assert_contains "$HOST_DRY_RUN" "cmake --build --preset host-debug --parallel"
@@ -42,7 +63,7 @@ assert_contains "$DEVICE_DRY_RUN" "Dockerfile.embedder-device"
 assert_contains "$DEVICE_DRY_RUN" "docker run --rm --platform linux/arm64"
 assert_contains "$DEVICE_DRY_RUN" "PLUTO_GLIBC_CEILING=2.39"
 assert_contains "$DEVICE_DRY_RUN" "embedder-device-container.sh"
-grep -q 'device-arm64/pluto-apploadctl' \
+grep -q 'device-arm64/pluto-controlctl' \
   "$ROOT/tools/build/embedder-device-container.sh" ||
   fail "ARM64 screenshot control client is not built"
 
@@ -81,7 +102,7 @@ assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/apps/dev.pluto.examples.
 assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/apps/dev.pluto.examples.motion_lab"
 assert_contains "$PAYLOAD_DRY_RUN" "engine/release/libflutter_engine.so"
 assert_contains "$PAYLOAD_DRY_RUN" "engine/profile/libflutter_engine.so"
-assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/bin/pluto-apploadctl"
+assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/bin/pluto-controlctl"
 [[ "$PAYLOAD_DRY_RUN" != *"apps/codex"* ]] || fail "Codex was selected implicitly"
 [[ "$PAYLOAD_DRY_RUN" != *"kernel_blob.bin"* ]] || fail "dry run copied a JIT kernel"
 EXPECTED_NEXT="Direct-backend handoff: pluto provision --payload-dir $ROOT/build/pluto-payload"

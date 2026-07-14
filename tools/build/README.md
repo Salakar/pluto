@@ -36,11 +36,10 @@ Pluto currently emits two native targets from the same embedder source:
 | `linux-arm64` | `melos run build:embedder:device` | `embedder/build/device-arm64/pluto-embedder` | ELF64 AArch64; GLIBC ≤ 2.39 |
 | `linux-arm` | `bash tools/build/embedder-device-arm.sh` | `embedder/build/device-arm/pluto-embedder` | ELF32 ARM EABI5 hard-float; GLIBC ≤ 2.35, GLIBCXX ≤ 3.4.29, CXXABI ≤ 1.3.13 |
 
-The ARMv7 build also emits
-`embedder/build/device-arm/pluto-apploadctl`. It uses the official reMarkable
-SDK selected by `PLUTO_RM_SDK_VOLUME` or `PLUTO_RM_SDK_DIR`. Both builds run in
-pinned local containers on non-native hosts. `PLUTO_BUILD_JOBS` controls build
-parallelism.
+Both device builds also emit the backend-neutral `pluto-controlctl` beside the
+embedder. The ARMv7 build uses the official reMarkable SDK selected by
+`PLUTO_RM_SDK_VOLUME` or `PLUTO_RM_SDK_DIR`. Both builds run in pinned local
+containers on non-native hosts. `PLUTO_BUILD_JOBS` controls build parallelism.
 
 Mutable binaries remain in the ignored CMake build tree. The committed Flutter
 engine payloads under `third_party/engine/<engine-hash>/` are separate and do

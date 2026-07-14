@@ -12,22 +12,20 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#define DEFAULT_SOCKET "/run/pluto/appload-control.sock"
 #define MAX_PACKET 32768
 #define TIMEOUT_MS 5000
 
 static void usage(FILE *stream) {
-  fprintf(stream,
-          "usage: pluto-apploadctl [--socket PATH] --request JSON\n");
+  fprintf(stream, "usage: pluto-controlctl --socket PATH --request JSON\n");
 }
 
 static int fail(const char *message) {
-  fprintf(stderr, "pluto-apploadctl: %s: %s\n", message, strerror(errno));
+  fprintf(stderr, "pluto-controlctl: %s: %s\n", message, strerror(errno));
   return 1;
 }
 
 int main(int argc, char **argv) {
-  const char *socket_path = DEFAULT_SOCKET;
+  const char *socket_path = NULL;
   const char *request = NULL;
   for (int index = 1; index < argc; ++index) {
     if (strcmp(argv[index], "--socket") == 0 && index + 1 < argc) {
@@ -42,7 +40,7 @@ int main(int argc, char **argv) {
       return 64;
     }
   }
-  if (request == NULL) {
+  if (socket_path == NULL || request == NULL) {
     usage(stderr);
     return 64;
   }
@@ -52,7 +50,7 @@ int main(int argc, char **argv) {
   if (request_length == 0 || request_length > MAX_PACKET ||
       socket_length == 0 ||
       socket_length >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
-    fprintf(stderr, "pluto-apploadctl: request or socket path is invalid\n");
+    fprintf(stderr, "pluto-controlctl: request or socket path is invalid\n");
     return 64;
   }
 
@@ -63,7 +61,7 @@ int main(int argc, char **argv) {
   if (!S_ISSOCK(socket_stat.st_mode) || socket_stat.st_uid != 0 ||
       (socket_stat.st_mode & 077) != 0) {
     fprintf(stderr,
-            "pluto-apploadctl: refusing an untrusted control socket\n");
+            "pluto-controlctl: refusing an untrusted control socket\n");
     return 77;
   }
 
@@ -123,7 +121,7 @@ int main(int argc, char **argv) {
   }
   response[received] = '\0';
   if (memchr(response, '\0', (size_t)received) != NULL) {
-    fprintf(stderr, "pluto-apploadctl: response contains an embedded NUL\n");
+    fprintf(stderr, "pluto-controlctl: response contains an embedded NUL\n");
     return 76;
   }
   if (fwrite(response, 1, (size_t)received, stdout) != (size_t)received ||

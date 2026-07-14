@@ -31,7 +31,7 @@ final class ProvisionCommand extends PlutoCommand {
         'payload-dir',
         help:
             'Directory with the runtime payload (pluto-embedder, '
-            'bin/pluto-apploadctl, bin/codex, COOPERATIVE-PAYLOAD.json, '
+            'bin/pluto-controlctl, bin/codex, COOPERATIVE-PAYLOAD.json, '
             'engine/{release,profile}/libflutter_engine.so, '
             'apps/<id>/{build-metadata.json,manifest.json,bundle/}). '
             'Defaults to '
@@ -247,10 +247,10 @@ final class ProvisionCommand extends PlutoCommand {
         if (!cooperativePayload)
           PayloadFile(
             localPath: selectPayloadFile(<String>[
-              '$payloadDir/bin/pluto-apploadctl',
-              '$repoRoot/embedder/build/device-arm64/pluto-apploadctl',
+              '$payloadDir/bin/pluto-controlctl',
+              '$repoRoot/embedder/build/device-arm64/pluto-controlctl',
             ]),
-            remoteRelative: 'bin/pluto-apploadctl',
+            remoteRelative: 'bin/pluto-controlctl',
             executable: true,
           ),
         PayloadFile(
@@ -265,10 +265,10 @@ final class ProvisionCommand extends PlutoCommand {
         if (cooperativePayload) ...<PayloadFile>[
           PayloadFile(
             localPath: selectPayloadFile(<String>[
-              '$payloadDir/bin/pluto-apploadctl',
-              '$repoRoot/embedder/build/device-arm/pluto-apploadctl',
+              '$payloadDir/bin/pluto-controlctl',
+              '$repoRoot/embedder/build/device-arm/pluto-controlctl',
             ]),
-            remoteRelative: 'bin/pluto-apploadctl',
+            remoteRelative: 'bin/pluto-controlctl',
             executable: true,
           ),
           PayloadFile(

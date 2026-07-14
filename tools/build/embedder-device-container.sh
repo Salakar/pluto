@@ -48,12 +48,12 @@ fi
 "${BUILD_COMMAND[@]}"
 
 cc -std=c11 -O2 -Wall -Wextra -Wpedantic \
-  "$ROOT/tools/device/pluto-apploadctl.c" \
-  -o "$EMBEDDER_DIR/build/device-arm64/pluto-apploadctl"
+  "$ROOT/tools/device/pluto-controlctl.c" \
+  -o "$EMBEDDER_DIR/build/device-arm64/pluto-controlctl"
 
 bash "$ROOT/tools/build/verify-device-elf.sh" \
   "$EMBEDDER_DIR/build/device-arm64/pluto-embedder" \
   "$GLIBC_CEILING"
 bash "$ROOT/tools/build/verify-device-elf.sh" \
-  "$EMBEDDER_DIR/build/device-arm64/pluto-apploadctl" \
+  "$EMBEDDER_DIR/build/device-arm64/pluto-controlctl" \
   "$GLIBC_CEILING" linux-arm64

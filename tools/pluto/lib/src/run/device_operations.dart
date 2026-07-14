@@ -221,8 +221,8 @@ final class LiveDeviceOperations {
   static const String _appLoadRoot = '/home/root/xovi/exthome/appload';
   static const String _appLoadControlSocket = '/run/pluto/appload-control.sock';
   static const String _xoviRoot = '/home/root/xovi';
-  static const String _xoviControlClient =
-      '/home/root/xovi/bin/pluto-apploadctl';
+  static const String _integrationControlClient =
+      '/home/root/xovi/bin/pluto-controlctl';
   static const String _integrationRollback =
       '/home/root/xovi/rollback/pluto-previous';
   static const String _integrationLock =
@@ -241,7 +241,7 @@ final class LiveDeviceOperations {
     'extensions.d/qt-resource-rebuilder.so': false,
     'services/xochitl.service/qt-resource-rebuilder.conf': false,
     'scripts/debug/qt-resource-rebuilder.sh': true,
-    'bin/pluto-apploadctl': true,
+    'bin/pluto-controlctl': true,
     'exthome/appload/shims/qtfb-shim-32bit.so': false,
     'exthome/appload/shims/qtfb-shim.so': false,
   };
@@ -300,7 +300,7 @@ final class LiveDeviceOperations {
 
   String get _appControl => '$deviceRoot/bin/pluto-app-control.sh';
 
-  String get _cooperativeControlClient => '$deviceRoot/bin/pluto-apploadctl';
+  String get _controlClient => '$deviceRoot/bin/pluto-controlctl';
 
   String get _embedderControlSocket => '$runDir/embedder-control.sock';
 
@@ -1523,7 +1523,7 @@ final class LiveDeviceOperations {
         .where(
           (PayloadFile file) => !const <String>{
             'bin/pluto-embedder',
-            'bin/pluto-apploadctl',
+            'bin/pluto-controlctl',
             'bin/codex',
             'engine/release/libflutter_engine.so',
             'engine/release/icudtl.dat',
@@ -2096,8 +2096,8 @@ final class LiveDeviceOperations {
     return _controlRequestUsing(
       action,
       fields: fields,
-      client: _cooperativeControlClient,
-      fallbackClient: _xoviControlClient,
+      client: _controlClient,
+      fallbackClient: _integrationControlClient,
       socket: _appLoadControlSocket,
       controlName: 'AppLoad',
     );
@@ -2110,7 +2110,7 @@ final class LiveDeviceOperations {
     return _controlRequestUsing(
       action,
       fields: fields,
-      client: _cooperativeControlClient,
+      client: _controlClient,
       socket: _embedderControlSocket,
       controlName: 'embedder',
     );

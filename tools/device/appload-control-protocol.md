@@ -22,10 +22,11 @@ The mode and peer-credential checks are both required. They ensure an app
 running through AppLoad cannot launch or replace another app merely because it
 can guess the socket path.
 
-`/home/root/xovi/bin/pluto-apploadctl` is the matching small client. It accepts
-`--socket PATH --request JSON`, sends one packet, prints the response object,
-and exits nonzero on transport/protocol failure. The Pluto runtime may carry a
-second identical copy at `/home/root/pluto/bin/pluto-apploadctl`.
+The backend-neutral `/home/root/xovi/bin/pluto-controlctl` client accepts an
+explicit `--socket PATH` and `--request JSON`, sends one packet, prints the
+response object, and exits nonzero on transport/protocol failure. It has no
+AppLoad socket default or AppLoad actions. The Pluto runtime may carry a second
+identical copy at `/home/root/pluto/bin/pluto-controlctl`.
 
 ## Envelope
 
@@ -101,4 +102,3 @@ them by atomic rename, and writes a correlated success/failure acknowledgement
 under `/run/pluto/acks/`. A failed request must not close the currently visible
 window. On startup it removes only stale Pluto marker/ack files, then applies a
 verified default app if configured.
-

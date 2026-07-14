@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOCK="${PLUTO_INTEGRATION_LOCK_FILE:-$ROOT/tools/integration/sources.lock}"
-readonly EXPECTED_LOCK_SHA256=3626e05c36af9eab6acde426527062522f85a11cbbb9fed4e51007038d54803f
+readonly EXPECTED_LOCK_SHA256=42f17f7a93922c4133fa54d083d5c7595a762ac03c0527bf61181e789a9fe1e0
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -206,8 +206,8 @@ verify_reference_artifacts() {
     "$ROOT/.pluto-cache/build/appload-pluto-control-arm32/appload.so" \
     "$REFERENCE_APPLOAD_328_SHA256" "validated AppLoad 3.28 extension"
   verify_file_hash \
-    "$ROOT/embedder/build/device-arm/pluto-apploadctl" \
-    "$REFERENCE_CONTROL_CLIENT_SHA256" "validated AppLoad control client"
+    "$ROOT/embedder/build/device-arm/pluto-controlctl" \
+    "$REFERENCE_CONTROL_CLIENT_SHA256" "validated Pluto control client"
   verify_reference_elf \
     "$ROOT/.pluto-cache/xovi/arm32-v19/xovi/xovi.so" \
     "device-validated XOVI runtime"
@@ -227,8 +227,8 @@ verify_reference_artifacts() {
     "$ROOT/.pluto-cache/build/appload-pluto-control-arm32/appload.so" \
     "device-validated AppLoad 3.28 extension"
   verify_reference_elf \
-    "$ROOT/embedder/build/device-arm/pluto-apploadctl" \
-    "device-validated AppLoad control client"
+    "$ROOT/embedder/build/device-arm/pluto-controlctl" \
+    "device-validated Pluto control client"
   echo "Verified checksums and ARMv7 ABI for cooperative integration artifacts."
 }
 

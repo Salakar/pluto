@@ -98,7 +98,7 @@ Future<CommandResult> _rm2ControlExecHandler(String command) async {
       stdout: 'PLUTO-DEFAULT-STATE|absent\n',
     );
   }
-  if (command.contains('pluto-apploadctl') && command.contains('--request')) {
+  if (command.contains('pluto-controlctl') && command.contains('--request')) {
     final RegExpMatch? match = RegExp(
       r"--request '([^']+)'",
     ).firstMatch(command);
@@ -544,7 +544,7 @@ void main() {
     expect(
       transport.commands.any(
         (String command) =>
-            command.contains('pluto-apploadctl') &&
+            command.contains('pluto-controlctl') &&
             command.contains('"action":"reload"'),
       ),
       isTrue,
@@ -1021,7 +1021,7 @@ void main() {
     expect(
       transport.uploads.any(
         (FakeUpload upload) => upload.remotePath.startsWith(
-          '/home/root/pluto/bin/.pluto-apploadctl.pluto-new-',
+          '/home/root/pluto/bin/.pluto-controlctl.pluto-new-',
         ),
       ),
       isTrue,
@@ -1041,7 +1041,7 @@ void main() {
     expect(
       transport.commands.any(
         (String command) =>
-            command.contains('pluto-apploadctl') &&
+            command.contains('pluto-controlctl') &&
             command.contains('"action":"setDefault"'),
       ),
       isTrue,
@@ -1402,7 +1402,7 @@ void _writeProvisionRuntime(
       ..writeAsStringSync('#!/bin/sh\n');
   }
   File('$payload/pluto-embedder').writeAsBytesSync(<int>[1]);
-  File('$payload/bin/pluto-apploadctl')
+  File('$payload/bin/pluto-controlctl')
     ..createSync(recursive: true)
     ..writeAsBytesSync(<int>[8]);
   final String releasePath = legacyRelease
@@ -1425,7 +1425,7 @@ void _writeCooperativeProvisionRuntime(String payload) {
   File('$payload/bin/pluto-embedder')
     ..createSync(recursive: true)
     ..writeAsBytesSync(<int>[6]);
-  File('$payload/bin/pluto-apploadctl').writeAsBytesSync(<int>[8]);
+  File('$payload/bin/pluto-controlctl').writeAsBytesSync(<int>[8]);
   final Uint8List codex = _testCodexBinary();
   File('$payload/bin/codex').writeAsBytesSync(codex);
   File('$payload/engine/release/libflutter_engine.so')
@@ -1461,7 +1461,7 @@ void _writeCooperativeIntegration(String root) {
     'extensions.d/qt-resource-rebuilder.so': false,
     'services/xochitl.service/qt-resource-rebuilder.conf': false,
     'scripts/debug/qt-resource-rebuilder.sh': true,
-    'bin/pluto-apploadctl': true,
+    'bin/pluto-controlctl': true,
     'exthome/appload/shims/qtfb-shim-32bit.so': false,
     'exthome/appload/shims/qtfb-shim.so': false,
   };

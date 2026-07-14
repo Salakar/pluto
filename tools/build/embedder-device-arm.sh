@@ -151,11 +151,11 @@ run "${DOCKER_RUN[@]}"
 
 OUTPUT="$ROOT/embedder/build/device-arm/pluto-embedder"
 run bash "$ROOT/tools/build/verify-device-elf.sh" "$OUTPUT" 2.35 linux-arm
-CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-apploadctl"
+CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-controlctl"
 run bash "$ROOT/tools/build/verify-device-elf.sh" \
   "$CONTROL_CLIENT" 2.35 linux-arm
 
 if ((DRY_RUN == 0)); then
   echo "ARMv7 device embedder: $OUTPUT"
-  echo "ARMv7 AppLoad control client: $CONTROL_CLIENT"
+  echo "ARMv7 device control client: $CONTROL_CLIENT"
 fi

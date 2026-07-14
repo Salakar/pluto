@@ -142,7 +142,7 @@ FakeTransport _cooperativeTransport(
                 : 'PLUTO-DEFAULT-STATE|$existingDefaultApp\n',
           );
     }
-    if (command.contains('pluto-apploadctl') && command.contains('--request')) {
+    if (command.contains('pluto-controlctl') && command.contains('--request')) {
       final RegExpMatch? match = RegExp(
         r"--request '([^']+)'",
       ).firstMatch(command);
@@ -222,7 +222,7 @@ FakeTransport _directScreenshotTransport({
           stdout: 'PLUTO-FOREGROUND-PID|$pid\n',
         );
       }
-      if (command.contains('pluto-apploadctl') &&
+      if (command.contains('pluto-controlctl') &&
           command.contains('embedder-control.sock') &&
           command.contains('--request')) {
         final RegExpMatch? match = RegExp(
@@ -376,7 +376,7 @@ CooperativeIntegrationPayload _writeCooperativeIntegration(Directory temp) {
     'extensions.d/qt-resource-rebuilder.so',
     'services/xochitl.service/qt-resource-rebuilder.conf',
     'scripts/debug/qt-resource-rebuilder.sh',
-    'bin/pluto-apploadctl',
+    'bin/pluto-controlctl',
     'exthome/appload/shims/qtfb-shim-32bit.so',
     'exthome/appload/shims/qtfb-shim.so',
   ];
@@ -2576,7 +2576,7 @@ void main() {
 
     final String request = transport.commands.singleWhere(
       (String command) =>
-          command.contains('pluto-apploadctl') &&
+          command.contains('pluto-controlctl') &&
           command.contains('"action":"launch"'),
     );
     expect(request, contains('"appId":"dev.example.notes"'));
@@ -2794,7 +2794,7 @@ void main() {
     final String control = transport.commands.singleWhere(
       (String command) => command.contains('embedder-control.sock'),
     );
-    expect(control, contains("client='$root/bin/pluto-apploadctl'"));
+    expect(control, contains("client='$root/bin/pluto-controlctl'"));
     expect(control, contains("--socket '/run/pluto/embedder-control.sock'"));
     expect(control, isNot(contains('/home/root/xovi/bin')));
     final String preflight = transport.commands.singleWhere(

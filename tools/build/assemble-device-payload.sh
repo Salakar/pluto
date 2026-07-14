@@ -10,7 +10,7 @@ DART="$SDK/bin/cache/dart-sdk/bin/dart"
 CLI="$ROOT/tools/pluto/bin/pluto.dart"
 PACKAGES="$ROOT/tools/pluto/.dart_tool/package_config.json"
 EMBEDDER=""
-CONTROL_CLIENT="$ROOT/embedder/build/device-arm64/pluto-apploadctl"
+CONTROL_CLIENT="$ROOT/embedder/build/device-arm64/pluto-controlctl"
 ENGINE_ROOT="$ROOT/third_party/engine/$ENGINE_COMMIT"
 TARGET_PLATFORM=linux-arm64
 TARGET_GLIBC_CEILING=2.39
@@ -311,7 +311,7 @@ PAYLOAD_DIRECTORIES=(
 )
 run install -d "${PAYLOAD_DIRECTORIES[@]}"
 run install -m 0755 "$EMBEDDER" "$PAYLOAD/pluto-embedder"
-run install -m 0755 "$CONTROL_CLIENT" "$PAYLOAD/bin/pluto-apploadctl"
+run install -m 0755 "$CONTROL_CLIENT" "$PAYLOAD/bin/pluto-controlctl"
 run install -m 0644 "$RELEASE_ENGINE" \
   "$PAYLOAD/engine/release/libflutter_engine.so"
 run install -m 0644 "$PROFILE_ENGINE" \

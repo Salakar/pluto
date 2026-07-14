@@ -11,7 +11,7 @@ ENGINE_DIR="$ROOT/third_party/engine/$ENGINE_COMMIT/linux-arm-release"
 ENGINE="$ENGINE_DIR/libflutter_engine.so"
 ICU_DATA="$ENGINE_DIR/icudtl.dat"
 EMBEDDER="$ROOT/embedder/build/device-arm/pluto-embedder"
-CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-apploadctl"
+CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-controlctl"
 CONTROL_CLIENT_EXPLICIT=0
 CODEX_BIN="$ROOT/.pluto-cache/build/codex-armv7/output/codex"
 XOVI_SOURCE="$ROOT/.pluto-cache/xovi/arm32-v19/xovi"
@@ -47,7 +47,7 @@ readonly FINAL_QTFB_SHIM_32_SHA256=19a9d2c75741113f37f81f7affead40eeb12fa3cc4110
 readonly FINAL_QTFB_SHIM_SHA256=4eab5f8f54d5fbaaba86497128b3b5029dc07033ac9dd499a226638cc255e9d2
 readonly FINAL_APPLOAD_327_SHA256=16687c359c96720c631362c5aa902be737cf1ad4b5f37c37c0c18d6a29812377
 readonly FINAL_APPLOAD_328_SHA256=5539cb400d3ce782214eefa7b2e65e8e69fc27817aacd8c067319a4a14dc4b9d
-readonly FINAL_CONTROL_CLIENT_SHA256=dd8e30c09b36f301046d91e8b8db5ca7f15219e5aeec33b0a468e4b3250cee63
+readonly FINAL_CONTROL_CLIENT_SHA256=6463d35152f9328ab1910363a2f76dde1e16167820b8fdd4749eaf16337dc1d0
 readonly QRR_HASHTAB_327_SHA256=01c294ff28a21336814d657e27c5de2c83a8ad0e03b143e9cef6216dacfefc86
 readonly QRR_HASHTAB_328_SHA256=b64584f7cd0520be6abe984a6b4c9c0b4ebcead56b66a11c9a96a41139421db6
 
@@ -63,8 +63,8 @@ contacts a device and does not itself provision or select a display backend.
 Options:
   --embedder PATH         ARMv7 pluto-embedder (default:
                           embedder/build/device-arm/pluto-embedder)
-  --control-client PATH   ARMv7 AppLoad control client (default:
-                          embedder/build/device-arm/pluto-apploadctl)
+  --control-client PATH   ARMv7 Pluto control client (default:
+                          embedder/build/device-arm/pluto-controlctl)
   --codex-bin PATH        pinned ARMv7 Codex CLI release input (default:
                           .pluto-cache/build/codex-armv7/output/codex)
   --xovi-root PATH        XOVI v0.3.3 + QRR v19 source tree
@@ -388,7 +388,7 @@ assemble_integration() {
     extensions.d/qt-resource-rebuilder.so
     services/xochitl.service/qt-resource-rebuilder.conf
     scripts/debug/qt-resource-rebuilder.sh
-    bin/pluto-apploadctl
+    bin/pluto-controlctl
     exthome/appload/shims/qtfb-shim-32bit.so
     exthome/appload/shims/qtfb-shim.so
   )
@@ -426,7 +426,7 @@ assemble_integration() {
   install -m 0755 \
     "$XOVI_SOURCE/scripts/debug/qt-resource-rebuilder.sh" \
     "$xovi/scripts/debug/qt-resource-rebuilder.sh"
-  install -m 0755 "$CONTROL_CLIENT" "$xovi/bin/pluto-apploadctl"
+  install -m 0755 "$CONTROL_CLIENT" "$xovi/bin/pluto-controlctl"
   install -m 0644 \
     "$APPLOAD_SHIMS/qtfb-shim-32bit.so" \
     "$xovi/exthome/appload/shims/qtfb-shim-32bit.so"
@@ -612,7 +612,7 @@ if ((APPLOAD_EXTENSION_328_EXPLICIT == 0)); then
 fi
 if ((CONTROL_CLIENT_EXPLICIT == 0)); then
   [[ "$(sha256_file "$CONTROL_CLIENT")" = "$FINAL_CONTROL_CLIENT_SHA256" ]] ||
-    die "default AppLoad control client is not the final matched build"
+    die "default Pluto control client is not the final matched build"
 fi
 for integration_elf in \
   "$XOVI_SOURCE/xovi.so" \
@@ -650,7 +650,7 @@ install -d \
   "$RUNTIME_ROOT/engine/release" \
   "$RUNTIME_ROOT/apps"
 install -m 0755 "$EMBEDDER" "$RUNTIME_ROOT/bin/pluto-embedder"
-install -m 0755 "$CONTROL_CLIENT" "$RUNTIME_ROOT/bin/pluto-apploadctl"
+install -m 0755 "$CONTROL_CLIENT" "$RUNTIME_ROOT/bin/pluto-controlctl"
 install -m 0755 "$CODEX_BIN" "$RUNTIME_ROOT/bin/codex"
 install -m 0644 "$ENGINE" "$RUNTIME_ROOT/engine/release/libflutter_engine.so"
 install -m 0644 "$ICU_DATA" "$RUNTIME_ROOT/engine/release/icudtl.dat"
