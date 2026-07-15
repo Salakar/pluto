@@ -3,13 +3,24 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include "generated/device_profiles.h"
+#include "pluto/glass_handoff.h"
 #include "presenter/native/mxcfb/mxcfb_device.h"
 #include "presenter/native/native_display_backend.h"
 
 namespace pluto::native::mxcfb {
+
+// Production always uses the fixed private tmpfs path. Tests may opt into an
+// isolated path and deterministic clock, but neither seam is reachable from
+// the native presenter factory.
+struct MxcfbHandoffOptions {
+  std::string path = kGlassHandoffDefaultPath;
+  bool allow_insecure_path_for_testing = false;
+  GlassHandoffClock (*now_for_testing)() = nullptr;
+};
 
 // Conservative first native backend for the reMarkable 1 kernel EPDC path.
 // It deliberately admits one request at a time: the mapped framebuffer is the
@@ -19,7 +30,8 @@ class MxcfbDisplayBackend final : public NativeDisplayBackend {
 public:
   MxcfbDisplayBackend(const GeneratedDeviceProfile &profile,
                       std::unique_ptr<MxcfbDevice> device = nullptr,
-                      std::uint32_t first_marker = 0);
+                      std::uint32_t first_marker = 0,
+                      MxcfbHandoffOptions handoff = {});
   ~MxcfbDisplayBackend() override;
 
   MxcfbDisplayBackend(const MxcfbDisplayBackend &) = delete;

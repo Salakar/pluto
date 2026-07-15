@@ -1,19 +1,27 @@
 #include "presenter/native/mxcfb/mxcfb_backend.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
 #include <new>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/vfs.h>
+#endif
 #include <unistd.h>
 
 namespace pluto::native::mxcfb {
@@ -23,6 +31,10 @@ constexpr std::string_view kDriverName = "mxcfb_epdc";
 constexpr std::size_t kBytesPerPixel = 2;
 constexpr std::size_t kMaximumDamageRects = 64;
 constexpr std::byte kSafeInitialByte{0xff};
+constexpr std::uint32_t kHandoffTilePixels = 32;
+constexpr std::size_t kMaximumRendererHandoffBytes = 32u << 20;
+constexpr std::string_view kHandoffPipelineTag =
+    "pluto-rm1-mxcfb-warm-handoff-v1";
 constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagInkPriority | kPlutoPresentFlagPreDithered |
     kPlutoPresentFlagSettle | kPlutoPresentFlagSparkle |
@@ -30,6 +42,191 @@ constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagPixelResetWhite | kPlutoPresentFlagPixelResetRestore |
     kPlutoPresentFlagRequiredSettle | kPlutoPresentFlagPenTruth |
     kPlutoPresentSparklePhaseMask;
+
+enum class HandoffDecision : std::uint8_t {
+  kNone,
+  kPending,
+  kAccepted,
+  kRejected,
+};
+
+class HandoffFingerprint final {
+public:
+  void add_u32(std::uint32_t value) {
+    std::array<std::uint8_t, 4> bytes{};
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+      bytes[shift / 8] = static_cast<std::uint8_t>(value >> shift);
+    }
+    add(bytes);
+  }
+
+  void add_u64(std::uint64_t value) {
+    std::array<std::uint8_t, 8> bytes{};
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+      bytes[shift / 8] = static_cast<std::uint8_t>(value >> shift);
+    }
+    add(bytes);
+  }
+
+  void add_bool(bool value) { add_u32(value ? 1u : 0u); }
+
+  void add_string(std::string_view value) {
+    add_u64(value.size());
+    add(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t *>(value.data()), value.size()));
+  }
+
+  template <typename T> void add_optional(const std::optional<T> &value) {
+    add_bool(value.has_value());
+    if (value.has_value()) {
+      add_u64(static_cast<std::uint64_t>(*value));
+    }
+  }
+
+  std::uint64_t value() const { return value_; }
+
+private:
+  void add(std::span<const std::uint8_t> bytes) {
+    value_ = glass_handoff_crc64(bytes, value_);
+  }
+
+  std::uint64_t value_ = 0;
+};
+
+bool production_handoff_path_is_secure(const std::string &path) {
+  if (path != kGlassHandoffDefaultPath) {
+    return false;
+  }
+#if defined(__linux__)
+  constexpr const char *kDirectory = "/run/pluto";
+  constexpr long kTmpfsMagic = 0x01021994;
+  struct stat directory_stat {};
+  struct statfs filesystem_stat {};
+  return ::lstat(kDirectory, &directory_stat) == 0 &&
+         S_ISDIR(directory_stat.st_mode) &&
+         directory_stat.st_uid == ::geteuid() &&
+         (directory_stat.st_mode & 0022) == 0 &&
+         ::statfs(kDirectory, &filesystem_stat) == 0 &&
+         static_cast<long>(filesystem_stat.f_type) == kTmpfsMagic;
+#else
+  return false;
+#endif
+}
+
+std::uint64_t
+waveform_descriptor_bytes(const GeneratedWaveformProfile &waveform) {
+  std::uint64_t bytes = 0;
+  for (const GeneratedWaveformSourceProfile &source :
+       waveform.accepted_sources) {
+    const std::array<std::string_view, 3> fields{source.path, source.sha256,
+                                                 source.panel_signature};
+    for (const std::string_view field : fields) {
+      if (field.size() > std::numeric_limits<std::uint64_t>::max() - bytes) {
+        return 0;
+      }
+      bytes += field.size();
+    }
+  }
+  return bytes;
+}
+
+bool build_handoff_identity(const GeneratedDeviceProfile &profile,
+                            GlassHandoffIdentity *out) {
+  if (out == nullptr || profile.id != "rm1" ||
+      profile.display_driver != NativeDisplayDriverKind::kMxcfbEpdc ||
+      profile.target_slice != DeviceTargetSlice::kLinuxArm ||
+      profile.panel.width <= 0 || profile.panel.height <= 0 ||
+      profile.panel.source_pixel_format != "rgb565" || profile.panel.color ||
+      !profile.runtime.display.virtual_width.has_value() ||
+      !profile.runtime.display.virtual_height.has_value() ||
+      !profile.runtime.display.stride_bytes.has_value() ||
+      !profile.runtime.display.mapping_bytes.has_value() ||
+      *profile.runtime.display.virtual_width % 8u != 0 ||
+      *profile.runtime.display.virtual_height <
+          static_cast<std::uint32_t>(profile.panel.height) ||
+      profile.runtime.firmware_build.empty() ||
+      profile.runtime.kernel_release.empty() ||
+      profile.runtime.waveform.accepted_sources.empty()) {
+    return false;
+  }
+
+  HandoffFingerprint waveform;
+  waveform.add_string("rm1-mxcfb-observed-update-policy-v1");
+  waveform.add_u32(uapi::kWaveformModeDirect);
+  waveform.add_u32(uapi::kWaveformModeQuality);
+  waveform.add_u32(uapi::kUpdateModePartial);
+  waveform.add_u32(
+      static_cast<std::uint32_t>(uapi::kTemperatureRemarkableDraw));
+  waveform.add_u32(static_cast<std::uint32_t>(uapi::kTemperatureUseAmbient));
+  for (const GeneratedWaveformSourceProfile &source :
+       profile.runtime.waveform.accepted_sources) {
+    waveform.add_string(source.path);
+    waveform.add_string(source.sha256);
+    waveform.add_string(source.panel_signature);
+  }
+
+  const GeneratedDisplayContract &display = profile.runtime.display;
+  HandoffFingerprint pipeline;
+  pipeline.add_string(kHandoffPipelineTag);
+  pipeline.add_string(profile.id);
+  pipeline.add_string(profile.wire_model);
+  pipeline.add_string(profile.codename);
+  pipeline.add_string(profile.tested_os);
+  pipeline.add_string(profile.panel.signature);
+  pipeline.add_string(profile.panel.source_pixel_format);
+  pipeline.add_u32(static_cast<std::uint32_t>(profile.panel.width));
+  pipeline.add_u32(static_cast<std::uint32_t>(profile.panel.height));
+  pipeline.add_u32(static_cast<std::uint32_t>(profile.panel.dpi));
+  pipeline.add_bool(profile.panel.color);
+  pipeline.add_string(profile.runtime.firmware_build);
+  pipeline.add_string(profile.runtime.kernel_release);
+  pipeline.add_string(profile.runtime.display_device);
+  pipeline.add_u32(display.scanout_width);
+  pipeline.add_u32(display.scanout_height);
+  pipeline.add_optional(display.virtual_width);
+  pipeline.add_optional(display.virtual_height);
+  pipeline.add_optional(display.stride_bytes);
+  pipeline.add_optional(display.mapping_bytes);
+  pipeline.add_u32(display.bits_per_pixel);
+  pipeline.add_optional(display.rotation);
+  pipeline.add_u32(display.damage_alignment_pixels);
+  pipeline.add_u32(static_cast<std::uint32_t>(sizeof(uapi::UpdateData)));
+  pipeline.add_u64(uapi::kSendUpdate);
+  pipeline.add_u64(uapi::kWaitForUpdateComplete);
+  for (const std::string_view value : profile.architectures) {
+    pipeline.add_string(value);
+  }
+  for (const std::string_view value : profile.board_tokens) {
+    pipeline.add_string(value);
+  }
+  for (const std::string_view value : profile.compatible_tokens) {
+    pipeline.add_string(value);
+  }
+
+  const std::uint64_t waveform_bytes =
+      waveform_descriptor_bytes(profile.runtime.waveform);
+  if (waveform.value() == 0 || waveform_bytes == 0 || pipeline.value() == 0) {
+    return false;
+  }
+  *out = {
+      .flags = kGlassHandoffFlagNone,
+      .profile = GlassHandoffProfile::kMonochrome,
+      .width = static_cast<std::uint32_t>(profile.panel.width),
+      .height = static_cast<std::uint32_t>(profile.panel.height),
+      .pixel_format = static_cast<std::uint32_t>(kPlutoPixelFormatRgb565),
+      .engine_stride = *display.virtual_width,
+      .tile_px = kHandoffTilePixels,
+      .history_stride = 0,
+      .history_rows = 0,
+      .history_pixel_bytes = 0,
+      .waveform_hash = waveform.value(),
+      .waveform_bytes = waveform_bytes,
+      .ct33_hash = 0,
+      .ct33_bytes = 0,
+      .pipeline_hash = pipeline.value(),
+  };
+  return true;
+}
 
 std::uint32_t process_marker_epoch() {
   // MXCFB markers are driver-global and can survive the fd that submitted
@@ -118,12 +315,31 @@ void apply_stock_update_policy(PlutoRefreshClass refresh_class,
 class MxcfbDisplayBackend::Impl final {
 public:
   Impl(const GeneratedDeviceProfile &profile,
-       std::unique_ptr<MxcfbDevice> device, std::uint32_t first_marker)
+       std::unique_ptr<MxcfbDevice> device, std::uint32_t first_marker,
+       MxcfbHandoffOptions handoff)
       : profile_(profile),
         device_(device == nullptr ? std::make_unique<MxcfbDevice>()
                                   : std::move(device)),
+        handoff_path_(std::move(handoff.path)),
+        handoff_now_(handoff.now_for_testing == nullptr
+                         ? glass_handoff_now
+                         : handoff.now_for_testing),
         next_marker_(first_marker == 0 ? process_marker_epoch()
-                                       : first_marker) {}
+                                       : first_marker) {
+    const bool production_route =
+        production_handoff_path_is_secure(handoff_path_);
+    handoff_route_enabled_ =
+        !handoff_path_.empty() &&
+        (handoff.allow_insecure_path_for_testing || production_route) &&
+        build_handoff_identity(profile_, &handoff_identity_);
+    if (!handoff_path_.empty() && !handoff_route_enabled_) {
+      std::fprintf(stderr,
+                   "mxcfb: warm handoff disabled for insecure or incompatible "
+                   "route\n");
+      handoff_path_.clear();
+    }
+    handoff_unlinked_ = !handoff_route_enabled_;
+  }
 
   ~Impl() { stop(); }
 
@@ -144,14 +360,21 @@ public:
       }
     }
 
+    if (handoff_route_enabled_ && !handoff_lease_.valid() &&
+        !glass_handoff_acquire_lease(handoff_path_, &handoff_lease_)) {
+      return kPlutoStatusAgain;
+    }
+
     const PlutoStatus status = device_->open(profile);
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (status == kPlutoStatusOk) {
       probed_ = true;
-    } else if (status == kPlutoStatusDeviceLost ||
-               status == kPlutoStatusInternal) {
-      lost_ = true;
-      ++hardware_faults_;
+    } else {
+      handoff_lease_ = GlassHandoffLease{};
+      if (status == kPlutoStatusDeviceLost || status == kPlutoStatusInternal) {
+        lost_ = true;
+        ++hardware_faults_;
+      }
     }
     return status;
   }
@@ -181,7 +404,6 @@ public:
 
     const MxcfbFramebufferInfo &framebuffer_info = device_->framebuffer_info();
     const std::span<std::byte> framebuffer = device_->framebuffer();
-    const std::size_t tight_stride = this->tight_stride();
     const std::size_t required_mapping =
         static_cast<std::size_t>(framebuffer_info.stride_bytes) *
         framebuffer_info.virtual_height;
@@ -189,59 +411,22 @@ public:
             static_cast<std::uint32_t>(profile_.panel.width) ||
         framebuffer_info.height !=
             static_cast<std::uint32_t>(profile_.panel.height) ||
-        framebuffer_info.stride_bytes < tight_stride ||
+        framebuffer_info.stride_bytes < tight_stride() ||
         framebuffer.size() < required_mapping) {
-      mark_lost();
-      return kPlutoStatusUnsupported;
-    }
-
-    try {
-      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
-      mirror_.resize(tight_stride *
-                     static_cast<std::size_t>(profile_.panel.height));
-      std::fill(mirror_.begin(), mirror_.end(),
-                static_cast<std::uint8_t>(kSafeInitialByte));
-      // Initialize both visible and hidden virtual pages. No stale stock or
-      // failed-request bytes may become visible through a later whole-panel
-      // update or a future page experiment.
-      std::fill(framebuffer.begin(), framebuffer.end(), kSafeInitialByte);
-      std::atomic_thread_fence(std::memory_order_release);
-    } catch (const std::bad_alloc &) {
-      mark_lost();
-      return kPlutoStatusInternal;
-    }
-
-    const PlutoStatus unblank_status = device_->unblank();
-    if (unblank_status != kPlutoStatusOk) {
       device_->close();
       mark_lost();
       return kPlutoStatusDeviceLost;
     }
 
-    uapi::UpdateData initial_update{};
-    initial_update.update_region = {
-        .top = 0,
-        .left = 0,
-        .width = static_cast<std::uint32_t>(profile_.panel.width),
-        .height = static_cast<std::uint32_t>(profile_.panel.height),
-    };
-    apply_stock_update_policy(kPlutoRefreshFull, &initial_update);
-    initial_update.update_marker = allocate_marker_locked();
-    const PlutoStatus initial_send_status =
-        device_->send_update(&initial_update);
-    if (initial_send_status != kPlutoStatusOk) {
+    bool handoff_pending = false;
+    const PlutoStatus handoff_status =
+        prepare_incoming_handoff(&handoff_pending);
+    if (handoff_status != kPlutoStatusOk) {
       device_->close();
       mark_lost();
-      // No app request exists yet and the update is entirely backend-built.
-      // Once the known-state write boundary has been crossed, any refusal is
-      // a terminal display-ownership failure, including transient-looking
-      // EBUSY/EAGAIN. Retrying in this process could alias inherited EPDC
-      // queue state.
       return kPlutoStatusDeviceLost;
     }
-    const PlutoStatus initial_wait_status = device_->wait_for_update_complete(
-        initial_update.update_marker, nullptr);
-    if (initial_wait_status != kPlutoStatusOk) {
+    if (!handoff_pending && cold_initialize() != kPlutoStatusOk) {
       device_->close();
       mark_lost();
       return kPlutoStatusDeviceLost;
@@ -251,7 +436,7 @@ public:
       std::lock_guard<std::mutex> lock(state_mutex_);
       callback_ = config.on_complete;
       callback_user_data_ = config.user_data;
-      accepting_ = true;
+      accepting_ = !handoff_pending;
       stopping_ = false;
       started_ = true;
     }
@@ -265,6 +450,11 @@ public:
         lost_ = true;
         ++hardware_faults_;
       }
+      if (handoff_route_enabled_ && handoff_lease_.valid()) {
+        (void)discard_handoff_locked();
+      }
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      handoff_lease_ = GlassHandoffLease{};
       device_->close();
       return kPlutoStatusInternal;
     }
@@ -315,16 +505,25 @@ public:
       // unsupported Sparkle maintenance to complete as an accepted no-op.
       // RegionScheduler installs its provisional inflight entry before this
       // call, so a synchronous callback is race-safe.
+      std::lock_guard<std::mutex> admission_lock(admission_mutex_);
       PlutoPresentCompleteCallback callback = nullptr;
       void *callback_user_data = nullptr;
       {
-        std::lock_guard<std::mutex> admission_lock(admission_mutex_);
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (lost_) {
           return kPlutoStatusDeviceLost;
         }
         if (!started_ || !accepting_ || outstanding_) {
           return kPlutoStatusAgain;
+        }
+      }
+      if (consume_handoff_before_admission_locked() != kPlutoStatusOk) {
+        return kPlutoStatusDeviceLost;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (lost_ || !started_ || !accepting_ || outstanding_) {
+          return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
         }
         callback = callback_;
         callback_user_data = callback_user_data_;
@@ -348,6 +547,15 @@ public:
       }
       if (outstanding_) {
         return kPlutoStatusAgain;
+      }
+    }
+    if (consume_handoff_before_admission_locked() != kPlutoStatusOk) {
+      return kPlutoStatusDeviceLost;
+    }
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (lost_ || !started_ || !accepting_ || outstanding_) {
+        return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
       }
       outstanding_ = true;
       marker = allocate_marker_locked();
@@ -474,6 +682,193 @@ public:
     return kPlutoStatusOk;
   }
 
+  PlutoStatus stage_handoff(const PlutoHandoffPayload *payload,
+                            std::uint32_t timeout_ms) {
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusUnsupported;
+    }
+    if (payload == nullptr ||
+        payload->struct_size < sizeof(PlutoHandoffPayload) ||
+        payload->bytes == nullptr || payload->byte_count == 0 ||
+        payload->byte_count > kMaximumRendererHandoffBytes ||
+        payload->width != profile_.panel.width ||
+        payload->height != profile_.panel.height ||
+        payload->pixel_format != kPlutoPixelFormatRgb565 ||
+        payload->configuration_hash == 0 ||
+        (payload->rotation != 0 && payload->rotation != 90 &&
+         payload->rotation != 180 && payload->rotation != 270)) {
+      return kPlutoStatusInvalidArgument;
+    }
+
+    std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (lost_) {
+        return kPlutoStatusDeviceLost;
+      }
+      if (!started_ || stopping_ || handoff_saved_) {
+        return kPlutoStatusAgain;
+      }
+      accepting_ = false;
+    }
+
+    const PlutoStatus idle_status = wait_idle(timeout_ms);
+    if (idle_status != kPlutoStatusOk) {
+      return idle_status == kPlutoStatusDeviceLost ? idle_status
+                                                   : kPlutoStatusAgain;
+    }
+    if (handoff_chain_next_ >= kGlassHandoffMaxChain) {
+      if (discard_handoff_locked()) {
+        return kPlutoStatusAgain;
+      }
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+
+    GlassHandoffBundle bundle;
+    bundle.identity = handoff_identity_;
+    bundle.renderer = {
+        .width = static_cast<std::uint32_t>(payload->width),
+        .height = static_cast<std::uint32_t>(payload->height),
+        .rotation = payload->rotation,
+        .pixel_format = static_cast<std::uint32_t>(payload->pixel_format),
+        .configuration_hash = payload->configuration_hash,
+    };
+    bundle.written = handoff_now_();
+    bundle.chain = handoff_chain_next_;
+    try {
+      bundle.renderer_payload.assign(payload->bytes,
+                                     payload->bytes + payload->byte_count);
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      if (!pack_handoff_core_locked(&bundle)) {
+        discard_handoff_locked();
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+    } catch (const std::bad_alloc &) {
+      if (discard_handoff_locked()) {
+        return kPlutoStatusAgain;
+      }
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+
+    if (!glass_handoff_save(handoff_lease_, handoff_path_, bundle)) {
+      if (discard_handoff_locked()) {
+        return kPlutoStatusAgain;
+      }
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+    handoff_saved_ = true;
+    handoff_unlinked_ = false;
+    incoming_handoff_claim_ = {};
+    incoming_renderer_payload_.clear();
+    incoming_renderer_info_ = {};
+    handoff_decision_ = HandoffDecision::kNone;
+    std::fprintf(stderr,
+                 "mxcfb: warm handoff saved chain=%u renderer_bytes=%zu\n",
+                 bundle.chain, bundle.renderer_payload.size());
+    return kPlutoStatusOk;
+  }
+
+  PlutoStatus get_handoff(PlutoHandoffPayload *out_payload) {
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusUnsupported;
+    }
+    if (out_payload == nullptr ||
+        out_payload->struct_size < sizeof(PlutoHandoffPayload)) {
+      return kPlutoStatusInvalidArgument;
+    }
+    std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (lost_) {
+      return kPlutoStatusDeviceLost;
+    }
+    if (!started_ || stopping_ ||
+        handoff_decision_ != HandoffDecision::kPending ||
+        incoming_renderer_payload_.empty()) {
+      return kPlutoStatusAgain;
+    }
+    *out_payload = {
+        .struct_size = sizeof(PlutoHandoffPayload),
+        .bytes = incoming_renderer_payload_.data(),
+        .byte_count = incoming_renderer_payload_.size(),
+        .width = static_cast<std::int32_t>(incoming_renderer_info_.width),
+        .height = static_cast<std::int32_t>(incoming_renderer_info_.height),
+        .rotation = incoming_renderer_info_.rotation,
+        .pixel_format =
+            static_cast<PlutoPixelFormat>(incoming_renderer_info_.pixel_format),
+        .configuration_hash = incoming_renderer_info_.configuration_hash,
+    };
+    return kPlutoStatusOk;
+  }
+
+  PlutoStatus confirm_handoff(bool accepted) {
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusUnsupported;
+    }
+    std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (lost_) {
+        return kPlutoStatusDeviceLost;
+      }
+      if (!started_ || stopping_ ||
+          handoff_decision_ != HandoffDecision::kPending) {
+        return kPlutoStatusAgain;
+      }
+    }
+
+    if (!accepted) {
+      if (!discard_handoff_locked()) {
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      if (cold_initialize() != kPlutoStatusOk) {
+        device_->close();
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        accepting_ = true;
+      }
+      return kPlutoStatusOk;
+    }
+
+    {
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      if (incoming_mirror_.size() != frame_size() ||
+          !framebuffer_matches_locked(incoming_mirror_)) {
+        discard_handoff_locked();
+        clear_incoming_handoff_locked(HandoffDecision::kRejected);
+        device_->close();
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+      mirror_ = std::move(incoming_mirror_);
+    }
+    if (device_->unblank() != kPlutoStatusOk) {
+      discard_handoff_locked();
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      device_->close();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+    incoming_renderer_payload_.clear();
+    incoming_renderer_info_ = {};
+    handoff_decision_ = HandoffDecision::kAccepted;
+    warm_handoff_accepted_ = true;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      accepting_ = true;
+    }
+    std::fprintf(stderr, "mxcfb: warm handoff accepted; cold clear skipped\n");
+    return kPlutoStatusOk;
+  }
+
   PlutoStatus suspend(std::uint32_t timeout_ms) {
     {
       std::lock_guard<std::mutex> admission_lock(admission_mutex_);
@@ -497,10 +892,11 @@ public:
 
   NativeBackendHealth health() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    const bool busy = outstanding_ || (started_ && !accepting_);
     return {
         .state = lost_ ? NativeBackendHealthState::kDeviceLost
-                       : (outstanding_ ? NativeBackendHealthState::kBusy
-                                       : NativeBackendHealthState::kReady),
+                       : (busy ? NativeBackendHealthState::kBusy
+                               : NativeBackendHealthState::kReady),
         .queue_depth = outstanding_ ? 1U : 0U,
         .completed_jobs = completed_jobs_,
         .hardware_faults = hardware_faults_,
@@ -520,6 +916,16 @@ public:
     }
     device_->close();
     {
+      std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+      if (handoff_route_enabled_ && handoff_lease_.valid() && !handoff_saved_ &&
+          !discard_handoff_locked()) {
+        std::fprintf(stderr,
+                     "mxcfb: unsafe close could not invalidate warm handoff\n");
+      }
+      handoff_lease_ = GlassHandoffLease{};
+      clear_incoming_handoff_locked(HandoffDecision::kNone);
+      warm_handoff_accepted_ = false;
+      handoff_saved_ = false;
       std::lock_guard<std::mutex> lock(state_mutex_);
       pending_job_.reset();
       outstanding_ = false;
@@ -542,6 +948,291 @@ private:
 
   std::size_t frame_size() const {
     return tight_stride() * static_cast<std::size_t>(profile_.panel.height);
+  }
+
+  PlutoStatus cold_initialize() {
+    try {
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      mirror_.assign(frame_size(), static_cast<std::uint8_t>(kSafeInitialByte));
+      std::span<std::byte> framebuffer = device_->framebuffer();
+      if (framebuffer.empty()) {
+        return kPlutoStatusDeviceLost;
+      }
+      // Cold ownership is the only path that overwrites the inherited plane.
+      // Initialize visible and hidden virtual pages before unblank/update so a
+      // later full request can never expose stale stock or rejected-handoff
+      // bytes.
+      std::fill(framebuffer.begin(), framebuffer.end(), kSafeInitialByte);
+      std::atomic_thread_fence(std::memory_order_release);
+    } catch (const std::bad_alloc &) {
+      return kPlutoStatusInternal;
+    }
+
+    if (device_->unblank() != kPlutoStatusOk) {
+      return kPlutoStatusDeviceLost;
+    }
+    uapi::UpdateData initial_update{};
+    initial_update.update_region = {
+        .top = 0,
+        .left = 0,
+        .width = static_cast<std::uint32_t>(profile_.panel.width),
+        .height = static_cast<std::uint32_t>(profile_.panel.height),
+    };
+    apply_stock_update_policy(kPlutoRefreshFull, &initial_update);
+    initial_update.update_marker = allocate_marker_locked();
+    if (device_->send_update(&initial_update) != kPlutoStatusOk ||
+        device_->wait_for_update_complete(initial_update.update_marker,
+                                          nullptr) != kPlutoStatusOk) {
+      return kPlutoStatusDeviceLost;
+    }
+    handoff_chain_next_ = 0;
+    handoff_unlinked_ = true;
+    warm_handoff_accepted_ = false;
+    return kPlutoStatusOk;
+  }
+
+  bool renderer_info_valid(const GlassHandoffRendererInfo &info,
+                           std::size_t payload_bytes) const {
+    return info.width == static_cast<std::uint32_t>(profile_.panel.width) &&
+           info.height == static_cast<std::uint32_t>(profile_.panel.height) &&
+           info.pixel_format ==
+               static_cast<std::uint32_t>(kPlutoPixelFormatRgb565) &&
+           (info.rotation == 0 || info.rotation == 90 || info.rotation == 180 ||
+            info.rotation == 270) &&
+           info.configuration_hash != 0 && payload_bytes != 0 &&
+           payload_bytes <= kMaximumRendererHandoffBytes;
+  }
+
+  bool unpack_handoff_core(const GlassHandoffBundle &bundle,
+                           std::vector<std::uint8_t> *out_mirror) const {
+    if (out_mirror == nullptr || bundle.identity != handoff_identity_ ||
+        bundle.core.engine_temperature_bin != 0 ||
+        bundle.core.admission_temperature_bin != 0) {
+      return false;
+    }
+    const std::size_t storage_stride = handoff_identity_.engine_stride;
+    const std::size_t height = handoff_identity_.height;
+    if (storage_stride > std::numeric_limits<std::size_t>::max() / height) {
+      return false;
+    }
+    const std::size_t plane = storage_stride * height;
+    const std::size_t tile_cols =
+        (handoff_identity_.width + handoff_identity_.tile_px - 1u) /
+        handoff_identity_.tile_px;
+    const std::size_t tile_rows =
+        (handoff_identity_.height + handoff_identity_.tile_px - 1u) /
+        handoff_identity_.tile_px;
+    if (tile_cols > std::numeric_limits<std::size_t>::max() / tile_rows ||
+        bundle.core.engine_levels.size() != plane ||
+        bundle.core.engine_dc.size() != plane ||
+        bundle.core.engine_stress.size() != tile_cols * tile_rows ||
+        bundle.core.engine_rescan.size() != tile_cols * tile_rows ||
+        !bundle.core.xochitl_history_ab.empty() ||
+        std::any_of(bundle.core.engine_stress.begin(),
+                    bundle.core.engine_stress.end(),
+                    [](std::uint16_t value) { return value != 0; }) ||
+        std::any_of(bundle.core.engine_rescan.begin(),
+                    bundle.core.engine_rescan.end(),
+                    [](std::int32_t value) { return value != 0; })) {
+      return false;
+    }
+
+    try {
+      out_mirror->resize(frame_size());
+    } catch (const std::bad_alloc &) {
+      return false;
+    }
+    const std::size_t width = static_cast<std::size_t>(profile_.panel.width);
+    for (std::size_t y = 0; y < height; ++y) {
+      const std::size_t source_row = y * storage_stride;
+      const std::size_t destination_row = y * tight_stride();
+      for (std::size_t x = 0; x < width; ++x) {
+        const std::size_t source = source_row + x;
+        const std::size_t destination = destination_row + x * kBytesPerPixel;
+        (*out_mirror)[destination] = bundle.core.engine_levels[source];
+        (*out_mirror)[destination + 1u] =
+            std::bit_cast<std::uint8_t>(bundle.core.engine_dc[source]);
+      }
+      for (std::size_t x = width; x < storage_stride; ++x) {
+        const std::size_t padding = source_row + x;
+        if (bundle.core.engine_levels[padding] != 0 ||
+            bundle.core.engine_dc[padding] != 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool
+  framebuffer_matches_locked(const std::vector<std::uint8_t> &candidate) const {
+    if (candidate.size() != frame_size()) {
+      return false;
+    }
+    const std::span<std::byte> framebuffer = device_->framebuffer();
+    const std::size_t framebuffer_stride =
+        device_->framebuffer_info().stride_bytes;
+    if (framebuffer_stride < tight_stride() ||
+        framebuffer.size() < framebuffer_stride * static_cast<std::size_t>(
+                                                      profile_.panel.height)) {
+      return false;
+    }
+    for (int y = 0; y < profile_.panel.height; ++y) {
+      if (std::memcmp(framebuffer.data() +
+                          static_cast<std::size_t>(y) * framebuffer_stride,
+                      candidate.data() +
+                          static_cast<std::size_t>(y) * tight_stride(),
+                      tight_stride()) != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool pack_handoff_core_locked(GlassHandoffBundle *bundle) const {
+    if (bundle == nullptr || mirror_.size() != frame_size() ||
+        !framebuffer_matches_locked(mirror_)) {
+      return false;
+    }
+    const std::size_t storage_stride = handoff_identity_.engine_stride;
+    const std::size_t height = handoff_identity_.height;
+    if (storage_stride > std::numeric_limits<std::size_t>::max() / height) {
+      return false;
+    }
+    const std::size_t plane = storage_stride * height;
+    const std::size_t tile_cols =
+        (handoff_identity_.width + handoff_identity_.tile_px - 1u) /
+        handoff_identity_.tile_px;
+    const std::size_t tile_rows =
+        (handoff_identity_.height + handoff_identity_.tile_px - 1u) /
+        handoff_identity_.tile_px;
+    if (tile_cols > std::numeric_limits<std::size_t>::max() / tile_rows) {
+      return false;
+    }
+    bundle->core.engine_temperature_bin = 0;
+    bundle->core.admission_temperature_bin = 0;
+    bundle->core.engine_levels.assign(plane, 0);
+    bundle->core.engine_dc.assign(plane, 0);
+    bundle->core.engine_stress.assign(tile_cols * tile_rows, 0);
+    bundle->core.engine_rescan.assign(tile_cols * tile_rows, 0);
+    bundle->core.xochitl_history_ab.clear();
+    const std::size_t width = static_cast<std::size_t>(profile_.panel.width);
+    for (std::size_t y = 0; y < height; ++y) {
+      const std::size_t source_row = y * tight_stride();
+      const std::size_t destination_row = y * storage_stride;
+      for (std::size_t x = 0; x < width; ++x) {
+        const std::size_t source = source_row + x * kBytesPerPixel;
+        const std::size_t destination = destination_row + x;
+        bundle->core.engine_levels[destination] = mirror_[source];
+        bundle->core.engine_dc[destination] =
+            std::bit_cast<std::int8_t>(mirror_[source + 1u]);
+      }
+    }
+    return true;
+  }
+
+  void clear_incoming_handoff_locked(HandoffDecision decision) {
+    incoming_mirror_.clear();
+    incoming_renderer_payload_.clear();
+    incoming_renderer_info_ = {};
+    incoming_handoff_claim_ = {};
+    handoff_decision_ = decision;
+    if (decision != HandoffDecision::kAccepted) {
+      warm_handoff_accepted_ = false;
+    }
+  }
+
+  bool discard_handoff_locked() {
+    if (!handoff_route_enabled_) {
+      handoff_unlinked_ = true;
+      return true;
+    }
+    if (!handoff_lease_.valid() ||
+        !glass_handoff_discard(handoff_lease_, handoff_path_)) {
+      return false;
+    }
+    handoff_unlinked_ = true;
+    incoming_handoff_claim_ = {};
+    handoff_saved_ = false;
+    return true;
+  }
+
+  PlutoStatus prepare_incoming_handoff(bool *out_pending) {
+    if (out_pending == nullptr) {
+      return kPlutoStatusInvalidArgument;
+    }
+    *out_pending = false;
+    clear_incoming_handoff_locked(HandoffDecision::kNone);
+    handoff_chain_next_ = 0;
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusOk;
+    }
+    if (!handoff_lease_.valid()) {
+      return kPlutoStatusDeviceLost;
+    }
+
+    GlassHandoffBundle candidate;
+    const GlassHandoffReject reject =
+        glass_handoff_load(handoff_lease_, handoff_path_, handoff_identity_,
+                           handoff_now_(), &candidate);
+    if (reject == GlassHandoffReject::kMissing) {
+      handoff_unlinked_ = true;
+      return kPlutoStatusOk;
+    }
+    std::vector<std::uint8_t> candidate_mirror;
+    const bool candidate_valid =
+        reject == GlassHandoffReject::kNone &&
+        renderer_info_valid(candidate.renderer,
+                            candidate.renderer_payload.size()) &&
+        unpack_handoff_core(candidate, &candidate_mirror) &&
+        framebuffer_matches_locked(candidate_mirror);
+    if (!candidate_valid) {
+      std::fprintf(stderr, "mxcfb: warm handoff rejected: %s\n",
+                   reject == GlassHandoffReject::kNone
+                       ? glass_handoff_reject_name(GlassHandoffReject::kState)
+                       : glass_handoff_reject_name(reject));
+      if (!discard_handoff_locked()) {
+        return kPlutoStatusDeviceLost;
+      }
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      return kPlutoStatusOk;
+    }
+
+    incoming_mirror_ = std::move(candidate_mirror);
+    incoming_renderer_payload_ = std::move(candidate.renderer_payload);
+    incoming_renderer_info_ = candidate.renderer;
+    incoming_handoff_claim_ = candidate.claim;
+    handoff_chain_next_ = candidate.chain + 1u;
+    handoff_unlinked_ = false;
+    handoff_decision_ = HandoffDecision::kPending;
+    *out_pending = true;
+    std::fprintf(stderr,
+                 "mxcfb: warm handoff candidate validated chain=%u "
+                 "renderer_bytes=%zu\n",
+                 candidate.chain, incoming_renderer_payload_.size());
+    return kPlutoStatusOk;
+  }
+
+  PlutoStatus consume_handoff_before_admission_locked() {
+    if (handoff_unlinked_) {
+      return kPlutoStatusOk;
+    }
+    if (!warm_handoff_accepted_ ||
+        handoff_decision_ != HandoffDecision::kAccepted ||
+        !glass_handoff_claim(handoff_lease_, handoff_path_,
+                             incoming_handoff_claim_)) {
+      std::fprintf(stderr,
+                   "mxcfb: warm handoff claim lost before first admission\n");
+      handoff_unlinked_ = true;
+      incoming_handoff_claim_ = {};
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+    handoff_unlinked_ = true;
+    incoming_handoff_claim_ = {};
+    handoff_saved_ = false;
+    std::fprintf(stderr, "mxcfb: warm handoff consumed\n");
+    return kPlutoStatusOk;
   }
 
   PlutoStatus validate_request(const PlutoPresentRequest &request) const {
@@ -724,6 +1415,12 @@ private:
 
   const GeneratedDeviceProfile &profile_;
   std::unique_ptr<MxcfbDevice> device_;
+  std::string handoff_path_;
+  GlassHandoffClock (*handoff_now_)() = glass_handoff_now;
+  GlassHandoffIdentity handoff_identity_{};
+  GlassHandoffLease handoff_lease_{};
+  GlassHandoffClaim incoming_handoff_claim_{};
+  GlassHandoffRendererInfo incoming_renderer_info_{};
 
   mutable std::mutex admission_mutex_;
   mutable std::mutex state_mutex_;
@@ -733,12 +1430,20 @@ private:
   std::thread worker_;
   std::optional<CompletionJob> pending_job_;
   std::vector<std::uint8_t> mirror_;
+  std::vector<std::uint8_t> incoming_renderer_payload_;
+  std::vector<std::uint8_t> incoming_mirror_;
 
   PlutoPresentCompleteCallback callback_ = nullptr;
   void *callback_user_data_ = nullptr;
   std::uint32_t next_marker_ = 1;
+  std::uint32_t handoff_chain_next_ = 0;
   std::uint64_t completed_jobs_ = 0;
   std::uint64_t hardware_faults_ = 0;
+  HandoffDecision handoff_decision_ = HandoffDecision::kNone;
+  bool handoff_route_enabled_ = false;
+  bool handoff_unlinked_ = true;
+  bool handoff_saved_ = false;
+  bool warm_handoff_accepted_ = false;
   bool probed_ = false;
   bool started_ = false;
   bool accepting_ = false;
@@ -750,8 +1455,10 @@ private:
 
 MxcfbDisplayBackend::MxcfbDisplayBackend(const GeneratedDeviceProfile &profile,
                                          std::unique_ptr<MxcfbDevice> device,
-                                         std::uint32_t first_marker)
-    : impl_(std::make_unique<Impl>(profile, std::move(device), first_marker)) {}
+                                         std::uint32_t first_marker,
+                                         MxcfbHandoffOptions handoff)
+    : impl_(std::make_unique<Impl>(profile, std::move(device), first_marker,
+                                   std::move(handoff))) {}
 
 MxcfbDisplayBackend::~MxcfbDisplayBackend() = default;
 
@@ -791,17 +1498,18 @@ PlutoStatus MxcfbDisplayBackend::set_pen_focus(const PlutoPenFocus *focus) {
   return impl_->set_pen_focus(focus);
 }
 
-PlutoStatus MxcfbDisplayBackend::stage_handoff(const PlutoHandoffPayload *,
-                                               std::uint32_t) {
-  return kPlutoStatusUnsupported;
+PlutoStatus
+MxcfbDisplayBackend::stage_handoff(const PlutoHandoffPayload *payload,
+                                   std::uint32_t timeout_ms) {
+  return impl_->stage_handoff(payload, timeout_ms);
 }
 
-PlutoStatus MxcfbDisplayBackend::get_handoff(PlutoHandoffPayload *) {
-  return kPlutoStatusUnsupported;
+PlutoStatus MxcfbDisplayBackend::get_handoff(PlutoHandoffPayload *out_payload) {
+  return impl_->get_handoff(out_payload);
 }
 
-PlutoStatus MxcfbDisplayBackend::confirm_handoff(bool) {
-  return kPlutoStatusUnsupported;
+PlutoStatus MxcfbDisplayBackend::confirm_handoff(bool accepted) {
+  return impl_->confirm_handoff(accepted);
 }
 
 PlutoStatus MxcfbDisplayBackend::suspend(std::uint32_t timeout_ms) {

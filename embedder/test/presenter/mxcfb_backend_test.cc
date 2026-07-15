@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -16,12 +17,14 @@
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 namespace {
 
 using pluto::native::NativeBackendHealthState;
 using pluto::native::mxcfb::MxcfbDevice;
 using pluto::native::mxcfb::MxcfbDisplayBackend;
+using pluto::native::mxcfb::MxcfbHandoffOptions;
 using pluto::native::mxcfb::MxcfbSyscalls;
 namespace uapi = pluto::native::mxcfb::uapi;
 
@@ -297,6 +300,85 @@ bool probe_and_start(MxcfbDisplayBackend *backend,
 std::uint8_t source_byte(const OwnedRequest &owned, std::uint32_t x_byte,
                          std::uint32_t y) {
   return owned.pixels[static_cast<std::size_t>(y) * owned.stride + x_byte];
+}
+
+class IsolatedHandoffPath final {
+public:
+  IsolatedHandoffPath() {
+    static std::atomic<std::uint64_t> sequence{1};
+    path_ = "/tmp/pluto-rm1-handoff-" + std::to_string(::getpid()) + "-" +
+            std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+  }
+
+  ~IsolatedHandoffPath() {
+    (void)std::remove(path_.c_str());
+    (void)std::remove((path_ + ".lease").c_str());
+  }
+
+  const std::string &get() const { return path_; }
+
+private:
+  std::string path_;
+};
+
+MxcfbHandoffOptions
+handoff_options(const std::string &path,
+                pluto::GlassHandoffClock (*now)() = nullptr) {
+  return {
+      .path = path,
+      .allow_insecure_path_for_testing = true,
+      .now_for_testing = now,
+  };
+}
+
+class OwnedHandoffPayload final {
+public:
+  explicit OwnedHandoffPayload(std::vector<std::uint8_t> data = {0x52, 0x4d,
+                                                                 0x31, 0x01})
+      : bytes(std::move(data)) {
+    payload = {
+        .struct_size = sizeof(PlutoHandoffPayload),
+        .bytes = bytes.data(),
+        .byte_count = bytes.size(),
+        .width = static_cast<std::int32_t>(kWidth),
+        .height = static_cast<std::int32_t>(kHeight),
+        .rotation = 0,
+        .pixel_format = kPlutoPixelFormatRgb565,
+        .configuration_hash = 0x7f4a9d281b03c6e5ULL,
+    };
+  }
+
+  std::vector<std::uint8_t> bytes;
+  PlutoHandoffPayload payload{};
+};
+
+void draw_and_stage_handoff(MxcfbDisplayBackend *backend,
+                            BlockingMxcfbSyscalls *syscalls,
+                            OwnedHandoffPayload *handoff) {
+  ASSERT_TRUE(probe_and_start(backend, syscalls));
+  OwnedRequest content({{{.x = 3, .y = 4, .width = 5, .height = 6}}},
+                       kPlutoRefreshUi, 91);
+  ASSERT_EQ(backend->submit(&content.request), kPlutoStatusOk);
+  ASSERT_TRUE(syscalls->wait_for_wait_count(1));
+  syscalls->complete_one();
+  ASSERT_EQ(backend->wait_idle(1000), kPlutoStatusOk);
+  ASSERT_EQ(backend->stage_handoff(&handoff->payload, 1000), kPlutoStatusOk);
+}
+
+pluto::GlassHandoffClock handoff_clock_100() {
+  return {
+      .realtime_sec = 100,
+      .boottime_ns = 10'000'000'000ULL,
+      .boot_id_hash = 0x123456789abcdef0ULL,
+  };
+}
+
+pluto::GlassHandoffClock handoff_clock_161() {
+  return {
+      .realtime_sec = 161,
+      .boottime_ns = 71'000'000'000ULL,
+      .boot_id_hash = 0x123456789abcdef0ULL,
+  };
 }
 
 } // namespace
@@ -819,4 +901,384 @@ TEST(MxcfbBackend, ValidatesLifecyclePenFocusSnapshotAndHandoffBoundaries) {
   EXPECT_EQ(backend.stage_handoff(nullptr, 0), kPlutoStatusUnsupported);
   EXPECT_EQ(backend.get_handoff(nullptr), kPlutoStatusUnsupported);
   EXPECT_EQ(backend.confirm_handoff(false), kPlutoStatusUnsupported);
+}
+
+TEST(MxcfbBackend,
+     WarmHandoffPreservesFramebufferAndSkipsColdRefreshUntilFirstAdmission) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload({0x10, 0x20, 0x30, 0x40, 0x50});
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 100, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    ASSERT_EQ(::access(path.get().c_str(), F_OK), 0);
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  CallbackCapture callbacks;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               200, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config(&callbacks);
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+
+  EXPECT_FALSE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_TRUE(incoming_syscalls.sent_updates().empty());
+  EXPECT_TRUE(incoming_syscalls.waited_markers().empty());
+  EXPECT_EQ(incoming_syscalls.blank_count, 0);
+
+  PlutoHandoffPayload received{.struct_size = sizeof(PlutoHandoffPayload)};
+  ASSERT_EQ(incoming.get_handoff(&received), kPlutoStatusOk);
+  EXPECT_EQ(received.byte_count, staged_payload.bytes.size());
+  EXPECT_TRUE(std::vector<std::uint8_t>(received.bytes,
+                                        received.bytes + received.byte_count) ==
+              staged_payload.bytes);
+  EXPECT_EQ(received.width, static_cast<std::int32_t>(kWidth));
+  EXPECT_EQ(received.height, static_cast<std::int32_t>(kHeight));
+  EXPECT_EQ(received.pixel_format, kPlutoPixelFormatRgb565);
+  EXPECT_EQ(received.configuration_hash,
+            staged_payload.payload.configuration_hash);
+
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_EQ(incoming_syscalls.blank_count, 1);
+  EXPECT_TRUE(incoming_syscalls.sent_updates().empty());
+  EXPECT_TRUE(incoming_syscalls.waited_markers().empty());
+  ASSERT_EQ(::access(path.get().c_str(), F_OK), 0);
+
+  std::vector<std::uint8_t> snapshot_bytes(kTightStride * kHeight, 0);
+  PlutoSurface snapshot{
+      .pixels = snapshot_bytes.data(),
+      .stride_bytes = kTightStride,
+      .width = static_cast<std::int32_t>(kWidth),
+      .height = static_cast<std::int32_t>(kHeight),
+      .format = kPlutoPixelFormatRgb565,
+  };
+  ASSERT_EQ(incoming.snapshot(&snapshot), kPlutoStatusOk);
+  EXPECT_EQ(snapshot_bytes[4U * kTightStride + 6U],
+            inherited_framebuffer[4U * kStride + 6U]);
+  EXPECT_NE(snapshot_bytes[4U * kTightStride + 6U], kSafeInitialPixel);
+
+  OwnedRequest next({{{.x = 20, .y = 30, .width = 2, .height = 2}}},
+                    kPlutoRefreshFast, 92);
+  ASSERT_EQ(incoming.submit(&next.request), kPlutoStatusOk);
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(1));
+  incoming_syscalls.complete_one();
+  ASSERT_TRUE(callbacks.wait_for_count(1));
+  EXPECT_TRUE(callbacks.frame_ids() == std::vector<std::uint64_t>({92}));
+  EXPECT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
+}
+
+TEST(MxcfbBackend, RendererRejectionDiscardsCandidateAndPerformsColdRefresh) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 300, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               400, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  EXPECT_FALSE(incoming.ready(kPlutoRefreshUi));
+  ASSERT_EQ(incoming.confirm_handoff(false), kPlutoStatusOk);
+
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+  const auto updates = incoming_syscalls.sent_updates();
+  const auto waits = incoming_syscalls.waited_markers();
+  ASSERT_EQ(updates.size(), 1U);
+  ASSERT_EQ(waits.size(), 1U);
+  EXPECT_EQ(waits[0], updates[0].update_marker);
+  EXPECT_EQ(updates[0].update_region.width, kWidth);
+  EXPECT_EQ(updates[0].update_region.height, kHeight);
+  EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeQuality);
+  EXPECT_EQ(incoming_syscalls.mapped_storage.front(), kSafeInitialPixel);
+  EXPECT_EQ(incoming_syscalls.mapped_storage.back(), kSafeInitialPixel);
+}
+
+TEST(MxcfbBackend, CorruptCandidateFallsBackColdAndCannotBeRead) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 500, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  const int fd = ::open(path.get().c_str(), O_RDWR | O_CLOEXEC);
+  ASSERT_GE(fd, 0);
+  const off_t file_bytes = ::lseek(fd, 0, SEEK_END);
+  ASSERT_GT(file_bytes, 0);
+  std::uint8_t byte = 0;
+  const off_t offset = file_bytes / 2;
+  ASSERT_EQ(::pread(fd, &byte, sizeof(byte), offset),
+            static_cast<ssize_t>(sizeof(byte)));
+  byte ^= 0x80U;
+  ASSERT_EQ(::pwrite(fd, &byte, sizeof(byte), offset),
+            static_cast<ssize_t>(sizeof(byte)));
+  ASSERT_EQ(::fsync(fd), 0);
+  ASSERT_EQ(::close(fd), 0);
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               600, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_EQ(incoming_syscalls.sent_updates().size(), 1U);
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+  PlutoHandoffPayload received{.struct_size = sizeof(PlutoHandoffPayload)};
+  EXPECT_EQ(incoming.get_handoff(&received), kPlutoStatusAgain);
+}
+
+TEST(MxcfbBackend, StaleCandidateFallsBackCold) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(
+        rm1_profile(), fake_device(&outgoing_syscalls), 700,
+        handoff_options(path.get(), handoff_clock_100));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               800,
+                               handoff_options(path.get(), handoff_clock_161));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_EQ(incoming_syscalls.sent_updates().size(), 1U);
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+}
+
+TEST(MxcfbBackend, ExactPipelineIdentityMismatchFallsBackCold) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 900, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  pluto::GeneratedDeviceProfile drifted_profile = rm1_profile();
+  drifted_profile.tested_os = "3.23.0.0-test-drift";
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(drifted_profile, fake_device(&incoming_syscalls),
+                               1000, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(drifted_profile), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_EQ(incoming_syscalls.sent_updates().size(), 1U);
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+}
+
+TEST(MxcfbBackend, FramebufferContinuityMismatchFallsBackCold) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 1100, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               1200, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_EQ(incoming_syscalls.sent_updates().size(), 1U);
+  EXPECT_EQ(incoming_syscalls.mapped_storage.front(), kSafeInitialPixel);
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+}
+
+TEST(MxcfbBackend,
+     MissingFirstAdmissionClaimFailsClosedBeforeFramebufferWrite) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 1300, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               1400, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+  ASSERT_EQ(std::remove(path.get().c_str()), 0);
+  const std::vector<std::uint8_t> before = incoming_syscalls.mapped_storage;
+
+  OwnedRequest request({{{.x = 1, .y = 2, .width = 3, .height = 4}}});
+  EXPECT_EQ(incoming.submit(&request.request), kPlutoStatusDeviceLost);
+  EXPECT_EQ(static_cast<int>(incoming.health().state),
+            static_cast<int>(NativeBackendHealthState::kDeviceLost));
+  EXPECT_TRUE(incoming_syscalls.sent_updates().empty());
+  EXPECT_TRUE(incoming_syscalls.mapped_storage == before);
+}
+
+TEST(MxcfbBackend, LeaseExcludesCompetingPresenterBeforeDeviceOpen) {
+  IsolatedHandoffPath path;
+  BlockingMxcfbSyscalls first_syscalls;
+  BlockingMxcfbSyscalls second_syscalls;
+  auto second = std::make_unique<MxcfbDisplayBackend>(
+      rm1_profile(), fake_device(&second_syscalls), 1600,
+      handoff_options(path.get()));
+  {
+    MxcfbDisplayBackend first(rm1_profile(), fake_device(&first_syscalls), 1500,
+                              handoff_options(path.get()));
+    ASSERT_EQ(first.probe(rm1_profile()), kPlutoStatusOk);
+    EXPECT_EQ(second->probe(rm1_profile()), kPlutoStatusAgain);
+    EXPECT_EQ(second_syscalls.open_count, 0);
+  }
+
+  EXPECT_EQ(second->probe(rm1_profile()), kPlutoStatusOk);
+  EXPECT_EQ(second_syscalls.open_count, 1);
+}
+
+TEST(MxcfbBackend, ConsumedCandidateCannotReplayIntoAThirdPresenter) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 1650, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  {
+    BlockingMxcfbSyscalls consumer_syscalls;
+    consumer_syscalls.mapped_storage = inherited_framebuffer;
+    MxcfbDisplayBackend consumer(rm1_profile(), fake_device(&consumer_syscalls),
+                                 1660, handoff_options(path.get()));
+    ASSERT_EQ(consumer.probe(rm1_profile()), kPlutoStatusOk);
+    const PlutoPresenterConfig config = presenter_config();
+    ASSERT_EQ(consumer.start(config), kPlutoStatusOk);
+    ASSERT_EQ(consumer.confirm_handoff(true), kPlutoStatusOk);
+    OwnedRequest claim({{{.x = 0, .y = 0, .width = 1, .height = 1}}},
+                       kPlutoRefreshFast, 93);
+    claim.request.flags = kPlutoPresentFlagSparkle;
+    ASSERT_EQ(consumer.submit(&claim.request), kPlutoStatusOk);
+    ASSERT_NE(::access(path.get().c_str(), F_OK), 0);
+    inherited_framebuffer = consumer_syscalls.mapped_storage;
+    consumer.stop();
+  }
+
+  BlockingMxcfbSyscalls replay_syscalls;
+  replay_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend replay(rm1_profile(), fake_device(&replay_syscalls), 1670,
+                             handoff_options(path.get()));
+  ASSERT_EQ(replay.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig replay_config = presenter_config();
+  ASSERT_EQ(replay.start(replay_config), kPlutoStatusOk);
+  EXPECT_TRUE(replay.ready(kPlutoRefreshUi));
+  EXPECT_EQ(replay_syscalls.sent_updates().size(), 1U);
+  PlutoHandoffPayload received{.struct_size = sizeof(PlutoHandoffPayload)};
+  EXPECT_EQ(replay.get_handoff(&received), kPlutoStatusAgain);
+}
+
+TEST(MxcfbBackend, InsecureProductionOverrideCannotEnableHandoff) {
+  IsolatedHandoffPath path;
+  BlockingMxcfbSyscalls syscalls;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls), 1680,
+                              MxcfbHandoffOptions{
+                                  .path = path.get(),
+                                  .allow_insecure_path_for_testing = false,
+                                  .now_for_testing = nullptr,
+                              });
+  ASSERT_EQ(backend.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(backend.start(config), kPlutoStatusOk);
+  EXPECT_EQ(syscalls.sent_updates().size(), 1U);
+  OwnedHandoffPayload payload;
+  EXPECT_EQ(backend.stage_handoff(&payload.payload, 0),
+            kPlutoStatusUnsupported);
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+  EXPECT_NE(::access((path.get() + ".lease").c_str(), F_OK), 0);
+}
+
+TEST(MxcfbBackend, StageRequiresRealMarkerQuiescenceAndBoundedPayload) {
+  IsolatedHandoffPath path;
+  BlockingMxcfbSyscalls syscalls;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls), 1700,
+                              handoff_options(path.get()));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
+  OwnedRequest request({{{.x = 1, .y = 2, .width = 3, .height = 4}}});
+  ASSERT_EQ(backend.submit(&request.request), kPlutoStatusOk);
+  ASSERT_TRUE(syscalls.wait_for_wait_count(1));
+
+  PlutoHandoffPayload oversized{
+      .struct_size = sizeof(PlutoHandoffPayload),
+      .bytes = reinterpret_cast<const std::uint8_t *>(1),
+      .byte_count = (32U << 20U) + 1U,
+      .width = static_cast<std::int32_t>(kWidth),
+      .height = static_cast<std::int32_t>(kHeight),
+      .rotation = 0,
+      .pixel_format = kPlutoPixelFormatRgb565,
+      .configuration_hash = 1,
+  };
+  EXPECT_EQ(backend.stage_handoff(&oversized, 0), kPlutoStatusInvalidArgument);
+
+  OwnedHandoffPayload payload;
+  const std::uint64_t configuration_hash = payload.payload.configuration_hash;
+  payload.payload.configuration_hash = 0;
+  EXPECT_EQ(backend.stage_handoff(&payload.payload, 0),
+            kPlutoStatusInvalidArgument);
+  payload.payload.configuration_hash = configuration_hash;
+  EXPECT_EQ(backend.stage_handoff(&payload.payload, 0), kPlutoStatusAgain);
+  EXPECT_FALSE(backend.ready(kPlutoRefreshUi));
+  EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+  syscalls.complete_one();
+  ASSERT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
+  EXPECT_EQ(backend.stage_handoff(&payload.payload, 1000), kPlutoStatusOk);
+  EXPECT_EQ(::access(path.get().c_str(), F_OK), 0);
 }
