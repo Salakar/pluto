@@ -204,6 +204,15 @@ add_executable(
 target_link_libraries(rm1_handoff_lut_bench PRIVATE pluto_renderer)
 target_compile_features(rm1_handoff_lut_bench PRIVATE cxx_std_20)
 
+# RM1 framebuffer ownership A/B. This is a CPU/RSS-only target: it models the
+# exact panel and framebuffer strides without opening /dev/fb0, so it can run
+# beside stock Xochitl on an acceptance tablet.
+add_executable(
+  rm1_framebuffer_copy_bench
+  bench/presenter/rm1_framebuffer_copy_bench.cc
+)
+target_compile_features(rm1_framebuffer_copy_bench PRIVATE cxx_std_20)
+
 # Full Paper Pro Move warm-handoff bundle benchmark. This intentionally uses
 # the production serializer (including checksums, fsync, and atomic rename)
 # and reports process RSS alongside save/load latency.
@@ -323,6 +332,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(pluto_presenter_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(rm2_encoder_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(rm1_handoff_lut_bench PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(
+    rm1_framebuffer_copy_bench PRIVATE -Wall -Wextra -Wpedantic
+  )
   target_compile_options(xochitl_mapped_sweep_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(renderer_replay PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -512,6 +524,40 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
       target_compile_options(pluto_embedder_core_test PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME pluto_embedder_core_test COMMAND pluto_embedder_core_test)
+  endif()
+
+  # Keep the RM1 MXCFB safety and warm-handoff contract independently
+  # runnable. The focused target is used for host sanitizer gates
+  # without pulling unrelated engine/channel tests into the result.
+  if(DEFINED PLUTO_RENDERER_GTEST_MAIN)
+    add_executable(
+      pluto_rm1_native_test
+      test/presenter/mxcfb_backend_test.cc
+      test/presenter/mxcfb_device_test.cc
+    )
+    target_link_libraries(
+      pluto_rm1_native_test
+      PRIVATE
+        pluto_embedder_core
+        ${PLUTO_RENDERER_GTEST_MAIN}
+    )
+    gtest_discover_tests(pluto_rm1_native_test)
+  else()
+    add_executable(
+      pluto_rm1_native_test
+      test/presenter/mxcfb_backend_test.cc
+      test/presenter/mxcfb_device_test.cc
+      test/renderer/gtest_main.cc
+    )
+    target_include_directories(pluto_rm1_native_test PRIVATE test/renderer)
+    target_link_libraries(pluto_rm1_native_test PRIVATE pluto_embedder_core)
+    add_test(NAME pluto_rm1_native_test COMMAND pluto_rm1_native_test)
+  endif()
+  target_compile_features(pluto_rm1_native_test PRIVATE cxx_std_20)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+      pluto_rm1_native_test PRIVATE -Wall -Wextra -Wpedantic
+    )
   endif()
 
   if(DEFINED PLUTO_RENDERER_GTEST_MAIN)

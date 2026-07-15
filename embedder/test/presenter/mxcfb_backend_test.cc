@@ -887,6 +887,101 @@ TEST(MxcfbBackend, SendBackpressureDoesNotPublishSnapshotOrCompletion) {
   EXPECT_EQ(backend.health().hardware_faults, 1U);
 }
 
+TEST(MxcfbBackend,
+     RejectedOverlappingDamageCannotLeakIntoSnapshotOrWarmHandoff) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload renderer_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  std::vector<std::uint8_t> expected_frame;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 90, handoff_options(path.get()));
+    ASSERT_TRUE(probe_and_start(&outgoing, &outgoing_syscalls));
+
+    OwnedRequest accepted({{{.x = 3, .y = 4, .width = 18, .height = 16}}},
+                          kPlutoRefreshUi, 81);
+    ASSERT_EQ(outgoing.submit(&accepted.request), kPlutoStatusOk);
+    ASSERT_TRUE(outgoing_syscalls.wait_for_wait_count(1));
+    outgoing_syscalls.complete_one();
+    ASSERT_EQ(outgoing.wait_idle(1000), kPlutoStatusOk);
+    const std::vector<std::uint8_t> before = outgoing_syscalls.mapped_storage;
+    expected_frame = tight_visible_frame(before);
+
+    // Include both overlap and an exact duplicate rectangle. Any rollback
+    // scheme replacing the mirror must recover the frame that existed before
+    // the first write, not an intermediate value from another damage entry.
+    OwnedRequest rejected(
+        {
+            {.x = 4, .y = 5, .width = 12, .height = 11},
+            {.x = 9, .y = 9, .width = 15, .height = 13},
+            {.x = 4, .y = 5, .width = 12, .height = 11},
+        },
+        kPlutoRefreshFast, 82);
+    for (std::uint8_t &byte : rejected.pixels) {
+      byte ^= 0xa5u;
+    }
+    outgoing_syscalls.send_error = EBUSY;
+    EXPECT_EQ(outgoing.submit(&rejected.request), kPlutoStatusAgain);
+    EXPECT_TRUE(outgoing.ready(kPlutoRefreshUi));
+    EXPECT_TRUE(outgoing_syscalls.mapped_storage == before);
+
+    const std::size_t snapshot_stride = kTightStride + 9u;
+    std::vector<std::uint8_t> snapshot_bytes(snapshot_stride * kHeight, 0x6cu);
+    PlutoSurface snapshot{
+        .pixels = snapshot_bytes.data(),
+        .stride_bytes = snapshot_stride,
+        .width = static_cast<std::int32_t>(kWidth),
+        .height = static_cast<std::int32_t>(kHeight),
+        .format = kPlutoPixelFormatRgb565,
+    };
+    ASSERT_EQ(outgoing.snapshot(&snapshot), kPlutoStatusOk);
+    for (std::size_t row = 0; row < kHeight; ++row) {
+      EXPECT_EQ(std::memcmp(snapshot_bytes.data() + row * snapshot_stride,
+                            expected_frame.data() + row * kTightStride,
+                            kTightStride),
+                0);
+      EXPECT_TRUE(std::all_of(
+          snapshot_bytes.begin() +
+              static_cast<std::ptrdiff_t>(row * snapshot_stride + kTightStride),
+          snapshot_bytes.begin() +
+              static_cast<std::ptrdiff_t>((row + 1u) * snapshot_stride),
+          [](std::uint8_t byte) { return byte == 0x6cu; }));
+    }
+
+    outgoing_syscalls.send_error = 0;
+    ASSERT_EQ(outgoing.stage_handoff(&renderer_payload.payload, 1000),
+              kPlutoStatusOk);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  pluto::GlassHandoffBundle bundle;
+  ASSERT_TRUE(load_handoff_bundle(path.get(), &bundle));
+  EXPECT_TRUE(bundle.presenter_payload == expected_frame);
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               91, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+
+  std::vector<std::uint8_t> warm_snapshot(kTightStride * kHeight, 0);
+  PlutoSurface warm_surface{
+      .pixels = warm_snapshot.data(),
+      .stride_bytes = kTightStride,
+      .width = static_cast<std::int32_t>(kWidth),
+      .height = static_cast<std::int32_t>(kHeight),
+      .format = kPlutoPixelFormatRgb565,
+  };
+  ASSERT_EQ(incoming.snapshot(&warm_surface), kPlutoStatusOk);
+  EXPECT_TRUE(warm_snapshot == expected_frame);
+  EXPECT_TRUE(incoming_syscalls.mapped_storage == inherited_framebuffer);
+}
+
 TEST(MxcfbBackend, StrictlyRejectsMalformedAndUnsupportedRequests) {
   BlockingMxcfbSyscalls syscalls;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
