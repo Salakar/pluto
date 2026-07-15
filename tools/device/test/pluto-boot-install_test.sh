@@ -22,6 +22,8 @@ assert_eq() { # expected actual message
   [ "$1" = "$2" ] || fail "$3 (expected '$1', got '$2')"
 }
 
+[ -x "$INSTALLER" ] || fail "boot installer is not executable"
+
 assert_file_absent() {
   [ ! -e "$1" ] && [ ! -L "$1" ] || fail "$2 exists: $1"
 }
@@ -283,6 +285,13 @@ expect_install_failure() { # label
   fi
 }
 
+expect_uninstall_failure() { # label
+  euf_label=$1
+  if run_installer sh "$INSTALLER" uninstall > "$CASE/failure.out" 2>&1; then
+    fail "$euf_label was accepted"
+  fi
+}
+
 expect_power_loss() { # action boundary
   epl_action=$1
   epl_boundary=$2
@@ -427,9 +436,9 @@ grep -q '^fw bootcount 0$' "$EVENT_LOG" ||
 assert_before '^fw bootcount 0$' '^fw upgrade_available 1$' "$EVENT_LOG" \
   "install did not publish upgrade_available last"
 
-# Stock-first uninstall makes the stock definition effective and stops the
-# owned supervisor before flag-last disarm, then removes recovery and starts
-# stock. The shared event log makes this ordering observable.
+# Stock-first uninstall makes the stock definition effective, stops the owned
+# supervisor, protects the UI-less handoff with owned fallback, and proves stock
+# active before flag-last disarm and recovery cleanup.
 : > "$EVENT_LOG"
 run_installer sh "$INSTALLER" uninstall >/dev/null ||
   fail "exact uninstall failed"
@@ -443,8 +452,12 @@ assert_before '^systemctl daemon-reload$' '^systemctl stop xochitl.service$' \
   "$EVENT_LOG" "uninstall stopped the supervisor before restoring stock units"
 assert_before '^systemctl stop xochitl.service$' '^fw upgrade_available 0$' \
   "$EVENT_LOG" "uninstall disarmed before stopping the owned supervisor"
-assert_before '^fw upgrade_available 0$' '^systemctl start xochitl.service$' \
-  "$EVENT_LOG" "uninstall started stock before recovery was disarmed"
+assert_before '^systemctl stop xochitl.service$' \
+  '^systemctl start xochitl.service$' "$EVENT_LOG" \
+  "uninstall started stock before stopping the owned supervisor"
+assert_before '^systemctl start xochitl.service$' \
+  '^fw upgrade_available 0$' "$EVENT_LOG" \
+  "uninstall disarmed recovery before stock was active"
 
 # Both supported U-Boot profiles accept either exact root-pair orientation and
 # pin the corresponding peer. This exercises p2/p3 and p3/p2 on RM1 and RM2.
@@ -540,7 +553,25 @@ for drift in active-binary active-unit peer-binary peer-unit; do
       ;;
   esac
   expect_install_failure "$drift hash drift"
+  assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+    "$drift drift retired the proven fallback before identity proof"
 done
+
+reset_case rm1 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "baseline install for uninstall active-drift proof failed"
+printf '# active binary drift before uninstall\n' >> "$LIVE/usr/bin/xochitl"
+chmod 0755 "$LIVE/usr/bin/xochitl"
+: > "$EVENT_LOG"
+expect_uninstall_failure "uninstall active stock hash drift"
+if grep -q '^systemctl stop xochitl.service$\|^fw ' "$EVENT_LOG"; then
+  fail "uninstall mutated live ownership before proving active stock"
+fi
+assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+  "active stock drift disarmed the proven peer fallback"
+seed_stock "$LIVE" active-rm1-2
+run_installer sh "$INSTALLER" uninstall >/dev/null ||
+  fail "active stock drift was not retryable after exact repair"
 
 # Compatibility-shaped state is rejected, not migrated or re-versioned.
 reset_case rm1 2 3
@@ -551,6 +582,21 @@ printf "PLUTO_RECOVERY_SCHEMA='legacy'\n" >> "$CONFIG"
 expect_install_failure "legacy/schema recovery record"
 if grep -q '^fw ' "$EVENT_LOG"; then
   fail "unrecognized recovery record mutated U-Boot state"
+fi
+
+reset_case rm1 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "baseline install for truncated owner rejection failed"
+cat > "$OWNER" <<EOF
+PLUTO_OWNER_NONCE='$(assignment_value "$CONFIG" PLUTO_RECOVERY_OWNER_NONCE)'
+PLUTO_OWNER_PROFILE='rm1'
+PLUTO_OWNER_STATE='armed
+EOF
+chmod 0600 "$OWNER"
+: > "$EVENT_LOG"
+expect_install_failure "truncated recovery owner"
+if grep -q '^fw ' "$EVENT_LOG"; then
+  fail "truncated recovery owner mutated U-Boot state"
 fi
 
 # Every install durability boundary and U-Boot environment failure leaves the
@@ -662,6 +708,106 @@ assert_eq 0 "$(cat "$ENV_DIR/upgrade_available")" \
   fail "disarm boundary removed ownership before cleanup"
 run_installer sh "$INSTALLER" uninstall >/dev/null ||
   fail "disarm uninstall boundary was not recoverable"
+
+# Uninstall never disarms before the stock unit is durable and the owned
+# supervisor is stopped. Once stopped, every later failure makes a best-effort
+# stock start while retaining whichever recovery assets are still needed for
+# a safe retry.
+for pre_stop_fault in uninstall_stock.sync uninstall_stock.remount_ro; do
+  reset_case rm1 2 3
+  run_installer sh "$INSTALLER" install >/dev/null ||
+    fail "install before $pre_stop_fault failed"
+  : > "$EVENT_LOG"
+  PLUTO_TEST_FAILURE_AT=$pre_stop_fault expect_uninstall_failure \
+    "uninstall pre-stop fault $pre_stop_fault"
+  assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+    "$pre_stop_fault disarmed recovery"
+  if grep -q '^systemctl stop xochitl.service$' "$EVENT_LOG"; then
+    fail "$pre_stop_fault stopped the live supervisor"
+  fi
+  unset PLUTO_TEST_FAILURE_AT
+  run_installer sh "$INSTALLER" uninstall >/dev/null ||
+    fail "$pre_stop_fault was not safely retryable"
+done
+
+reset_case rm1 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "install before daemon-reload uninstall fault failed"
+: > "$EVENT_LOG"
+rm -f "$CASE/systemctl-failed"
+PLUTO_TEST_SYSTEMCTL_FAIL=daemon-reload expect_uninstall_failure \
+  "uninstall stock daemon-reload failure"
+assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+  "daemon-reload failure disarmed recovery"
+if grep -q '^systemctl stop xochitl.service$' "$EVENT_LOG"; then
+  fail "daemon-reload failure stopped the live supervisor"
+fi
+unset PLUTO_TEST_SYSTEMCTL_FAIL
+run_installer sh "$INSTALLER" uninstall >/dev/null ||
+  fail "daemon-reload uninstall failure was not retryable"
+
+reset_case rm1 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "install before supervisor-stop fault failed"
+: > "$EVENT_LOG"
+rm -f "$CASE/systemctl-failed"
+PLUTO_TEST_SYSTEMCTL_FAIL='stop xochitl.service' expect_uninstall_failure \
+  "uninstall supervisor stop failure"
+assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+  "supervisor stop failure disarmed recovery"
+if grep -q '^fw upgrade_available 0$' "$EVENT_LOG"; then
+  fail "supervisor stop failure reached the disarm commit"
+fi
+grep -q '^systemctl start xochitl.service$' "$EVENT_LOG" ||
+  fail "supervisor stop failure did not recover a possibly stopped UI"
+unset PLUTO_TEST_SYSTEMCTL_FAIL
+run_installer sh "$INSTALLER" uninstall >/dev/null ||
+  fail "supervisor-stop uninstall failure was not retryable"
+
+reset_case rm1 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "install before stock-start fault failed"
+: > "$EVENT_LOG"
+rm -f "$CASE/systemctl-failed-once"
+PLUTO_TEST_SYSTEMCTL_FAIL='start xochitl.service' expect_uninstall_failure \
+  "uninstall stock start failure"
+[ -f "$DROPIN" ] && [ -f "$CONFIG" ] && [ -f "$OWNER" ] ||
+  fail "stock start failure did not restore the Pluto boot transaction"
+assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+  "stock start failure lost the owned peer fallback"
+[ "$(grep -c '^systemctl start xochitl.service$' "$EVENT_LOG")" -ge 2 ] ||
+  fail "stock start failure did not retry through the Pluto rollback"
+unset PLUTO_TEST_SYSTEMCTL_FAIL
+run_installer sh "$INSTALLER" uninstall >/dev/null ||
+  fail "stock-start uninstall failure was not retryable"
+
+for post_stop_fault in fw_set.upgrade_available uninstall_cleanup.remount_rw \
+  uninstall_cleanup.sync uninstall_cleanup.remount_ro
+do
+  reset_case rm1 2 3
+  run_installer sh "$INSTALLER" install >/dev/null ||
+    fail "install before $post_stop_fault failed"
+  : > "$EVENT_LOG"
+  PLUTO_TEST_FAILURE_AT=$post_stop_fault expect_uninstall_failure \
+    "uninstall post-stop fault $post_stop_fault"
+  grep -q '^systemctl start xochitl.service$' "$EVENT_LOG" ||
+    fail "$post_stop_fault left the device UI-less"
+  case "$post_stop_fault" in
+    fw_set.upgrade_available)
+      assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+        "$post_stop_fault lost the still-owned fallback"
+      [ -f "$CONFIG" ] && [ -f "$OWNER" ] ||
+        fail "$post_stop_fault removed recovery ownership"
+      ;;
+    *)
+      assert_eq 0 "$(cat "$ENV_DIR/upgrade_available")" \
+        "$post_stop_fault failed before disarm was durable"
+      ;;
+  esac
+  unset PLUTO_TEST_FAILURE_AT
+  run_installer sh "$INSTALLER" uninstall >/dev/null ||
+    fail "$post_stop_fault was not safely retryable"
+done
 
 # Move uses the same install/uninstall and drop-in flow, but performs no U-Boot
 # writes. Its bounded stock-rescue unit remains the failure mechanism until the

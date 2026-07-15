@@ -15,35 +15,66 @@ verify_app() {
   local bundle="$app_root/bundle"
   local aot_elf="$bundle/lib/app.so"
 
-  remote 'rm -f /run/pluto/boot-ready'
   "$CLI" run --release --device "$DEVICE" "$app_id"
   remote "set -eu
 i=0
-while [ \"\$i\" -lt 30 ] && [ ! -f /run/pluto/boot-ready ]; do
+pid=''
+cmd=''
+ready_file=''
+health_file=''
+seq_before=''
+matched=0
+while [ \"\$i\" -lt 30 ]; do
+  pid=\$(cat /run/pluto/embedder.pid 2>/dev/null || true)
+  case \"\$pid\" in
+    ''|*[!0-9]*) ;;
+    *)
+      if kill -0 \"\$pid\" 2>/dev/null; then
+        cmd=\$(tr '\\000' ' ' < \"/proc/\$pid/cmdline\")
+        case \"\$cmd\" in
+          *--release*--bundle=$bundle*--ready-file=/run/pluto/boot-ready.*--health-file=/run/pluto/health.*--aot-elf=$aot_elf*)
+            ready_file=''
+            health_file=''
+            for arg in \$(tr '\\000' '\\n' < \"/proc/\$pid/cmdline\"); do
+              case \"\$arg\" in
+                --ready-file=*) ready_file=\${arg#*=} ;;
+                --health-file=*) health_file=\${arg#*=} ;;
+              esac
+            done
+            if [ -n \"\$ready_file\" ] && [ -n \"\$health_file\" ] &&
+               [ \"\${ready_file#/run/pluto/boot-ready.}\" = \
+                 \"\${health_file#/run/pluto/health.}\" ] &&
+               [ \"\$(cat \"\$ready_file\" 2>/dev/null || true)\" = ready ]; then
+              set -- \$(cat \"\$health_file\" 2>/dev/null || true)
+              if [ \"\$#\" -eq 3 ] && [ \"\$1\" = \"pid=\$pid\" ]; then
+                seq_before=\${2#seq=}
+                mono_before=\${3#mono_ms=}
+                case \"\$seq_before:\$mono_before\" in
+                  *[!0-9:]*|:*|*:) ;;
+                  *) matched=1; break ;;
+                esac
+              fi
+            fi
+            ;;
+        esac
+      fi
+      ;;
+  esac
   sleep 1
   i=\$((i + 1))
 done
-if [ \"\$(cat /run/pluto/boot-ready 2>/dev/null || true)\" != ready ]; then
-  echo \"release AOT smoke: $app_id did not present\" >&2
-  tail -n 80 /home/root/pluto/logs/current.log >&2 || true
-  exit 81
-fi
-pid=\$(cat /run/pluto/embedder.pid 2>/dev/null || true)
-case \"\$pid\" in ''|*[!0-9]*)
-  echo \"release AOT smoke: $app_id has no supervisor PID\" >&2
-  exit 82 ;;
-esac
-cmd=\$(tr '\\000' ' ' < \"/proc/\$pid/cmdline\")
-case \"\$cmd\" in
-  *--release*--bundle=$bundle*--ready-file=/run/pluto/boot-ready*--aot-elf=$aot_elf*) ;;
-  *)
-    echo \"release AOT smoke: $app_id command is not the expected AOT launch\" >&2
-    echo \"\$cmd\" >&2
-    exit 83 ;;
-esac
+[ \"\$matched\" -eq 1 ] || {
+  echo \"release AOT smoke: $app_id never published matching AOT receipts\" >&2
+  echo \"\$cmd\" >&2
+  exit 83
+}
 grep -q 'mode=release.*aot=true' /home/root/pluto/logs/current.log
 sleep 2
 kill -0 \"\$pid\"
+set -- \$(cat \"\$health_file\" 2>/dev/null || true)
+[ \"\$#\" -eq 3 ] && [ \"\$1\" = \"pid=\$pid\" ] || exit 85
+seq_after=\${2#seq=}
+[ \"\$seq_after\" -gt \"\$seq_before\" ] || exit 86
 systemctl is-active --quiet xochitl.service
 echo \"release AOT smoke: PASS $app_id pid=\$pid present_after=\${i}s\""
 }

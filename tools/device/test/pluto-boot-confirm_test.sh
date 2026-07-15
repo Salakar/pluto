@@ -113,6 +113,10 @@ if [ "${PLUTO_TEST_SYSTEMCTL_FAIL_REBOOT:-0}" = 1 ] &&
    [ "$*" = '--force --force reboot' ]; then
   exit 1
 fi
+if [ "${PLUTO_TEST_SYSTEMCTL_FAIL_RESCUE:-0}" = 1 ] &&
+   [ "$*" = 'start --no-block pluto-stock-rescue.service' ]; then
+  exit 1
+fi
 SYSTEMCTL
 
 cat > "$BIN/reboot" <<'REBOOT'
@@ -131,6 +135,22 @@ chmod +x "$BIN/cat" "$BIN/fw_printenv" "$BIN/fw_setenv" "$BIN/sync" \
 
 printf 'boot-one\n' > "$TMP/boot-id"
 printf 'attempt-one\n' > "$TMP/nonce"
+mkdir -p "$TMP/system-root/usr/bin" \
+  "$TMP/system-root/usr/lib/systemd/system"
+cat > "$TMP/system-root/usr/bin/xochitl" <<'XOCHITL'
+#!/bin/sh
+exit 0
+XOCHITL
+chmod 0755 "$TMP/system-root/usr/bin/xochitl"
+cat > "$TMP/system-root/usr/lib/systemd/system/xochitl.service" <<'UNIT'
+[Service]
+ExecStart=/usr/bin/xochitl --system
+UNIT
+STOCK_XOCHITL_SHA=$(sha256sum "$TMP/system-root/usr/bin/xochitl" |
+  sed -n '1s/[[:space:]].*//p')
+STOCK_UNIT_SHA=$(sha256sum \
+  "$TMP/system-root/usr/lib/systemd/system/xochitl.service" |
+  sed -n '1s/[[:space:]].*//p')
 
 write_uboot_config() {
   cat > "$CONFIG" <<EOF
@@ -146,8 +166,8 @@ PLUTO_RECOVERY_HELPER=''
 PLUTO_RECOVERY_COUNTER_DIR=''
 PLUTO_RECOVERY_STOCK_RESCUE_UNIT=''
 PLUTO_RECOVERY_PEER_DEVICE='/dev/mmcblk1p3'
-PLUTO_RECOVERY_STOCK_XOCHITL_SHA256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-PLUTO_RECOVERY_STOCK_UNIT_SHA256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+PLUTO_RECOVERY_STOCK_XOCHITL_SHA256='$STOCK_XOCHITL_SHA'
+PLUTO_RECOVERY_STOCK_UNIT_SHA256='$STOCK_UNIT_SHA'
 PLUTO_RECOVERY_PEER_XOCHITL_SHA256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 PLUTO_RECOVERY_PEER_UNIT_SHA256='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
 EOF
@@ -168,8 +188,8 @@ PLUTO_RECOVERY_HELPER='$BIN/reset-lpgpr'
 PLUTO_RECOVERY_COUNTER_DIR='$TMP/lpgpr'
 PLUTO_RECOVERY_STOCK_RESCUE_UNIT='pluto-stock-rescue.service'
 PLUTO_RECOVERY_PEER_DEVICE='/dev/mmcblk0p3'
-PLUTO_RECOVERY_STOCK_XOCHITL_SHA256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-PLUTO_RECOVERY_STOCK_UNIT_SHA256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+PLUTO_RECOVERY_STOCK_XOCHITL_SHA256='$STOCK_XOCHITL_SHA'
+PLUTO_RECOVERY_STOCK_UNIT_SHA256='$STOCK_UNIT_SHA'
 PLUTO_RECOVERY_PEER_XOCHITL_SHA256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 PLUTO_RECOVERY_PEER_UNIT_SHA256='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
 EOF
@@ -231,6 +251,7 @@ run_recovery() {
   PLUTO_TEST_SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
   PLUTO_TEST_REBOOT_LOG="$REBOOT_LOG" \
   PLUTO_TEST_SYSTEMCTL_FAIL_REBOOT="${PLUTO_TEST_SYSTEMCTL_FAIL_REBOOT:-0}" \
+  PLUTO_TEST_SYSTEMCTL_FAIL_RESCUE="${PLUTO_TEST_SYSTEMCTL_FAIL_RESCUE:-0}" \
   PLUTO_TEST_COUNTER_DIR="$TMP/lpgpr" \
   PLUTO_TEST_SYNC_BLOCK="${PLUTO_TEST_SYNC_BLOCK:-}" \
     "$RECOVERY" "$@"
@@ -331,6 +352,16 @@ expect_rejected arm
 [ ! -s "$SET_LOG" ] || fail "an inexact owner record mutated U-Boot"
 write_owner rm1 prepared
 
+cat > "$OWNER" <<EOF
+PLUTO_OWNER_NONCE='$OWNER_NONCE'
+PLUTO_OWNER_PROFILE='rm1'
+PLUTO_OWNER_STATE='prepared
+EOF
+chmod 0600 "$OWNER"
+expect_rejected arm
+[ ! -s "$SET_LOG" ] || fail "a truncated owner assignment mutated U-Boot"
+write_owner rm1 prepared
+
 # A pre-existing U-Boot upgrade transaction is never adopted without Pluto's
 # exact armed owner marker.
 for foreign_state in prepared idle; do
@@ -367,6 +398,15 @@ assert_eq idle "$(sed -n "s/^PLUTO_OWNER_STATE='\([^']*\)'$/\1/p" "$OWNER")" \
 reset_attempt
 write_owner rm1 prepared
 seed_uboot 0 9
+printf 'not-an-owned-attempt\n' > "$ATTEMPT"
+chmod 0600 "$ATTEMPT"
+expect_rejected begin
+assert_eq 0 "$(/bin/cat "$ENV_DIR/upgrade_available")" \
+  "invalid same-boot attempt was overwritten and armed"
+
+reset_attempt
+write_owner rm1 prepared
+seed_uboot 0 9
 run_recovery begin >/dev/null || fail "begin before unbound cancel failed"
 : > "$SET_LOG"
 unbound_cancel=$(run_recovery cancel-unbound) || fail "unbound cancel failed"
@@ -385,6 +425,9 @@ seed_uboot 0 9
 run_recovery begin >/dev/null || fail "begin before invocation drift failed"
 : > "$SET_LOG"
 PLUTO_TEST_INVOCATION=other-invocation
+expect_rejected begin
+[ "$(sed -n "s/^PLUTO_ATTEMPT_INVOCATION='\([^']*\)'$/\1/p" "$ATTEMPT")" = \
+  "$INVOCATION" ] || fail "a newer invocation overwrote an undisposed attempt"
 expect_rejected cancel-unbound
 unset PLUTO_TEST_INVOCATION
 [ -e "$ATTEMPT" ] || fail "invocation drift retired the unbound attempt"
@@ -423,6 +466,22 @@ upgrade_available 0" "$(/bin/cat "$TMP/confirm-tail")" \
   "confirm ordering drifted"
 assert_eq idle "$(sed -n "s/^PLUTO_OWNER_STATE='\([^']*\)'$/\1/p" "$OWNER")" \
   "confirm did not persist idle ownership"
+
+# Confirmed attempts are rebound to every later foreground, including a warm
+# renderer whose exact receipts already exist. This keeps post-confirm failure
+# ownership tied to the renderer actually holding the panel.
+READY="$TMP/run/boot-ready.attempt-one.launch-two"
+HEALTH="$TMP/run/health.attempt-one.launch-two"
+printf 'ready\n' > "$READY"
+printf 'pid=%s seq=4 mono_ms=40\n' "$OTHER_PID" > "$HEALTH"
+chmod 0600 "$READY" "$HEALTH"
+rebind_receipt=$(run_recovery foreground rm1 "$$" "$OTHER_PID" \
+  attempt-one "$READY" "$HEALTH") || fail "confirmed foreground rebind failed"
+assert_eq "state=confirmed/app=$OTHER_PID" "$rebind_receipt" \
+  "confirmed foreground rebind receipt drifted"
+assert_eq "$OTHER_PID" \
+  "$(sed -n "s/^PLUTO_ATTEMPT_APP_PID='\([^']*\)'$/\1/p" "$ATTEMPT")" \
+  "confirmed attempt did not persist the current renderer pid"
 
 # A later same-boot service failure is still owned: it re-arms first, then
 # requests fallback, durably, before forcing reboot.
@@ -490,6 +549,24 @@ READY="$TMP/run/boot-ready.attempt-one.stale"
 HEALTH="$TMP/run/health.attempt-one.stale"
 : > "$READY"
 expect_rejected foreground rm1 "$$" "$APP_PID" attempt-one "$READY" "$HEALTH"
+
+# A renderer may win the publication race after fork but before the handler
+# acquires its action lock. Exact nonce/PID-bound receipts are safe to bind.
+reset_attempt
+write_owner rm1 prepared
+seed_uboot 0 5
+run_recovery begin >/dev/null
+run_recovery bind rm1 "$$" >/dev/null
+READY="$TMP/run/boot-ready.attempt-one.published"
+HEALTH="$TMP/run/health.attempt-one.published"
+printf 'ready\n' > "$READY"
+printf 'pid=%s seq=1 mono_ms=1\n' "$APP_PID" > "$HEALTH"
+chmod 0600 "$READY" "$HEALTH"
+published_receipt=$(run_recovery foreground rm1 "$$" "$APP_PID" \
+  attempt-one "$READY" "$HEALTH") ||
+  fail "exact pre-published foreground receipts were rejected"
+assert_eq "state=pending/app=$APP_PID" "$published_receipt" \
+  "pre-published foreground bind receipt drifted"
 
 # Power-loss points preserve a recoverable flag order.
 reset_attempt
@@ -660,11 +737,30 @@ assert_eq 0 "$(/bin/cat "$TMP/lpgpr/roota_errcnt")" \
   "Move LPGPR counter was not reset"
 [ ! -s "$SET_LOG" ] || fail "Move confirmation mutated U-Boot"
 : > "$SYSTEMCTL_LOG"
+cp "$TMP/system-root/usr/bin/xochitl" "$TMP/stock-xochitl"
+printf '# tampered\n' >> "$TMP/system-root/usr/bin/xochitl"
+expect_rejected failure
+[ ! -s "$SYSTEMCTL_LOG" ] ||
+  fail "Move rescue started stock after its active identity drifted"
+mv "$TMP/stock-xochitl" "$TMP/system-root/usr/bin/xochitl"
+chmod 0755 "$TMP/system-root/usr/bin/xochitl"
+
+PLUTO_TEST_SYSTEMCTL_FAIL_RESCUE=1 expect_rejected failure
+unset PLUTO_TEST_SYSTEMCTL_FAIL_RESCUE
+assert_eq confirmed \
+  "$(sed -n "s/^PLUTO_ATTEMPT_STATE='\([^']*\)'$/\1/p" "$ATTEMPT")" \
+  "failed Move rescue was published as complete"
+: > "$SYSTEMCTL_LOG"
 move_failure=$(run_recovery failure) || fail "Move stock rescue failed"
 assert_eq 'state=stock-rescue/profile=move/boot=boot-one/nonce=attempt-one' \
   "$move_failure" "Move stock rescue receipt drifted"
 assert_eq 'start --no-block pluto-stock-rescue.service' \
   "$(/bin/cat "$SYSTEMCTL_LOG")" "Move bounded stock rescue was not started"
+: > "$SYSTEMCTL_LOG"
+move_retry=$(run_recovery failure) || fail "Move stock rescue was not retryable"
+assert_eq "$move_failure" "$move_retry" "Move rescue retry receipt drifted"
+assert_eq 'start --no-block pluto-stock-rescue.service' \
+  "$(/bin/cat "$SYSTEMCTL_LOG")" "Move rescue retry did not restart the unit"
 [ ! -s "$SET_LOG" ] || fail "Move failure mutated U-Boot"
 expect_rejected arm
 [ ! -s "$SET_LOG" ] || fail "Move arm action mutated U-Boot"

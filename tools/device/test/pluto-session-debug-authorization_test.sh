@@ -24,6 +24,8 @@ fail() {
   exit 1
 }
 
+[ -x "$SUPERVISOR" ] || fail "session supervisor is not executable"
+
 mkdir -p \
   "$TMP/bin" \
   "$ROOT/bin" \
@@ -66,45 +68,83 @@ printf '%s\n' "$MALLOC_ARENA_MAX $*" > "$PLUTO_TEST_STOCK_ARGS"
 exit 0
 XOCHITL
 
-cat > "$TMP/bin/reset-boot-count" <<'RESET_BOOT_COUNT'
+cat > "$TMP/bin/boot-recovery" <<'BOOT_RECOVERY'
 #!/bin/sh
-count=$(cat "$PLUTO_TEST_BOOT_CONFIRM_COUNT" 2>/dev/null || echo 0)
-printf '%s\n' "$((count + 1))" > "$PLUTO_TEST_BOOT_CONFIRM_COUNT"
-part=$(cat "$PLUTO_TEST_RECOVERY_COUNTER_DIR/root_part")
-printf '0\n' > "$PLUTO_TEST_RECOVERY_COUNTER_DIR/root${part}_errcnt"
-RESET_BOOT_COUNT
+printf '%s\n' "$*" >> "$PLUTO_TEST_RECOVERY_LOG"
+case "$1" in
+  bind)
+    [ "$2" = move ] && [ "$3" -gt 1 ] || exit 64
+    printf 'attempt-nonce\n'
+    ;;
+  foreground)
+    [ "$2" = move ] && [ "$5" = attempt-nonce ] || exit 64
+    case "$6:$7" in
+      *'/boot-ready.attempt-nonce.'*:*'/health.attempt-nonce.'*) ;;
+      *) exit 64 ;;
+    esac
+    if [ -f "$PLUTO_TEST_RECOVERY_CONFIRMED" ]; then
+      printf 'state=confirmed/app=%s\n' "$4"
+    else
+      printf 'state=pending/app=%s\n' "$4"
+    fi
+    ;;
+  confirm)
+    count=$(cat "$PLUTO_TEST_BOOT_CONFIRM_COUNT" 2>/dev/null || echo 0)
+    printf '%s\n' "$((count + 1))" > "$PLUTO_TEST_BOOT_CONFIRM_COUNT"
+    : > "$PLUTO_TEST_RECOVERY_CONFIRMED"
+    printf '0\n' > "$PLUTO_TEST_RECOVERY_COUNTER_DIR/roota_errcnt"
+    printf 'state=confirmed/profile=move/boot=test/nonce=attempt-nonce/app=%s\n' "$4"
+    ;;
+  cancel)
+    printf 'state=cancelled/profile=move/nonce=attempt-nonce\n'
+    ;;
+  begin)
+    printf 'state=pending/nonce=attempt-nonce/boot=test/profile=move\n'
+    ;;
+  verify-stock)
+    [ "${PLUTO_TEST_STOCK_VERIFY_FAIL:-0}" != 1 ] || exit 1
+    printf 'state=stock-verified/profile=move\n'
+    ;;
+  *) exit 64 ;;
+esac
+BOOT_RECOVERY
 : > "$TMP/zz-pluto.conf"
-cat > "$TMP/boot-recovery.conf" <<EOF
-PLUTO_RECOVERY_SCHEMA='1'
-PLUTO_RECOVERY_PROFILE_ID='move'
-PLUTO_RECOVERY_CONFIRMATION_STRATEGY='lpgpr_counter'
-PLUTO_RECOVERY_FAILURE_STRATEGY='unverified'
-PLUTO_RECOVERY_BOOT_DEFAULT_ENABLED='0'
-PLUTO_RECOVERY_MMC_DEVICE=''
-PLUTO_RECOVERY_ROOT_PARTITIONS=''
-PLUTO_RECOVERY_BOOT_LIMIT=''
-PLUTO_RECOVERY_HELPER='$TMP/bin/reset-boot-count'
-PLUTO_RECOVERY_COUNTER_DIR='$TMP/lpgpr'
-EOF
+printf 'fixture-nonce\n' > "$TMP/nonce"
 
 cat > "$ROOT/bin/pluto-embedder" <<'EMBEDDER'
 #!/bin/sh
 printf '%s %s\n' "$PLUTO_APP_ID" "$*" >> "$PLUTO_TEST_INVOCATIONS"
+ready_file=""
+health_file=""
 for arg in "$@"; do
   case "$arg" in
-    --ready-file=*)
-      ready_file="${arg#*=}"
-      printf 'ready\n' > "$ready_file"
-      ;;
+    --ready-file=*) ready_file="${arg#*=}" ;;
+    --health-file=*) health_file="${arg#*=}" ;;
   esac
 done
+[ -n "$ready_file" ] && [ -n "$health_file" ] || exit 65
+printf 'ready\n' > "$ready_file"
+printf 'pid=%s seq=1 mono_ms=1\n' "$$" > "$health_file"
+chmod 0600 "$health_file"
+if [ "${PLUTO_TEST_FREEZE_HEALTH:-0}" = 1 ]; then
+  while :; do sleep 1; done
+fi
 case "$PLUTO_APP_ID" in
   dev.pluto.launcher)
     count=$(cat "$PLUTO_TEST_LAUNCHER_COUNT" 2>/dev/null || echo 0)
     count=$((count + 1))
     printf '%s\n' "$count" > "$PLUTO_TEST_LAUNCHER_COUNT"
     case "$count" in
-      1) printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/launch" ;;
+      1)
+        wait_count=0
+        while [ ! -s "$PLUTO_TEST_BOOT_CONFIRM_COUNT" ] &&
+              [ "$wait_count" -lt 60 ]; do
+          sleep 0.05
+          wait_count=$((wait_count + 1))
+        done
+        [ -s "$PLUTO_TEST_BOOT_CONFIRM_COUNT" ] || exit 66
+        printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/launch"
+        ;;
       2) printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/debug-launch" ;;
       3) printf 'dev.example.release\n' > "$PLUTO_RUN_DIR/launch" ;;
       *) : > "$PLUTO_RUN_DIR/stock" ;;
@@ -120,33 +160,44 @@ case "$PLUTO_APP_ID" in
     ;;
   *) exit 99 ;;
 esac
+sleep 0.2
 EMBEDDER
 chmod +x "$TMP/bin/systemctl" "$TMP/bin/xochitl" \
-  "$TMP/bin/reset-boot-count" "$ROOT/bin/pluto-embedder"
+  "$TMP/bin/boot-recovery" "$ROOT/bin/pluto-embedder"
 
-PATH="$TMP/bin:$PATH" \
-PLUTO_ROOT="$ROOT" \
-PLUTO_PROFILE_FILE="$PROFILE_FILE" \
-PLUTO_TESTING=1 \
-PLUTO_TEST_PROFILE_ID=move \
-PLUTO_RUN_DIR="$CTL" \
-PLUTO_BOOT_DROPIN="$TMP/zz-pluto.conf" \
-PLUTO_STOCK_XOCHITL="$TMP/bin/xochitl" \
-PLUTO_BOOT_CONFIRM_DISPATCHER="$HERE/../pluto-boot-confirm.sh" \
-PLUTO_BOOT_RECOVERY_CONFIG="$TMP/boot-recovery.conf" \
-PLUTO_TEST_RECOVERY_HELPER="$TMP/bin/reset-boot-count" \
-PLUTO_TEST_RECOVERY_COUNTER_DIR="$TMP/lpgpr" \
-PLUTO_BOOT_CONFIRM_DELAY=0 \
-PLUTO_BOOT_CONFIRM_TIMEOUT=2 \
-PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
-PLUTO_UPTIME_FILE="$TMP/uptime" \
-PLUTO_TEST_INVOCATIONS="$TMP/invocations" \
-PLUTO_TEST_LAUNCHER_COUNT="$TMP/launcher-count" \
-PLUTO_TEST_STOCK_PID="$TMP/stock-pid" \
-PLUTO_TEST_STOCK_ARGS="$TMP/stock-args" \
-PLUTO_TEST_BOOT_CONFIRM_COUNT="$TMP/boot-confirm-count" \
-  sh "$SUPERVISOR" start > "$TMP/session.log" 2>&1 &
-SESSION_PID=$!
+start_session() {
+  PATH="$TMP/bin:$PATH" \
+  PLUTO_ROOT="$ROOT" \
+  PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+  PLUTO_TESTING=1 \
+  PLUTO_TEST_PROFILE_ID=move \
+  PLUTO_RUN_DIR="$CTL" \
+  PLUTO_BOOT_DROPIN="$TMP/zz-pluto.conf" \
+  PLUTO_STOCK_XOCHITL="$TMP/bin/xochitl" \
+  PLUTO_BOOT_CONFIRM_DISPATCHER="$TMP/bin/boot-recovery" \
+  PLUTO_TEST_RECOVERY_HELPER="$TMP/bin/reset-boot-count" \
+  PLUTO_TEST_RECOVERY_COUNTER_DIR="$TMP/lpgpr" \
+  PLUTO_NONCE_FILE="$TMP/nonce" \
+  PLUTO_BOOT_STABLE_WINDOW=0 \
+  PLUTO_BOOT_READY_TIMEOUT=3 \
+  PLUTO_RENDERER_HEALTH_STALE_SECONDS=2 \
+  PLUTO_RENDERER_HEALTH_POLL_INTERVAL=0.1 \
+  PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
+  PLUTO_UPTIME_FILE="$TMP/uptime" \
+  PLUTO_TEST_INVOCATIONS="$TMP/invocations" \
+  PLUTO_TEST_LAUNCHER_COUNT="$TMP/launcher-count" \
+  PLUTO_TEST_STOCK_PID="$TMP/stock-pid" \
+  PLUTO_TEST_STOCK_ARGS="$TMP/stock-args" \
+  PLUTO_TEST_BOOT_CONFIRM_COUNT="$TMP/boot-confirm-count" \
+  PLUTO_TEST_RECOVERY_CONFIRMED="$TMP/recovery-confirmed" \
+  PLUTO_TEST_RECOVERY_LOG="$TMP/recovery.log" \
+  PLUTO_TEST_FREEZE_HEALTH="${PLUTO_TEST_FREEZE_HEALTH:-0}" \
+  PLUTO_TEST_STOCK_VERIFY_FAIL="${PLUTO_TEST_STOCK_VERIFY_FAIL:-0}" \
+    sh "$SUPERVISOR" start > "$TMP/session.log" 2>&1 &
+  SESSION_PID=$!
+}
+
+start_session
 EXPECTED_STOCK_PID=$SESSION_PID
 
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
@@ -209,12 +260,79 @@ done
   fail "vendor boot confirmation did not run exactly once"
 [ "$(cat "$TMP/lpgpr/roota_errcnt")" -eq 0 ] ||
   fail "vendor boot confirmation did not reset the selected root counter"
-grep -q '^state=confirmed/part=a/counter=roota_errcnt confirmed_at=' \
-  "$ROOT/state/boot-confirmed" ||
-  fail "verified boot confirmation receipt was not recorded"
+grep -q '^confirm move [0-9][0-9]* [0-9][0-9]* attempt-nonce .*boot-ready\.attempt-nonce\..* .*health\.attempt-nonce\.' \
+  "$TMP/recovery.log" ||
+  fail "nonce-bound ready/health confirmation tuple was not dispatched"
+if grep -q '^cancel ' "$TMP/recovery.log"; then
+  fail "intentional stock handoff retired recovery before stock took ownership"
+fi
+grep -q '^verify-stock$' "$TMP/recovery.log" ||
+  fail "intentional stock handoff did not verify the pinned stock identity"
+[ "$(grep -c '^foreground ' "$TMP/recovery.log")" -gt 1 ] ||
+  fail "post-confirm foregrounds were not rebound to the owned attempt"
+grep '^dev.pluto.launcher ' "$TMP/invocations" | grep -q -- \
+  '--health-file=.*/health\.attempt-nonce\.' ||
+  fail "launcher did not receive a nonce-specific renderer health path"
 [ "$(cat "$TMP/stock-pid")" -eq "$EXPECTED_STOCK_PID" ] ||
   fail "stock xochitl did not replace the boot-first supervisor process"
 [ "$(cat "$TMP/stock-args")" = '8 --system' ] ||
   fail "stock xochitl did not receive the firmware service environment/arguments"
+
+# A renderer that remains alive but stops replacing its completion-backed
+# receipt must fail the service. The owned attempt is deliberately retained so
+# systemd OnFailure can select the profile recovery action; it must not be
+# cancelled as though this were an intentional stock handoff.
+: > "$TMP/recovery.log"
+: > "$TMP/invocations"
+rm -f "$TMP/launcher-count" "$TMP/boot-confirm-count" \
+  "$TMP/recovery-confirmed" "$CTL/boot-fatal"
+PLUTO_TEST_FREEZE_HEALTH=1 start_session
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
+  21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 \
+  41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60; do
+  kill -0 "$SESSION_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$SESSION_PID" 2>/dev/null; then
+  fail "stale renderer health did not terminate the supervisor"
+fi
+if wait "$SESSION_PID"; then
+  fail "stale renderer health returned success"
+fi
+SESSION_PID=""
+[ -f "$CTL/boot-fatal" ] || fail "stale health did not publish a fatal receipt"
+grep -q 'renderer health deadline expired' "$CTL/boot-fatal" ||
+  fail "stale health fatal receipt was not specific"
+if grep -q '^cancel ' "$TMP/recovery.log"; then
+  fail "stale renderer health cancelled recovery instead of failing closed"
+fi
+
+# A stock handoff is also fail-closed: failed pinned-identity proof retains the
+# attempt and returns a failing service status so OnFailure can recover it.
+: > "$TMP/recovery.log"
+: > "$TMP/invocations"
+rm -f "$TMP/launcher-count" "$TMP/boot-confirm-count" \
+  "$TMP/recovery-confirmed" "$CTL/boot-fatal"
+unset PLUTO_TEST_FREEZE_HEALTH
+PLUTO_TEST_STOCK_VERIFY_FAIL=1 start_session
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
+  21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 \
+  41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60; do
+  kill -0 "$SESSION_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$SESSION_PID" 2>/dev/null; then
+  fail "failed stock identity proof did not terminate the supervisor"
+fi
+if wait "$SESSION_PID"; then
+  fail "failed stock identity proof returned success"
+fi
+SESSION_PID=""
+grep -q 'stock xochitl failed owned identity verification' "$CTL/boot-fatal" ||
+  fail "stock identity failure did not publish a specific fatal receipt"
+if grep -q '^cancel ' "$TMP/recovery.log"; then
+  fail "stock identity failure cancelled the owned attempt"
+fi
+unset PLUTO_TEST_STOCK_VERIFY_FAIL
 
 echo "debug authorization supervisor test: PASS"

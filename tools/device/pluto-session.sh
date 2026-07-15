@@ -30,8 +30,9 @@ CTL="${PLUTO_RUN_DIR:-/run/pluto}"
 STATE="$ROOT/state"
 BOOT_DROPIN="${PLUTO_BOOT_DROPIN:-/usr/lib/systemd/system/xochitl.service.d/zz-pluto.conf}"
 STOCK_XOCHITL="${PLUTO_STOCK_XOCHITL:-/usr/bin/xochitl}"
-READY_FILE="${PLUTO_READY_FILE:-$CTL/boot-ready}"
 EMBEDDER_PID_FILE="${PLUTO_EMBEDDER_PID_FILE:-$CTL/embedder.pid}"
+NONCE_FILE="${PLUTO_NONCE_FILE:-/proc/sys/kernel/random/uuid}"
+BOOT_FATAL_FILE="$CTL/boot-fatal"
 WARM_DIR="$CTL/warm-apps"
 HIBERNATED_DIR="$CTL/hibernated"
 # Total resident release/profile processes, including the foreground app.
@@ -48,10 +49,17 @@ RESUME_WAIT_TICKS="${PLUTO_RESUME_WAIT_TICKS:-120}"
 # previous bounded wait. Do not let the wider hibernate transaction envelope
 # make those control paths slower.
 FOREGROUND_EXIT_WAIT_TICKS="${PLUTO_FOREGROUND_EXIT_WAIT_TICKS:-120}"
-BOOT_CONFIRM_DELAY="${PLUTO_BOOT_CONFIRM_DELAY:-30}"
-BOOT_CONFIRM_TIMEOUT="${PLUTO_BOOT_CONFIRM_TIMEOUT:-20}"
+BOOT_STABLE_WINDOW="${PLUTO_BOOT_STABLE_WINDOW:-10}"
+BOOT_READY_TIMEOUT="${PLUTO_BOOT_READY_TIMEOUT:-30}"
+# Once the renderer has published its first completion-backed health receipt,
+# no accepted panel job may leave that receipt unchanged for more than six
+# seconds. Test mode may shorten (never widen) this deadline.
+RENDERER_HEALTH_STALE_SECONDS="${PLUTO_RENDERER_HEALTH_STALE_SECONDS:-6}"
+RENDERER_HEALTH_STARTUP_SECONDS="${PLUTO_RENDERER_HEALTH_STARTUP_SECONDS:-$BOOT_READY_TIMEOUT}"
+RENDERER_HEALTH_POLL_INTERVAL="${PLUTO_RENDERER_HEALTH_POLL_INTERVAL:-1}"
 POWER_WATCHER="${PLUTO_POWER_WATCHER:-$ROOT/bin/pluto-power-key-watch.sh}"
 UPTIME_FILE="${PLUTO_UPTIME_FILE:-/proc/uptime}"
+HEALTH_UPTIME_FILE="${PLUTO_HEALTH_UPTIME_FILE:-/proc/uptime}"
 VPDD_IDLE_ATTEMPTS="${PLUTO_VPDD_IDLE_ATTEMPTS:-20}"
 VPDD_IDLE_INTERVAL="${PLUTO_VPDD_IDLE_INTERVAL:-0.1}"
 # `systemctl suspend` is intentionally asynchronous and returns as soon as the
@@ -78,8 +86,32 @@ DISPLAY_DEVICE="${PLUTO_DISPLAY_DEVICE:-}"
 BEZEL_REDRAW_IIO="${PLUTO_BEZEL_REDRAW_IIO:-}"
 BEZEL_REDRAW_ENABLE="${PLUTO_BEZEL_REDRAW_ENABLE:-}"
 PROFILE_CONFIGURED=0
+RECOVERY_BOUND=0
+RECOVERY_RETIRED=0
+BOOT_ATTEMPT_NONCE=""
+BOOT_CONFIRM_PID=""
+APP_READY_FILE=""
+APP_HEALTH_FILE=""
+LAUNCH_SERIAL=0
 
 log() { printf '[pluto-session %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+is_uint() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+is_token() {
+  case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; *) return 0 ;; esac
+}
+
+runtime_nonce() {
+  generated_nonce="$(cat "$NONCE_FILE" 2>/dev/null || true)"
+  if ! is_token "$generated_nonce" && [ "${PLUTO_TESTING:-0}" = 1 ]; then
+    generated_nonce="test-$$-$(date +%s)"
+  fi
+  is_token "$generated_nonce" || return 1
+  printf '%s\n' "$generated_nonce"
+}
 
 profile_input_name() {
   resolved="$(readlink -f "$1" 2>/dev/null || true)"
@@ -265,47 +297,242 @@ configure_profile() {
   log "profile accepted: $PLUTO_PROFILE_ID driver=$PLUTO_PROFILE_DISPLAY_DRIVER target=$PLUTO_PROFILE_TARGET"
 }
 
-confirm_boot_after_ready() {
-  case "$BOOT_CONFIRM_DELAY:$BOOT_CONFIRM_TIMEOUT" in
-    *[!0-9:]*|:*|*:)
-      log "boot confirmation disabled: invalid delay/timeout"
-      return 64
-      ;;
-  esac
-  sleep "$BOOT_CONFIRM_DELAY"
-  waited=0
-  while [ "$waited" -le "$BOOT_CONFIRM_TIMEOUT" ]; do
-    if [ -f "$READY_FILE" ]; then
-      if [ ! -x "$BOOT_CONFIRM_DISPATCHER" ]; then
-        log "boot confirmation unavailable: missing $BOOT_CONFIRM_DISPATCHER"
-        return 69
-      fi
-      recovery_receipt="$("$BOOT_CONFIRM_DISPATCHER" confirm)" || {
-        log "boot confirmation strategy failed: $PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY"
-        return 70
-      }
-      case "$recovery_receipt" in
-        ''|*[!A-Za-z0-9_=/.-]*)
-          log "boot confirmation failed: unsafe recovery receipt"
-          return 71
-          ;;
-      esac
-      mkdir -p "$STATE"
-      printf '%s confirmed_at=%s\n' "$recovery_receipt" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE/boot-confirmed"
-      log "release UI presented; boot recovery confirmed: $recovery_receipt"
-      return 0
+proc_start_ticks() {
+  is_uint "$1" || return 1
+  if ! process_stat="$(cat "/proc/$1/stat" 2>/dev/null)"; then
+    [ "${PLUTO_TESTING:-0}" = 1 ] && kill -0 "$1" 2>/dev/null || return 1
+    printf '%s\n' "$1"
+    return 0
+  fi
+  after_comm=${process_stat#*) }
+  [ "$after_comm" != "$process_stat" ] || return 1
+  set -- $after_comm
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  is_uint "$1" || return 1
+  printf '%s\n' "$1"
+}
+
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+file_mtime() {
+  stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null
+}
+
+file_uid() {
+  stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null
+}
+
+read_renderer_health() {  # file expected_pid expected_start
+  rh_file=$1
+  rh_pid=$2
+  rh_start=$3
+  [ -f "$rh_file" ] && [ ! -L "$rh_file" ] || return 1
+  [ "$(file_mode "$rh_file")" = 600 ] || return 1
+  if [ "${PLUTO_TESTING:-0}" != 1 ]; then
+    [ "$(file_uid "$rh_file")" = 0 ] || return 1
+  fi
+  [ "$(proc_start_ticks "$rh_pid" 2>/dev/null)" = "$rh_start" ] ||
+    return 1
+  rh_lines="$(wc -l < "$rh_file" 2>/dev/null | tr -d '[:space:]')" ||
+    return 1
+  [ "$rh_lines" = 1 ] || return 1
+  rh_line="$(cat "$rh_file" 2>/dev/null)" || return 1
+  set -- $rh_line
+  [ "$#" -eq 3 ] || return 1
+  rh_pid_field=${1#pid=}
+  rh_seq=${2#seq=}
+  rh_mono=${3#mono_ms=}
+  [ "$1" = "pid=$rh_pid" ] && [ "$rh_pid_field" = "$rh_pid" ] &&
+    [ "$2" = "seq=$rh_seq" ] && [ "$3" = "mono_ms=$rh_mono" ] ||
+    return 1
+  is_uint "$rh_seq" && is_uint "$rh_mono" || return 1
+  [ "$rh_line" = "pid=$rh_pid seq=$rh_seq mono_ms=$rh_mono" ] || return 1
+  rh_mtime="$(file_mtime "$rh_file")" || return 1
+  is_uint "$rh_mtime" || return 1
+  HEALTH_READ_SEQ=$rh_seq
+  HEALTH_READ_MONO=$rh_mono
+  HEALTH_READ_MTIME=$rh_mtime
+}
+
+reset_health_watch() {  # pid health-file
+  HEALTH_PID=$1
+  HEALTH_FILE=$2
+  HEALTH_PROCESS_START="$(proc_start_ticks "$1")" || return 1
+  HEALTH_WATCH_STARTED="$(health_clock_seconds)"
+  HEALTH_LAST_CHECK=-1
+  HEALTH_LAST_ADVANCE=$HEALTH_WATCH_STARTED
+  HEALTH_LAST_SEQ=""
+  HEALTH_LAST_MONO=""
+  HEALTH_LAST_MTIME=""
+  HEALTH_PROGRESS_COUNT=0
+}
+
+check_renderer_health() {
+  health_now="$(health_clock_seconds)"
+  [ "$health_now" != "$HEALTH_LAST_CHECK" ] || return 0
+  HEALTH_LAST_CHECK=$health_now
+  if ! read_renderer_health "$HEALTH_FILE" "$HEALTH_PID" \
+      "$HEALTH_PROCESS_START"; then
+    if [ -n "$HEALTH_LAST_SEQ" ] || [ -e "$HEALTH_FILE" ] ||
+       [ $((health_now - HEALTH_WATCH_STARTED)) -ge \
+         "$RENDERER_HEALTH_STARTUP_SECONDS" ]; then
+      return 1
     fi
-    [ "$waited" -lt "$BOOT_CONFIRM_TIMEOUT" ] || break
-    sleep 1
-    waited=$((waited + 1))
+    return 0
+  fi
+
+  if [ -z "$HEALTH_LAST_SEQ" ]; then
+    HEALTH_LAST_SEQ=$HEALTH_READ_SEQ
+    HEALTH_LAST_MONO=$HEALTH_READ_MONO
+    HEALTH_LAST_MTIME=$HEALTH_READ_MTIME
+    HEALTH_LAST_ADVANCE=$health_now
+    HEALTH_PROGRESS_COUNT=1
+    return 0
+  fi
+  [ "$HEALTH_READ_SEQ" -ge "$HEALTH_LAST_SEQ" ] &&
+    [ "$HEALTH_READ_MONO" -ge "$HEALTH_LAST_MONO" ] &&
+    [ "$HEALTH_READ_MTIME" -ge "$HEALTH_LAST_MTIME" ] || return 1
+  if [ "$HEALTH_READ_SEQ" -gt "$HEALTH_LAST_SEQ" ]; then
+    [ "$HEALTH_READ_MONO" -gt "$HEALTH_LAST_MONO" ] || return 1
+    HEALTH_LAST_SEQ=$HEALTH_READ_SEQ
+    HEALTH_LAST_MONO=$HEALTH_READ_MONO
+    HEALTH_LAST_MTIME=$HEALTH_READ_MTIME
+    HEALTH_LAST_ADVANCE=$health_now
+    HEALTH_PROGRESS_COUNT=$((HEALTH_PROGRESS_COUNT + 1))
+  else
+    [ "$HEALTH_READ_MONO" = "$HEALTH_LAST_MONO" ] &&
+      [ "$HEALTH_READ_MTIME" = "$HEALTH_LAST_MTIME" ] || return 1
+    [ $((health_now - HEALTH_LAST_ADVANCE)) -lt \
+      "$RENDERER_HEALTH_STALE_SECONDS" ] || return 1
+  fi
+  return 0
+}
+
+ready_receipt_valid() {
+  [ -f "$1" ] && [ ! -L "$1" ] &&
+    [ "$(wc -l < "$1" 2>/dev/null | tr -d '[:space:]')" = 1 ] &&
+    [ "$(cat "$1" 2>/dev/null)" = ready ]
+}
+
+boot_is_confirmed() {
+  [ -f "$STATE/boot-confirmed" ] && [ ! -L "$STATE/boot-confirmed" ]
+}
+
+mark_boot_fatal() {  # reason ready health
+  fatal_reason=$1
+  fatal_ready=${2:-}
+  fatal_health=${3:-}
+  log "boot attempt failed closed: $fatal_reason"
+  rm -f "$fatal_ready" "$fatal_health"
+  printf '%s\n' "$fatal_reason" > "$BOOT_FATAL_FILE.tmp.$$" &&
+    mv -f "$BOOT_FATAL_FILE.tmp.$$" "$BOOT_FATAL_FILE"
+}
+
+confirm_boot_after_ready() {  # app pid ready health process-start
+  confirm_pid=$1
+  confirm_ready=$2
+  confirm_health=$3
+  confirm_start=$4
+  reset_health_watch "$confirm_pid" "$confirm_health" || {
+    mark_boot_fatal "foreground identity vanished before confirmation" \
+      "$confirm_ready" "$confirm_health"
+    kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+    return 74
+  }
+  [ "$HEALTH_PROCESS_START" = "$confirm_start" ] || {
+    mark_boot_fatal "foreground identity changed before confirmation" \
+      "$confirm_ready" "$confirm_health"
+    kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+    return 74
+  }
+  confirm_started="$(health_clock_seconds)"
+  stable_started=""
+  while :; do
+    confirm_now="$(health_clock_seconds)"
+    if ! pid_alive "$confirm_pid" ||
+       [ "$(proc_start_ticks "$confirm_pid" 2>/dev/null || true)" != \
+         "$confirm_start" ] ||
+       [ "$(cat "$EMBEDDER_PID_FILE" 2>/dev/null || true)" != \
+         "$confirm_pid" ]; then
+      mark_boot_fatal "foreground exited during confirmation" \
+        "$confirm_ready" "$confirm_health"
+      kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+      return 74
+    fi
+
+    if ready_receipt_valid "$confirm_ready"; then
+      if ! check_renderer_health; then
+        mark_boot_fatal "renderer health became invalid or stale" \
+          "$confirm_ready" "$confirm_health"
+        kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+        return 74
+      fi
+      if [ -n "$HEALTH_LAST_SEQ" ]; then
+        [ -n "$stable_started" ] || stable_started=$confirm_now
+        if [ $((confirm_now - stable_started)) -ge "$BOOT_STABLE_WINDOW" ] &&
+           { [ "$HEALTH_PROGRESS_COUNT" -ge 2 ] ||
+             [ "$BOOT_STABLE_WINDOW" -eq 0 ]; }; then
+          recovery_receipt="$("$BOOT_CONFIRM_DISPATCHER" confirm \
+            "$PLUTO_PROFILE_ID" "$SUPERVISOR_PID" "$confirm_pid" \
+            "$BOOT_ATTEMPT_NONCE" "$confirm_ready" "$confirm_health")" || {
+              mark_boot_fatal "owned recovery confirmation was rejected" \
+                "$confirm_ready" "$confirm_health"
+              kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+              return 74
+            }
+          case "$recovery_receipt" in
+            ''|*[!A-Za-z0-9_=/.-]*)
+              mark_boot_fatal "unsafe recovery confirmation receipt" \
+                "$confirm_ready" "$confirm_health"
+              kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+              return 74
+              ;;
+          esac
+          mkdir -p "$STATE"
+          printf '%s confirmed_at=%s\n' "$recovery_receipt" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > \
+            "$STATE/boot-confirmed.tmp.$$" &&
+            mv -f "$STATE/boot-confirmed.tmp.$$" "$STATE/boot-confirmed" || {
+              mark_boot_fatal "could not publish local confirmation" \
+                "$confirm_ready" "$confirm_health"
+              kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+              return 74
+            }
+          log "stable release UI confirmed: $recovery_receipt"
+          return 0
+        fi
+      fi
+    elif [ -e "$confirm_ready" ]; then
+      mark_boot_fatal "ready receipt is malformed" \
+        "$confirm_ready" "$confirm_health"
+      kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+      return 74
+    elif [ -n "$stable_started" ]; then
+      mark_boot_fatal "ready receipt vanished during stability window" \
+        "$confirm_ready" "$confirm_health"
+      kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+      return 74
+    fi
+    if [ -z "$stable_started" ] &&
+       [ $((confirm_now - confirm_started)) -ge "$BOOT_READY_TIMEOUT" ]; then
+      mark_boot_fatal "ready/health receipt timed out" \
+        "$confirm_ready" "$confirm_health"
+      kill -USR1 "$SUPERVISOR_PID" 2>/dev/null || true
+      return 74
+    fi
+    sleep "$RENDERER_HEALTH_POLL_INTERVAL"
   done
-  log "boot confirmation withheld: no successful present marker after ${BOOT_CONFIRM_DELAY}+${BOOT_CONFIRM_TIMEOUT}s"
-  return 73
 }
 
 uptime_seconds() {
   cut -d. -f1 "$UPTIME_FILE" 2>/dev/null || date +%s
+}
+
+health_clock_seconds() {
+  cut -d. -f1 "$HEALTH_UPTIME_FILE" 2>/dev/null || date +%s
 }
 
 restore_standby_frontlight() {
@@ -489,6 +716,15 @@ resolve_orientation_policy() {
   esac
 }
 
+prepare_launch_receipts() {
+  launch_seed="$(runtime_nonce)" || return 1
+  LAUNCH_SERIAL=$((LAUNCH_SERIAL + 1))
+  APP_LAUNCH_NONCE="${launch_seed}-${LAUNCH_SERIAL}"
+  APP_READY_FILE="$CTL/boot-ready.$BOOT_ATTEMPT_NONCE.$APP_LAUNCH_NONCE"
+  APP_HEALTH_FILE="$CTL/health.$BOOT_ATTEMPT_NONCE.$APP_LAUNCH_NONCE"
+  [ ! -e "$APP_READY_FILE" ] && [ ! -e "$APP_HEALTH_FILE" ] || return 1
+}
+
 launch_app() {
   id="$1"
   standby_launch="${2:-0}"
@@ -527,6 +763,10 @@ launch_app() {
     return 66
   fi
   resolve_orientation_policy "$dir"
+  prepare_launch_receipts || {
+    log "could not allocate fresh nonce-bound renderer receipts"
+    return 74
+  }
   log "launch embedder for '$id' ($mode, rotation=$ROTATION_DEG allowed=$ALLOWED_ROTATIONS auto=$AUTO_ROTATE)"
   set -- "$ROOT/bin/pluto-embedder" "--$mode" \
     --bundle="$dir/bundle" \
@@ -539,7 +779,8 @@ launch_app() {
     --rotation="$ROTATION_DEG" \
     --allowed-rotations="$ALLOWED_ROTATIONS" \
     --run-dir="$CTL" \
-    --ready-file="$READY_FILE"
+    --ready-file="$APP_READY_FILE" \
+    --health-file="$APP_HEALTH_FILE"
   if [ "$AUTO_ROTATE" -eq 1 ]; then
     set -- "$@" --auto-rotate
   fi
@@ -586,6 +827,8 @@ launch_app() {
   APP_WARM="$warm"
   if [ "$warm" -eq 1 ]; then
     printf '%s\n' "$app_pid" > "$WARM_DIR/$id.pid"
+    printf '%s\n' "$APP_READY_FILE" > "$WARM_DIR/$id.ready"
+    printf '%s\n' "$APP_HEALTH_FILE" > "$WARM_DIR/$id.health"
     if [ "$system_launch" != none ]; then
       # Hosting temporary system UI is not an app use. A cold host still needs
       # a neutral recency file so it can join the pool without becoming MRU.
@@ -635,8 +878,20 @@ stop_power_watcher() {
 forget_warm_pid() {
   id="$1"
   pid="$2"
-  [ "$(cat "$WARM_DIR/$id.pid" 2>/dev/null || true)" != "$pid" ] ||
-    rm -f "$WARM_DIR/$id.pid" "$WARM_DIR/$id.used"
+  [ "$(cat "$WARM_DIR/$id.pid" 2>/dev/null || true)" = "$pid" ] || {
+    rm -f "$HIBERNATED_DIR/$pid"
+    return 0
+  }
+  forgotten_ready="$(cat "$WARM_DIR/$id.ready" 2>/dev/null || true)"
+  forgotten_health="$(cat "$WARM_DIR/$id.health" 2>/dev/null || true)"
+  case "$forgotten_ready" in
+    "$CTL/boot-ready.$BOOT_ATTEMPT_NONCE."*) rm -f "$forgotten_ready" ;;
+  esac
+  case "$forgotten_health" in
+    "$CTL/health.$BOOT_ATTEMPT_NONCE."*) rm -f "$forgotten_health" ;;
+  esac
+  rm -f "$WARM_DIR/$id.pid" "$WARM_DIR/$id.used" \
+    "$WARM_DIR/$id.ready" "$WARM_DIR/$id.health"
   rm -f "$HIBERNATED_DIR/$pid"
 }
 
@@ -694,6 +949,16 @@ resume_embedder() {
   pid="$2"
   marker="$HIBERNATED_DIR/$pid"
   [ -f "$marker" ] || return 1
+  resume_ready="$(cat "$WARM_DIR/$id.ready" 2>/dev/null || true)"
+  resume_health="$(cat "$WARM_DIR/$id.health" 2>/dev/null || true)"
+  case "$resume_ready:$resume_health" in
+    "$CTL/boot-ready.$BOOT_ATTEMPT_NONCE."*:"$CTL/health.$BOOT_ATTEMPT_NONCE."*) ;;
+    *) return 1 ;;
+  esac
+  # A hibernated renderer intentionally stops heartbeats. Remove its old
+  # atomic receipt before resuming so the normal startup grace applies until
+  # the presenter loop publishes fresh post-resume proof.
+  rm -f "$resume_health"
   ln -sf "$ROOT/logs/$id.log" "$ROOT/logs/current.log"
   kill -CONT "$pid" 2>/dev/null || return 1
   kill -USR2 "$pid" 2>/dev/null || return 1
@@ -708,6 +973,8 @@ resume_embedder() {
     APP_ID="$id"
     APP_MODE=release
     APP_WARM=1
+    APP_READY_FILE=$resume_ready
+    APP_HEALTH_FILE=$resume_health
     [ "${system_host:-none}" != none ] || touch_warm_pid "$id"
     log "resumed '$id' pid=$pid"
     return 0
@@ -844,6 +1111,15 @@ monitor_foreground() {
   # functions and therefore share variable scope with their caller.
   monitor_pid="$1"
   while pid_alive "$monitor_pid"; do
+    if ! check_renderer_health; then
+      mark_boot_fatal "renderer health deadline expired for pid=$monitor_pid" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      return 74
+    fi
+    if boot_is_confirmed && [ -n "$BOOT_CONFIRM_PID" ]; then
+      wait "$BOOT_CONFIRM_PID" 2>/dev/null || true
+      BOOT_CONFIRM_PID=""
+    fi
     handle_force_stop_request || true
     discard_unauthorized_poweroff
     if [ -s "$CTL/launch" ] || [ -s "$CTL/debug-launch" ] ||
@@ -851,6 +1127,11 @@ monitor_foreground() {
        [ -s "$CTL/switcher" ] || [ -s "$CTL/status" ] ||
        [ -s "$CTL/power-menu" ] || authorized_poweroff_request ||
        [ -f "$CTL/suspend" ] || [ -f "$CTL/stock" ]; then
+      if [ "$RECOVERY_BOUND" -eq 1 ] && ! boot_is_confirmed; then
+        mark_boot_fatal "foreground transition preceded stable boot confirmation" \
+          "$APP_READY_FILE" "$APP_HEALTH_FILE"
+        return 74
+      fi
       return 0
     fi
     sleep 0.05
@@ -884,13 +1165,153 @@ drain_warm_pool() {
 # stop ourselves / loop). Detect the override and drive the stock binary direct.
 hijacked() { [ -f "$BOOT_DROPIN" ]; }
 
+cleanup_receipt_path() {  # kind path
+  case "$2" in
+    "$CTL/$1.$BOOT_ATTEMPT_NONCE."*) rm -f "$2" ;;
+  esac
+}
+
+stop_boot_confirmer() {
+  if [ -n "$BOOT_CONFIRM_PID" ]; then
+    kill "$BOOT_CONFIRM_PID" 2>/dev/null || true
+    wait "$BOOT_CONFIRM_PID" 2>/dev/null || true
+    BOOT_CONFIRM_PID=""
+  fi
+}
+
+bind_recovery_attempt() {
+  hijacked || return 0
+  [ -x "$BOOT_CONFIRM_DISPATCHER" ] || {
+    log "boot recovery dispatcher is unavailable"
+    return 69
+  }
+  bind_nonce="$("$BOOT_CONFIRM_DISPATCHER" bind \
+    "$PLUTO_PROFILE_ID" "$SUPERVISOR_PID")" || {
+      log "owned boot attempt rejected this service invocation"
+      return 70
+    }
+  is_token "$bind_nonce" || {
+    log "owned boot attempt returned an unsafe nonce"
+    return 71
+  }
+  BOOT_ATTEMPT_NONCE=$bind_nonce
+  RECOVERY_BOUND=1
+  RECOVERY_RETIRED=0
+  return 0
+}
+
+bind_recovery_foreground() {  # app pid ready health
+  [ "$RECOVERY_BOUND" -eq 1 ] || return 0
+  [ -z "$BOOT_CONFIRM_PID" ] || {
+    log "boot confirmation is already bound to a foreground"
+    return 74
+  }
+  bound_start="$(proc_start_ticks "$1")" || return 74
+  foreground_receipt="$("$BOOT_CONFIRM_DISPATCHER" foreground \
+    "$PLUTO_PROFILE_ID" "$SUPERVISOR_PID" "$1" \
+    "$BOOT_ATTEMPT_NONCE" "$2" "$3")" || {
+      log "could not bind the owned attempt to the fresh foreground"
+      return 74
+  }
+  case "$foreground_receipt" in
+    state=pending/app="$1")
+      confirm_boot_after_ready "$1" "$2" "$3" "$bound_start" &
+      BOOT_CONFIRM_PID=$!
+      ;;
+    state=confirmed/app="$1") ;;
+    *) log "unsafe foreground binding receipt"; return 74 ;;
+  esac
+}
+
+cancel_boot_attempt() {
+  stop_boot_confirmer
+  if [ "$RECOVERY_BOUND" -ne 1 ]; then
+    [ "$RECOVERY_RETIRED" -ne 1 ] || return 0
+    if hijacked && [ -x "$BOOT_CONFIRM_DISPATCHER" ]; then
+      unbound_receipt="$("$BOOT_CONFIRM_DISPATCHER" cancel-unbound)" || {
+        log "unbound boot attempt could not be cancelled"
+        return 1
+      }
+      case "$unbound_receipt" in state=cancelled-unbound/profile=*/nonce=*) ;; *) return 1 ;; esac
+      RECOVERY_RETIRED=1
+    fi
+    return 0
+  fi
+  cancel_receipt="$("$BOOT_CONFIRM_DISPATCHER" cancel \
+    "$PLUTO_PROFILE_ID" "$SUPERVISOR_PID" "$BOOT_ATTEMPT_NONCE")" || {
+      log "owned boot attempt could not be cancelled"
+      return 1
+    }
+  case "$cancel_receipt" in state=cancelled/profile=*/nonce=*) ;; *) return 1 ;; esac
+  cleanup_receipt_path boot-ready "$APP_READY_FILE"
+  cleanup_receipt_path health "$APP_HEALTH_FILE"
+  RECOVERY_BOUND=0
+  RECOVERY_RETIRED=1
+  BOOT_ATTEMPT_NONCE=""
+  rm -f "$STATE/boot-confirmed" "$BOOT_FATAL_FILE"
+}
+
+rearm_boot_attempt() {
+  hijacked || return 0
+  begin_receipt="$("$BOOT_CONFIRM_DISPATCHER" begin)" || return 1
+  case "$begin_receipt" in state=pending/nonce=*/boot=*/profile=*) ;; *) return 1 ;; esac
+  bind_recovery_attempt || return 1
+  rm -f "$STATE/boot-confirmed" "$BOOT_FATAL_FILE"
+}
+
+handle_boot_fatal_signal() {
+  trap - HUP INT TERM USR1
+  stop_boot_confirmer
+  cleanup_receipt_path boot-ready "$APP_READY_FILE"
+  cleanup_receipt_path health "$APP_HEALTH_FILE"
+  drain_warm_pool
+  [ -z "${APP_PID:-}" ] || terminate_embedder "$APP_PID"
+  exit 74
+}
+
+handle_supervisor_signal() {
+  trap - HUP INT TERM USR1
+  stop_boot_confirmer
+  if [ -f "$BOOT_FATAL_FILE" ]; then
+    cleanup_receipt_path boot-ready "$APP_READY_FILE"
+    cleanup_receipt_path health "$APP_HEALTH_FILE"
+    drain_warm_pool
+    [ -z "${APP_PID:-}" ] || terminate_embedder "$APP_PID"
+    exit 74
+  fi
+  if ! cancel_boot_attempt; then
+    exit 74
+  fi
+  drain_warm_pool
+  [ -z "${APP_PID:-}" ] || terminate_embedder "$APP_PID"
+  exit 0
+}
+
 restore_stock() {
+  if hijacked && [ ! -x "$STOCK_XOCHITL" ]; then
+    mark_boot_fatal "stock xochitl is unavailable for intentional handoff" \
+      "$APP_READY_FILE" "$APP_HEALTH_FILE"
+    return 74
+  fi
+  if hijacked; then
+    stock_proof="$("$BOOT_CONFIRM_DISPATCHER" verify-stock)" || {
+      mark_boot_fatal "stock xochitl failed owned identity verification" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      return 74
+    }
+    [ "$stock_proof" = "state=stock-verified/profile=$PLUTO_PROFILE_ID" ] || {
+      mark_boot_fatal "stock xochitl returned an unsafe identity receipt" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      return 74
+    }
+  fi
   drain_warm_pool
   log "restoring stock xochitl"
   if hijacked; then
-    # Keep stock xochitl in the service's main process. Backgrounding it and
-    # returning lets systemd's default KillMode=control-group reap it when the
-    # supervisor exits, leaving the panel without an owner.
+    # Preserve the confirmed owned attempt while replacing this exact service
+    # process. If stock cannot exec or later crashes, OnFailure can still prove
+    # the service identity and select the profile's recovery action. The
+    # installer retires the attempt when it performs a persistent uninstall.
     exec env MALLOC_ARENA_MAX=8 "$STOCK_XOCHITL" --system
   else
     systemctl reset-failed xochitl.service 2>/dev/null || true
@@ -899,12 +1320,43 @@ restore_stock() {
 }
 
 start() {
+  SUPERVISOR_PID=$$
+  trap 'handle_supervisor_signal' HUP INT TERM
+  trap 'handle_boot_fatal_signal' USR1
   configure_profile || return $?
   mkdir -p "$CTL" "$WARM_DIR" "$HIBERNATED_DIR" "$CTL/previews" \
     "$ROOT/logs"
-  case "$MAX_WARM_APPS:$HIBERNATE_WAIT_TICKS:$RESUME_WAIT_TICKS:$FOREGROUND_EXIT_WAIT_TICKS" in
+  case "$MAX_WARM_APPS:$HIBERNATE_WAIT_TICKS:$RESUME_WAIT_TICKS:$FOREGROUND_EXIT_WAIT_TICKS:$BOOT_STABLE_WINDOW:$BOOT_READY_TIMEOUT:$RENDERER_HEALTH_STALE_SECONDS:$RENDERER_HEALTH_STARTUP_SECONDS" in
     *[!0-9:]*|:*|*::*|*:) log "invalid warm-pool configuration"; return 64 ;;
   esac
+  [ "$BOOT_READY_TIMEOUT" -gt 0 ] &&
+    [ "$RENDERER_HEALTH_STALE_SECONDS" -gt 0 ] &&
+    [ "$RENDERER_HEALTH_STALE_SECONDS" -le 6 ] &&
+    [ "$RENDERER_HEALTH_STARTUP_SECONDS" -gt 0 ] || {
+      log "invalid boot health deadlines"
+      return 64
+    }
+  poll_valid=0
+  case "$RENDERER_HEALTH_POLL_INTERVAL" in
+    1) poll_valid=1 ;;
+    0.*)
+      poll_fraction=${RENDERER_HEALTH_POLL_INTERVAL#0.}
+      case "$poll_fraction" in
+        ''|*[!0-9]*) ;;
+        *[1-9]*) poll_valid=1 ;;
+      esac
+      ;;
+  esac
+  if [ "$poll_valid" -ne 1 ] ||
+     { [ "${PLUTO_TESTING:-0}" != 1 ] &&
+       [ "$RENDERER_HEALTH_POLL_INTERVAL" != 1 ]; }; then
+    log "renderer health polling is fixed at one second in production"
+    return 64
+  fi
+  if [ "$BOOT_STABLE_WINDOW" -eq 0 ] && [ "${PLUTO_TESTING:-0}" != 1 ]; then
+    log "zero boot stability window is test-only"
+    return 64
+  fi
   rm -f "$STATE/boot-confirmed"
   # Recover from a prior supervisor/launcher crash before discarding control
   # markers. The persisted raw value is removed only after a successful write.
@@ -915,8 +1367,8 @@ start() {
     "$CTL/force-stop" \
     "$CTL/switcher-active" "$CTL/status-active" \
     "$CTL/power-menu-active" "$CTL/system-ui-reset" \
-    "$READY_FILE" \
-    "$EMBEDDER_PID_FILE"
+    "$EMBEDDER_PID_FILE" "$BOOT_FATAL_FILE" \
+    "$CTL"/boot-ready.* "$CTL"/health.*
   # A supervisor restart cannot adopt old children safely because it does not
   # know whether their presenter/input quiesce completed. Drain them and start
   # a new in-memory pool; a full device reboot clears the same state naturally.
@@ -928,18 +1380,17 @@ start() {
   for stale_pid in $(pgrep -f "$ROOT/bin/pluto-embedder" 2>/dev/null || true); do
     kill -KILL "$stale_pid" 2>/dev/null || true
   done
-  rm -f "$WARM_DIR"/*.pid "$WARM_DIR"/*.used "$WARM_DIR/sequence" \
+  rm -f "$WARM_DIR"/*.pid "$WARM_DIR"/*.used "$WARM_DIR"/*.ready \
+    "$WARM_DIR"/*.health "$WARM_DIR/sequence" \
     "$HIBERNATED_DIR"/* "$CTL/previews"/* 2>/dev/null || true
   if hijacked; then
     # We ARE xochitl.service (boot-first override): no stock xochitl to stop.
     log "boot-first: this supervisor is xochitl.service; taking the panel"
     pkill -x xochitl 2>/dev/null || true
-    if [ -x "$BOOT_CONFIRM_DISPATCHER" ]; then
-      confirm_boot_after_ready &
-    else
-      log "boot confirmation dispatcher is unavailable"
-    fi
+    bind_recovery_attempt || return $?
   else
+    manual_nonce="$(runtime_nonce)" || return 74
+    BOOT_ATTEMPT_NONCE="manual-$manual_nonce"
     log "stopping xochitl to take over the panel"
     systemctl reset-failed xochitl.service 2>/dev/null || true
     systemctl stop xochitl.service 2>/dev/null || true
@@ -986,6 +1437,11 @@ start() {
     # A refused debug/JIT launch or missing app has no foreground child. Keep
     # the one-shot semantics and recover through the launcher immediately.
     if [ "$launch_rc" -ne 0 ] || [ -z "$APP_PID" ]; then
+      if [ "$RECOVERY_BOUND" -eq 1 ] && ! boot_is_confirmed; then
+        mark_boot_fatal "no foreground could be launched for boot confirmation" \
+          "$APP_READY_FILE" "$APP_HEALTH_FILE"
+        return 74
+      fi
       debug_authorized=0
       standby=0
       if [ "$current" != "$LAUNCHER_ID" ]; then
@@ -995,7 +1451,7 @@ start() {
         continue
       fi
       fails=$((fails + 1))
-      [ "$fails" -lt 3 ] || { restore_stock; return 1; }
+      [ "$fails" -lt 3 ] || { restore_stock; return $?; }
       sleep 1
       continue
     fi
@@ -1003,10 +1459,36 @@ start() {
     # launch_app/resume_embedder marks the foreground as most-recent, so LRU
     # eviction can enforce the total resident limit without selecting it.
     evict_warm_excess
-    publish_foreground_pid "$APP_PID" || true
+    if ! publish_foreground_pid "$APP_PID"; then
+      mark_boot_fatal "could not publish foreground ownership" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      terminate_embedder "$APP_PID"
+      return 74
+    fi
+    if ! bind_recovery_foreground "$APP_PID" "$APP_READY_FILE" \
+      "$APP_HEALTH_FILE"; then
+      mark_boot_fatal "could not bind boot confirmation to foreground" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      terminate_embedder "$APP_PID"
+      return 74
+    fi
+    if ! reset_health_watch "$APP_PID" "$APP_HEALTH_FILE"; then
+      if [ "$RECOVERY_BOUND" -eq 1 ] && ! boot_is_confirmed; then
+        mark_boot_fatal "foreground identity vanished before health monitoring" \
+          "$APP_READY_FILE" "$APP_HEALTH_FILE"
+        terminate_embedder "$APP_PID"
+        return 74
+      fi
+    fi
     start_power_watcher "$standby" "$APP_PID" "$APP_ID"
-    monitor_foreground "$APP_PID"
+    monitor_rc=0
+    monitor_foreground "$APP_PID" || monitor_rc=$?
     stop_power_watcher
+    if [ "$monitor_rc" -ne 0 ]; then
+      terminate_embedder "$APP_PID"
+      drain_warm_pool
+      return "$monitor_rc"
+    fi
     discard_unauthorized_poweroff
 
     controlled_exit=0
@@ -1041,8 +1523,19 @@ start() {
       forget_warm_pid "$APP_ID" "$APP_PID"
       log "embedder for '$APP_ID' exited"
     fi
+    if [ "$RECOVERY_BOUND" -eq 1 ] && ! boot_is_confirmed; then
+      stop_boot_confirmer
+      mark_boot_fatal "foreground exited before stable boot confirmation" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      drain_warm_pool
+      return 74
+    fi
     if [ "$(cat "$EMBEDDER_PID_FILE" 2>/dev/null || true)" = "$APP_PID" ]; then
       rm -f "$EMBEDDER_PID_FILE"
+    fi
+    if [ "$APP_WARM" -ne 1 ]; then
+      cleanup_receipt_path boot-ready "$APP_READY_FILE"
+      cleanup_receipt_path health "$APP_HEALTH_FILE"
     fi
     if [ "$was_standby" -eq 1 ]; then
       cp "$ROOT/logs/current.log" "$ROOT/logs/standby-last.log" \
@@ -1074,7 +1567,7 @@ start() {
       if [ "$fails" -ge 3 ]; then
         log "too many fast failures; restoring stock"
         restore_stock
-        return 1
+        return $?
       fi
       if [ "$current" != "$LAUNCHER_ID" ]; then
         log "app '$current' failed fast; falling back to the launcher"
@@ -1092,6 +1585,11 @@ start() {
         "$CTL/switcher" "$CTL/status" "$CTL/switcher-active" \
         "$CTL/status-active" "$CTL/power-menu-active"
       : > "$CTL/system-ui-reset"
+      if ! cancel_boot_attempt; then
+        mark_boot_fatal "poweroff recovery cancellation failed" \
+          "$APP_READY_FILE" "$APP_HEALTH_FILE"
+        return 74
+      fi
       drain_warm_pool
       log "power off requested; invoking: $POWER_OFF_COMMAND"
       sh -c "$POWER_OFF_COMMAND"
@@ -1101,6 +1599,11 @@ start() {
         return 0
       fi
       log "power off command failed rc=$poweroff_rc; recovering launcher"
+      if ! rearm_boot_attempt; then
+        mark_boot_fatal "could not re-arm recovery after failed poweroff" \
+          "$APP_READY_FILE" "$APP_HEALTH_FILE"
+        return 74
+      fi
       current="$LAUNCHER_ID"
       standby=0
       debug_authorized=0
@@ -1112,8 +1615,9 @@ start() {
       rm -f "$CTL/stock" "$CTL/switcher-active" "$CTL/status-active" \
         "$CTL/power-menu-active" "$CTL/system-ui-reset"
       restore_stock
-      log "exited to stock; supervisor done"
-      return 0
+      stock_rc=$?
+      [ "$stock_rc" -ne 0 ] || log "exited to stock; supervisor done"
+      return "$stock_rc"
     fi
     if [ -f "$CTL/standby" ]; then
       if [ "$system_host" != none ]; then
