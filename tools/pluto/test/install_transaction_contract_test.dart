@@ -183,6 +183,21 @@ final class _LocalShellTransport implements DeviceTransport {
     if (command == 'uname -m') {
       return const CommandResult(exitCode: 0, stdout: 'aarch64\n');
     }
+    if (command == 'uname -r') {
+      return const CommandResult(
+        exitCode: 0,
+        stdout: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8\n',
+      );
+    }
+    if (command == 'cat /etc/version') {
+      return const CommandResult(exitCode: 0, stdout: '20260629074044\n');
+    }
+    if (command == 'cat /usr/share/remarkable/update.conf') {
+      return const CommandResult(
+        exitCode: 0,
+        stdout: 'REMARKABLE_RELEASE_VERSION=3.28.0.162\n',
+      );
+    }
     if (command == 'cat /proc/device-tree/compatible') {
       return const CommandResult(exitCode: 0, stdout: 'fsl,imx93\n');
     }

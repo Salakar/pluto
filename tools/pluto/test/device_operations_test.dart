@@ -26,6 +26,8 @@ FakeTransport _deviceTransport(
   String? compatible,
   String firmwareBuild = '20260629074044',
   String firmwareVersion = '3.28.0.162',
+  String? kernelRelease,
+  bool kernelReleaseAvailable = true,
   Future<CommandResult> Function(String command)? execHandler,
   FakeDownloadHandler? downloadHandler,
 }) => FakeTransport(
@@ -37,6 +39,23 @@ FakeTransport _deviceTransport(
     }
     if (command == 'uname -m') {
       return CommandResult(exitCode: 0, stdout: architecture);
+    }
+    if (command == 'uname -r') {
+      if (!kernelReleaseAvailable) {
+        return const CommandResult(exitCode: 1);
+      }
+      final String normalizedMachine = machine.toLowerCase();
+      return CommandResult(
+        exitCode: 0,
+        stdout:
+            kernelRelease ??
+            (normalizedMachine.contains('remarkable 1') ||
+                    normalizedMachine.contains('zero-gravitas')
+                ? '5.4.70-v1.6.3-rm10x'
+                : normalizedMachine.contains('chiappa')
+                ? '6.12.49+git-imx93-chiappa-gf4c2ab7040e8'
+                : '5.4.70-v1.6.3-rm11x'),
+      );
     }
     if (command == 'cat /proc/device-tree/compatible') {
       return CommandResult(
@@ -170,6 +189,7 @@ const Set<String> _provisionProbeCommands = <String>{
   'cat /usr/share/remarkable/update.conf',
   'cat /etc/os-release',
   'uname -m',
+  'uname -r',
   'test -e "/home/root/pluto/VERSION"',
 };
 
@@ -817,6 +837,48 @@ void main() {
       expect(result.ok, isTrue, reason: '$fixture');
     }
   });
+
+  test(
+    'provision rejects missing or mismatched kernel before mutation',
+    () async {
+      for (final ({String name, String? release, bool available}) fixture
+          in <({String name, String? release, bool available})>[
+            (name: 'missing', release: null, available: false),
+            (name: 'mismatched', release: '6.12.50-future', available: true),
+          ]) {
+        final FakeTransport transport = _deviceTransport(
+          'device',
+          kernelRelease: fixture.release,
+          kernelReleaseAvailable: fixture.available,
+        );
+
+        await expectLater(
+          LiveDeviceOperations(transport).provision(
+            runtime: const <PayloadFile>[],
+            apps: const <PayloadApp>[],
+            payloadTarget: 'linux-arm64',
+          ),
+          throwsA(
+            isA<DeviceOperationException>().having(
+              (DeviceOperationException error) => error.message,
+              'message',
+              contains('kernel release does not match'),
+            ),
+          ),
+          reason: fixture.name,
+        );
+
+        expect(transport.commands, contains('uname -r'), reason: fixture.name);
+        expect(
+          transport.commands.every(_provisionProbeCommands.contains),
+          isTrue,
+          reason: 'only read-only probes may run for ${fixture.name}',
+        );
+        expect(transport.uploads, isEmpty, reason: fixture.name);
+        expect(transport.directoryUploads, isEmpty, reason: fixture.name);
+      }
+    },
+  );
 
   test('provision compatibility refusal occurs before remote writes', () async {
     for (final ({String target, String machine, String architecture}) fixture

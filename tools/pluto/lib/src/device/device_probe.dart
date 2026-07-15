@@ -35,6 +35,9 @@ final class DeviceProbe {
     final String? architecture = _normalizeArchitecture(
       await _readFirstSuccessful(const <String>['uname -m']),
     );
+    final String? kernelRelease = await _readFirstSuccessful(const <String>[
+      'uname -r',
+    ]);
     final DeviceProfile? profile = matchDeviceProfile(
       DeviceIdentityEvidence(
         machine: machine,
@@ -54,6 +57,7 @@ final class DeviceProbe {
       endpoint: transport.endpoint,
       profile: profile,
       architecture: architecture,
+      kernelRelease: kernelRelease,
       firmwareBuild: firmware?.trim(),
       firmwareVersion: firmwareVersion,
       provisioned: provisioned,

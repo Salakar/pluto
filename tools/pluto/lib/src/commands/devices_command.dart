@@ -54,6 +54,7 @@ final class DevicesCommand extends PlutoCommand {
                     'port': device.endpoint.port,
                     'model': device.model,
                     'architecture': device.architecture,
+                    'kernelRelease': device.kernelRelease,
                     'firmwareBuild': device.firmwareBuild,
                     'firmwareVersion': device.firmwareVersion,
                     'target': device.buildTarget,

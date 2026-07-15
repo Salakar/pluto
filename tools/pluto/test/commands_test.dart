@@ -24,6 +24,12 @@ Future<CommandResult> _moveExecHandler(String command) async {
   if (command == 'uname -m') {
     return const CommandResult(exitCode: 0, stdout: 'aarch64');
   }
+  if (command == 'uname -r') {
+    return const CommandResult(
+      exitCode: 0,
+      stdout: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
+    );
+  }
   if (command == 'cat /proc/device-tree/compatible') {
     return const CommandResult(exitCode: 0, stdout: 'fsl,imx93');
   }
@@ -45,6 +51,9 @@ Future<CommandResult> _rm2ExecHandler(String command) async {
   }
   if (command == 'uname -m') {
     return const CommandResult(exitCode: 0, stdout: 'armv7l');
+  }
+  if (command == 'uname -r') {
+    return const CommandResult(exitCode: 0, stdout: '5.4.70-v1.6.3-rm11x');
   }
   if (command == 'cat /proc/device-tree/compatible') {
     return const CommandResult(exitCode: 0, stdout: 'fsl,imx7d-sdb');
@@ -73,6 +82,7 @@ FakeExecHandler _moveExecWith(FakeExecHandler fallback) =>
       if (command == 'cat /sys/devices/soc0/machine' ||
           command == 'cat /proc/device-tree/compatible' ||
           command == 'uname -m' ||
+          command == 'uname -r' ||
           command == 'cat /etc/version' ||
           command == 'cat /usr/share/remarkable/update.conf') {
         return _moveExecHandler(command);
@@ -127,6 +137,7 @@ void main() {
           decoded.single! as Map<String, Object?>;
       expect(device['model'], 'zero-sugar');
       expect(device['architecture'], 'armv7l');
+      expect(device['kernelRelease'], '5.4.70-v1.6.3-rm11x');
       expect(device['firmwareBuild'], '20260629074044');
       expect(device['firmwareVersion'], '3.28.0.162');
       expect(device['target'], 'linux-arm');

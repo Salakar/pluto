@@ -47,6 +47,12 @@ void main() {
               if (command == 'uname -m') {
                 return const CommandResult(exitCode: 0, stdout: 'AARCH64\n');
               }
+              if (command == 'uname -r') {
+                return const CommandResult(
+                  exitCode: 0,
+                  stdout: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8\n',
+                );
+              }
               if (command.startsWith('test -e')) {
                 return const CommandResult(exitCode: 0);
               }
@@ -73,10 +79,15 @@ void main() {
       expect(devices.single.capabilities, contains('screenshot'));
       expect(devices.single.capabilities, contains('hot-reload'));
       expect(devices.single.architecture, 'aarch64');
+      expect(
+        devices.single.kernelRelease,
+        '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
+      );
       expect(devices.single.firmwareBuild, '20260629074044');
       expect(devices.single.firmwareVersion, '3.28.0.162');
       expect(devices.single.provisioned, isTrue);
       expect(fake.commands, contains('cat /etc/version'));
+      expect(fake.commands, contains('uname -r'));
       expect(fake.commands, contains('cat /usr/share/remarkable/update.conf'));
       expect(devices.single.formatSummary(), contains('linux-arm64'));
     },
@@ -110,6 +121,12 @@ void main() {
         if (command == 'uname -m') {
           return const CommandResult(exitCode: 0, stdout: 'armv7l');
         }
+        if (command == 'uname -r') {
+          return const CommandResult(
+            exitCode: 0,
+            stdout: '5.4.70-v1.6.3-rm10x',
+          );
+        }
         return const CommandResult(exitCode: 1);
       },
     );
@@ -120,6 +137,7 @@ void main() {
 
     expect(device.firmwareBuild, '20260612085811');
     expect(device.firmwareVersion, '3.27.3.0');
+    expect(device.kernelRelease, '5.4.70-v1.6.3-rm10x');
   });
 
   test('probe normalizes live reMarkable 1 and 2 machine identities', () async {

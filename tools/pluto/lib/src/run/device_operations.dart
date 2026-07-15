@@ -838,6 +838,15 @@ final class LiveDeviceOperations {
             'changed.',
       );
     }
+    if (device.kernelRelease != profile.runtime.kernelRelease) {
+      throw DeviceOperationException(
+        'kernel release does not match the native runtime profile',
+        '${profile.marketingName} requires kernel '
+            '${profile.runtime.kernelRelease}; detected '
+            '${device.kernelRelease ?? 'unknown'}. No device files were '
+            'changed.',
+      );
+    }
   }
 
   // Restore/status/uninstall must remain available after a firmware drift or

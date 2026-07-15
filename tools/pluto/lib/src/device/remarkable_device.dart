@@ -10,6 +10,7 @@ final class RemarkableDevice {
     required this.endpoint,
     this.profile,
     this.architecture,
+    this.kernelRelease,
     this.firmwareBuild,
     this.firmwareVersion,
     this.provisioned = false,
@@ -32,6 +33,9 @@ final class RemarkableDevice {
 
   /// Kernel machine architecture, for example `aarch64` or `armv7l`.
   final String? architecture;
+
+  /// Exact kernel release reported by `uname -r`.
+  final String? kernelRelease;
 
   /// Firmware build read from `/etc/version`.
   final String? firmwareBuild;
