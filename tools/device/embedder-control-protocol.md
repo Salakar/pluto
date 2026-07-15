@@ -117,3 +117,26 @@ For an acceptance run, invoke the installed target-native client as root:
 Success confirms dispatch, not visible correctness. Acceptance still requires
 a fresh camera frame showing that the stroke reached Ink and rendered on the
 panel.
+
+### `tap-switcher-preview`
+
+This acceptance-only action selects the currently centered running-app card
+through the real Flutter switcher UI:
+
+```json
+{"schema":1,"requestId":"switch-1","action":"tap-switcher-preview","appId":"dev.pluto.launcher"}
+```
+
+The foreground process must be Pluto Home and the supervisor-owned
+`switcher-active` record must contain both an origin and at least one distinct
+selectable app. The embedder sends the normal four-event touch sequence at the
+center of the live logical viewport. The switcher card's `GestureDetector`,
+method channel, and supervisor launch request therefore perform the selection;
+the control does not write the launch marker itself. The response reports the
+launcher process identity and `eventCount: 4`.
+
+The action is intentionally not a generic coordinate injector. It refuses a
+Home screen, an empty switcher, a non-launcher foreground process, screenshot
+fields, or a null app id. As with the Ink action, final acceptance requires a
+fresh camera frame of the selected app rather than treating dispatch as visual
+proof.

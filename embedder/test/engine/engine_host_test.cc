@@ -13,8 +13,8 @@
 namespace {
 
 class TempBundle {
- public:
-  explicit TempBundle(const char* suffix)
+public:
+  explicit TempBundle(const char *suffix)
       : path_(std::filesystem::temp_directory_path() /
               ("pluto-engine-host-" + std::to_string(::getpid()) + "-" +
                suffix)) {
@@ -24,18 +24,18 @@ class TempBundle {
 
   ~TempBundle() { std::filesystem::remove_all(path_); }
 
-  const std::filesystem::path& path() const { return path_; }
+  const std::filesystem::path &path() const { return path_; }
 
-  void touch(const std::filesystem::path& relative_path) {
+  void touch(const std::filesystem::path &relative_path) {
     std::filesystem::create_directories((path_ / relative_path).parent_path());
     std::ofstream(path_ / relative_path).put('\0');
   }
 
- private:
+private:
   std::filesystem::path path_;
 };
 
-pluto::EngineHost make_host(const std::filesystem::path& bundle) {
+pluto::EngineHost make_host(const std::filesystem::path &bundle) {
   pluto::EngineHostConfig config;
   config.bundle_path = bundle.string();
   config.engine_path = "/definitely/missing/libflutter_engine.so";
@@ -182,6 +182,73 @@ TEST(EngineHostPenInput,
       pluto::build_direct_ink_stroke_events(1404, 1872, 1000, nullptr));
 }
 
+TEST(EngineHostTouchInput,
+     ProgrammaticSwitcherTapUsesPhysicalCenterOnEveryViewport) {
+  for (const auto &[width, height] :
+       std::array<std::pair<std::int32_t, std::int32_t>, 2>{
+           std::pair{1404, 1872}, std::pair{954, 1696}}) {
+    std::array<FlutterPointerEvent, pluto::kDirectTouchTapEventCount> events{};
+    ASSERT_TRUE(pluto::build_direct_touch_tap_events(
+        static_cast<double>(width) * 0.5, static_cast<double>(height) * 0.5,
+        2000, &events));
+    EXPECT_EQ(events[0].phase, kAdd);
+    EXPECT_EQ(events[1].phase, kDown);
+    EXPECT_EQ(events[2].phase, kUp);
+    EXPECT_EQ(events[3].phase, kRemove);
+    EXPECT_EQ(events[0].timestamp, 2000u);
+    EXPECT_EQ(events[1].timestamp, 3000u);
+    EXPECT_EQ(events[2].timestamp, 34000u);
+    EXPECT_EQ(events[3].timestamp, 35000u);
+    for (const FlutterPointerEvent &event : events) {
+      EXPECT_EQ(event.struct_size, sizeof(FlutterPointerEvent));
+      EXPECT_EQ(event.device_kind, kFlutterPointerDeviceKindTouch);
+      EXPECT_EQ(event.device, 1);
+      EXPECT_EQ(event.x, static_cast<double>(width) * 0.5);
+      EXPECT_EQ(event.y, static_cast<double>(height) * 0.5);
+    }
+  }
+  std::array<FlutterPointerEvent, pluto::kDirectTouchTapEventCount> events{};
+  EXPECT_FALSE(pluto::build_direct_touch_tap_events(-1.0, 1.0, 0, &events));
+  EXPECT_FALSE(pluto::build_direct_touch_tap_events(1.0, 1.0, 0, nullptr));
+}
+
+TEST(EngineHostTouchInput,
+     SwitcherTapAuthorizationRequiresOwnedRegularDistinctTarget) {
+  TempBundle state_dir("switcher-state");
+  const std::filesystem::path state = state_dir.path() / "switcher-active";
+  const auto write_state = [&](const std::string &contents) {
+    std::ofstream output(state, std::ios::trunc);
+    output << contents;
+  };
+
+  write_state("dev.pluto.ink\ndev.pluto.codex\ndev.example.counter\n");
+  const std::optional<std::string> valid =
+      pluto::read_direct_switcher_target(state_dir.path().string());
+  ASSERT_TRUE(valid.has_value());
+  EXPECT_EQ(*valid, "dev.pluto.codex");
+
+  write_state("dev.pluto.ink\n");
+  EXPECT_FALSE(pluto::read_direct_switcher_target(state_dir.path().string())
+                   .has_value());
+  write_state("dev.pluto.ink\ndev.pluto.ink\n");
+  EXPECT_FALSE(pluto::read_direct_switcher_target(state_dir.path().string())
+                   .has_value());
+  write_state("dev.pluto.ink\n../unsafe\n");
+  EXPECT_FALSE(pluto::read_direct_switcher_target(state_dir.path().string())
+                   .has_value());
+
+  std::filesystem::remove(state);
+  const std::filesystem::path target = state_dir.path() / "real-state";
+  std::ofstream(target) << "dev.pluto.ink\ndev.pluto.codex\n";
+  std::filesystem::create_symlink(target, state);
+  EXPECT_FALSE(pluto::read_direct_switcher_target(state_dir.path().string())
+                   .has_value());
+  std::filesystem::remove(state);
+  std::filesystem::create_hard_link(target, state);
+  EXPECT_FALSE(pluto::read_direct_switcher_target(state_dir.path().string())
+                   .has_value());
+}
+
 TEST(EngineHostConfig, RejectsRelativeReadyFileBeforeStartup) {
   pluto::EngineHostConfig config;
   config.ready_file_path = "relative/ready";
@@ -238,4 +305,4 @@ TEST(EngineHostPaths, MissingAotElfDefaultsToCanonicalLayout) {
             (bundle.path() / "lib/app.so").string());
 }
 
-}  // namespace
+} // namespace

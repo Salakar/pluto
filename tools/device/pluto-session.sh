@@ -827,6 +827,15 @@ launch_app() {
     log "could not allocate fresh nonce-bound renderer receipts"
     return 74
   }
+  app_path="$ROOT/bin:${PATH:-/usr/bin:/bin}"
+  paper_codex_bin=""
+  if [ "$id" = dev.pluto.codex ] && [ -x "$ROOT/bin/codex" ]; then
+    # The ARMv7 release payload installs its pinned target-native CLI here.
+    # Keep lookup common and explicit instead of requiring a device-specific
+    # user PATH. Move can continue to use its user-owned standard candidates
+    # when the payload has no target-native binary.
+    paper_codex_bin="$ROOT/bin/codex"
+  fi
   log "launch embedder for '$id' ($mode, rotation=$ROTATION_DEG allowed=$ALLOWED_ROTATIONS auto=$AUTO_ROTATE)"
   set -- "$ROOT/bin/pluto-embedder" "--$mode" \
     --bundle="$dir/bundle" \
@@ -878,6 +887,8 @@ launch_app() {
   PLUTO_DATA_DIR="$ROOT/appdata" \
   PLUTO_CONFIG_DIR="$ROOT/state/launcher-config" \
   PLUTO_APP_ID="$id" \
+  PAPER_CODEX_BIN="$paper_codex_bin" \
+  PATH="$app_path" \
     "$@" >"$ROOT/logs/$id.log" 2>&1 &
   app_pid=$!
   ln -sf "$ROOT/logs/$id.log" "$ROOT/logs/current.log"

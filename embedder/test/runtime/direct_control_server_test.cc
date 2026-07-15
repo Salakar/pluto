@@ -20,9 +20,9 @@ namespace {
 using pluto::DirectControlFailure;
 using pluto::DirectControlServer;
 using pluto::DirectControlServerConfig;
+using pluto::DirectPointerResult;
 using pluto::DirectScreenshotCapture;
 using pluto::DirectScreenshotSurface;
-using pluto::DirectStrokeResult;
 
 std::filesystem::path unique_run_dir() {
   static std::atomic<std::uint64_t> sequence{1};
@@ -74,9 +74,10 @@ TEST(DirectControlServerTest, DispatchesRootLocalInkStrokeAndReturnsIdentity) {
   DirectControlServerConfig config = config_for(run_dir);
   std::string received_app;
   config.draw_stroke = [&](const std::string &app_id,
-                           DirectStrokeResult *result, DirectControlFailure *) {
+                           DirectPointerResult *result,
+                           DirectControlFailure *) {
     received_app = app_id;
-    *result = DirectStrokeResult{
+    *result = DirectPointerResult{
         .app_id = app_id,
         .pid = static_cast<std::int64_t>(::getpid()),
         .event_count = 24,
@@ -99,11 +100,72 @@ TEST(DirectControlServerTest, DispatchesRootLocalInkStrokeAndReturnsIdentity) {
   std::filesystem::remove_all(run_dir);
 }
 
+TEST(DirectControlServerTest,
+     DispatchesBoundedSwitcherPreviewTapAndReturnsIdentity) {
+  const std::filesystem::path run_dir = unique_run_dir();
+  DirectControlServerConfig config = config_for(run_dir);
+  std::string received_app;
+  config.tap_switcher_preview = [&](const std::string &app_id,
+                                    DirectPointerResult *result,
+                                    DirectControlFailure *) {
+    received_app = app_id;
+    *result = DirectPointerResult{
+        .app_id = app_id,
+        .pid = static_cast<std::int64_t>(::getpid()),
+        .event_count = 4,
+    };
+    return true;
+  };
+
+  DirectControlServer server(std::move(config));
+  std::string error;
+  ASSERT_TRUE(server.start(&error)) << error;
+  const std::string response = request(
+      server.socket_path(),
+      R"({"schema":1,"requestId":"switch-1","action":"tap-switcher-preview","appId":"dev.pluto.launcher"})");
+  EXPECT_EQ(received_app, "dev.pluto.launcher");
+  EXPECT_NE(response.find(R"("ok":true)"), std::string::npos) << response;
+  EXPECT_NE(response.find(R"("appId":"dev.pluto.launcher")"), std::string::npos)
+      << response;
+  EXPECT_NE(response.find(R"("eventCount":4)"), std::string::npos) << response;
+  server.stop();
+  std::filesystem::remove_all(run_dir);
+}
+
+TEST(DirectControlServerTest, RejectsSwitcherTapWithNonExactEventReceipt) {
+  const std::filesystem::path run_dir = unique_run_dir();
+  DirectControlServerConfig config = config_for(run_dir);
+  config.tap_switcher_preview = [](const std::string &app_id,
+                                   DirectPointerResult *result,
+                                   DirectControlFailure *) {
+    *result = DirectPointerResult{
+        .app_id = app_id,
+        .pid = static_cast<std::int64_t>(::getpid()),
+        .event_count = 5,
+    };
+    return true;
+  };
+
+  DirectControlServer server(std::move(config));
+  std::string error;
+  ASSERT_TRUE(server.start(&error)) << error;
+  const std::string response = request(
+      server.socket_path(),
+      R"({"schema":1,"requestId":"switch-invalid","action":"tap-switcher-preview","appId":"dev.pluto.launcher"})");
+  EXPECT_NE(response.find(R"("ok":false)"), std::string::npos) << response;
+  EXPECT_NE(response.find("tap-switcher-preview callback returned invalid "
+                          "metadata"),
+            std::string::npos)
+      << response;
+  server.stop();
+  std::filesystem::remove_all(run_dir);
+}
+
 TEST(DirectControlServerTest, RejectsNullAppAndScreenshotOnlyFields) {
   const std::filesystem::path run_dir = unique_run_dir();
   DirectControlServerConfig config = config_for(run_dir);
   int calls = 0;
-  config.draw_stroke = [&](const std::string &, DirectStrokeResult *,
+  config.draw_stroke = [&](const std::string &, DirectPointerResult *,
                            DirectControlFailure *) {
     ++calls;
     return false;
@@ -126,6 +188,13 @@ TEST(DirectControlServerTest, RejectsNullAppAndScreenshotOnlyFields) {
   EXPECT_NE(surface.find("does not accept a screenshot surface"),
             std::string::npos)
       << surface;
+  const std::string tap_null = request(
+      server.socket_path(),
+      R"({"schema":1,"requestId":"tap-null","action":"tap-switcher-preview","appId":null})");
+  EXPECT_NE(tap_null.find(R"("ok":false)"), std::string::npos) << tap_null;
+  EXPECT_NE(tap_null.find("tap-switcher-preview requires a concrete appId"),
+            std::string::npos)
+      << tap_null;
   EXPECT_EQ(calls, 0);
   server.stop();
   std::filesystem::remove_all(run_dir);
@@ -150,9 +219,9 @@ TEST(DirectControlServerTest, FailsClosedWithoutAValidStrokeResult) {
   const std::filesystem::path invalid_dir = unique_run_dir();
   DirectControlServerConfig invalid_config = config_for(invalid_dir);
   invalid_config.draw_stroke = [](const std::string &,
-                                  DirectStrokeResult *result,
+                                  DirectPointerResult *result,
                                   DirectControlFailure *) {
-    *result = DirectStrokeResult{
+    *result = DirectPointerResult{
         .app_id = "dev.pluto.examples.counter",
         .pid = static_cast<std::int64_t>(::getpid()),
         .event_count = 24,

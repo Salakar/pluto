@@ -326,6 +326,20 @@ void main() {
     },
   );
 
+  testWidgets('switcher center tap selects first preview on Move', (
+    WidgetTester tester,
+  ) async {
+    _setMoveViewport(tester);
+    await _expectSwitcherCenterTapSelectsFirstPreview(tester);
+  });
+
+  testWidgets('switcher center tap selects first preview on RM1 and RM2', (
+    WidgetTester tester,
+  ) async {
+    _setRm12Viewport(tester);
+    await _expectSwitcherCenterTapSelectsFirstPreview(tester);
+  });
+
   testWidgets('missing switcher preview follows the live RM1/RM2 surface', (
     WidgetTester tester,
   ) async {
@@ -1061,6 +1075,29 @@ void _setRm12Viewport(WidgetTester tester) {
   tester.view.devicePixelRatio = 226 / 160;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+Future<void> _expectSwitcherCenterTapSelectsFirstPreview(
+  WidgetTester tester,
+) async {
+  final _Harness harness = _Harness();
+  harness.session.switcherRequest = AppSwitcherRequest(
+    originAppId: AppId.tryParse('dev.pluto.ink')!,
+    previews: <AppSwitcherPreview>[
+      AppSwitcherPreview(appId: AppId.tryParse('dev.example.weather')!),
+      AppSwitcherPreview(appId: AppId.tryParse('dev.example.counter')!),
+    ],
+  );
+  await tester.pumpWidget(PlutoLauncherApp(services: harness.services));
+  await tester.pumpAndSettle();
+
+  expect(find.byType(AppSwitcherScreen), findsOneWidget);
+  final Offset physicalCenter = tester.view.physicalSize.center(Offset.zero);
+  await tester.tapAt(physicalCenter / tester.view.devicePixelRatio);
+  await tester.pump(const Duration(milliseconds: 100));
+
+  expect(harness.session.launchedApps, hasLength(1));
+  expect(harness.session.launchedApps.single.value, 'dev.example.weather');
 }
 
 final class _Harness {

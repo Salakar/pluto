@@ -162,8 +162,11 @@ private:
                             const std::optional<std::string> &requested_app_id,
                             DirectScreenshotCapture *capture,
                             DirectControlFailure *failure);
+  bool send_direct_switcher_preview_tap(const std::string &requested_app_id,
+                                        DirectPointerResult *result,
+                                        DirectControlFailure *failure);
   bool send_direct_ink_stroke(const std::string &requested_app_id,
-                              DirectStrokeResult *result,
+                              DirectPointerResult *result,
                               DirectControlFailure *failure);
   std::string hibernate_marker_path() const;
   bool publish_hibernate_marker() const;
@@ -256,6 +259,13 @@ FlutterWindowMetricsEvent
 window_metrics_for_config(const EngineHostConfig &config);
 
 inline constexpr std::size_t kDirectInkStrokeEventCount = 24;
+inline constexpr std::size_t kDirectTouchTapEventCount = 4;
+
+// Builds the normal add/down/up/remove touch sequence used by the synthetic
+// host option and the switcher acceptance control.
+bool build_direct_touch_tap_events(
+    double x, double y, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectTouchTapEventCount> *events);
 
 // Builds the deterministic stylus packet used by the root-local acceptance
 // control. Keeping geometry and phase sequencing pure makes the real pointer
@@ -263,6 +273,13 @@ inline constexpr std::size_t kDirectInkStrokeEventCount = 24;
 bool build_direct_ink_stroke_events(
     std::int32_t width, std::int32_t height, std::size_t started_us,
     std::array<FlutterPointerEvent, kDirectInkStrokeEventCount> *events);
+
+// Reads the first selectable app from the supervisor-owned switcher state.
+// The acceptance control uses this as an authorization gate before injecting a
+// center tap. Symlinks, non-regular/unowned/multiply-linked files, malformed
+// ids, a missing target, and a same-as-origin target all fail closed.
+std::optional<std::string>
+read_direct_switcher_target(const std::string &run_dir);
 
 } // namespace pluto
 

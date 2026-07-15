@@ -137,6 +137,7 @@ int hex_value(char value) {
 
 enum class DirectAction : std::uint8_t {
   kScreenshot,
+  kTapSwitcherPreview,
   kDrawStroke,
 };
 
@@ -240,7 +241,9 @@ public:
       return fail(failure, "bad-request-id",
                   "requestId must be 1-128 printable ASCII bytes");
     }
-    if (!have_action || (action != "screenshot" && action != "draw-stroke")) {
+    if (!have_action ||
+        (action != "screenshot" && action != "tap-switcher-preview" &&
+         action != "draw-stroke")) {
       return fail(failure, "bad-action", "unsupported control action");
     }
     if (!have_app_id) {
@@ -265,14 +268,21 @@ public:
                     "surface must be logical or post-dither");
       }
     } else {
-      request->action = DirectAction::kDrawStroke;
+      request->action = action == "tap-switcher-preview"
+                            ? DirectAction::kTapSwitcherPreview
+                            : DirectAction::kDrawStroke;
       if (!request->app_id.has_value()) {
         return fail(failure, "bad-args",
-                    "draw-stroke requires a concrete appId");
+                    action == "tap-switcher-preview"
+                        ? "tap-switcher-preview requires a concrete appId"
+                        : "draw-stroke requires a concrete appId");
       }
       if (have_surface) {
-        return fail(failure, "bad-args",
-                    "draw-stroke does not accept a screenshot surface");
+        return fail(
+            failure, "bad-args",
+            action == "tap-switcher-preview"
+                ? "tap-switcher-preview does not accept a screenshot surface"
+                : "draw-stroke does not accept a screenshot surface");
       }
     }
     return true;
@@ -1012,8 +1022,13 @@ private:
       return {failure_response(request.request_id, std::move(failure)), {}};
     }
 
+    if (request.action == DirectAction::kTapSwitcherPreview) {
+      return dispatch_pointer_action(request, config_.tap_switcher_preview,
+                                     "tap-switcher-preview", 4, 4, &failure);
+    }
     if (request.action == DirectAction::kDrawStroke) {
-      return dispatch_draw_stroke(request, &failure);
+      return dispatch_pointer_action(request, config_.draw_stroke,
+                                     "draw-stroke", 4, 256, &failure);
     }
 
     DirectScreenshotCapture capture;
@@ -1072,43 +1087,51 @@ private:
     return {std::move(response), std::move(leaf)};
   }
 
-  DispatchResult dispatch_draw_stroke(const ParsedRequest &request,
-                                      DirectControlFailure *failure) {
-    if (!config_.draw_stroke || !request.app_id.has_value()) {
-      return {failure_response(
-                  request.request_id,
-                  {"unavailable", "programmatic stroke is not available"}),
-              {}};
+  DispatchResult dispatch_pointer_action(const ParsedRequest &request,
+                                         const DirectPointerHandler &handler,
+                                         std::string_view action_name,
+                                         std::size_t minimum_events,
+                                         std::size_t maximum_events,
+                                         DirectControlFailure *failure) {
+    const std::string unavailable =
+        action_name == "draw-stroke"
+            ? "programmatic stroke is not available"
+            : "programmatic switcher tap is not available";
+    if (!handler || !request.app_id.has_value()) {
+      return {
+          failure_response(request.request_id, {"unavailable", unavailable}),
+          {}};
     }
 
-    DirectStrokeResult result;
-    bool drawn = false;
+    DirectPointerResult result;
+    bool delivered = false;
     try {
-      drawn = config_.draw_stroke(*request.app_id, &result, failure);
+      delivered = handler(*request.app_id, &result, failure);
     } catch (const std::exception &exception) {
       failure->code = "internal";
       failure->message =
-          std::string("draw-stroke callback failed: ") + exception.what();
+          std::string(action_name) + " callback failed: " + exception.what();
     } catch (...) {
       failure->code = "internal";
-      failure->message = "draw-stroke callback failed";
+      failure->message = std::string(action_name) + " callback failed";
     }
-    if (!drawn) {
+    if (!delivered) {
       if (failure->code.empty()) {
         failure->code = "unavailable";
       }
       if (failure->message.empty()) {
-        failure->message = "programmatic stroke is not available";
+        failure->message = unavailable;
       }
       return {failure_response(request.request_id, std::move(*failure)), {}};
     }
     if (result.app_id != *request.app_id || result.pid <= 0 ||
-        result.event_count < 4 || result.event_count > 256) {
-      return {
-          failure_response(
-              request.request_id,
-              {"internal", "draw-stroke callback returned invalid metadata"}),
-          {}};
+        result.event_count < minimum_events ||
+        result.event_count > maximum_events) {
+      return {failure_response(
+                  request.request_id,
+                  {"internal", std::string(action_name) +
+                                   " callback returned invalid metadata"}),
+              {}};
     }
 
     std::string response =

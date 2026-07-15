@@ -34,6 +34,7 @@ mkdir -p \
   "$ROOT/launcher/bundle/lib" \
   "$ROOT/apps/dev.example.debug/bundle/flutter_assets" \
   "$ROOT/apps/dev.example.release/bundle/lib" \
+  "$ROOT/apps/dev.pluto.codex/bundle/lib" \
   "$ROOT/logs" \
   "$ROOT/state" \
   "$TMP/lpgpr" \
@@ -46,10 +47,16 @@ mkdir -p \
 : > "$ROOT/apps/dev.example.debug/bundle/icudtl.dat"
 : > "$ROOT/apps/dev.example.release/bundle/lib/app.so"
 : > "$ROOT/apps/dev.example.release/bundle/icudtl.dat"
+: > "$ROOT/apps/dev.pluto.codex/bundle/lib/app.so"
+: > "$ROOT/apps/dev.pluto.codex/bundle/icudtl.dat"
+: > "$ROOT/bin/codex"
 cat > "$ROOT/launcher/manifest.json" <<'JSON'
 {"display":{"orientations":["portrait","portraitDown","landscapeLeft","landscapeRight"],"defaultOrientation":"portrait"}}
 JSON
 cat > "$ROOT/apps/dev.example.release/manifest.json" <<'JSON'
+{"display":{"orientations":["portrait"],"defaultOrientation":"portrait"}}
+JSON
+cat > "$ROOT/apps/dev.pluto.codex/manifest.json" <<'JSON'
 {"display":{"orientations":["portrait"],"defaultOrientation":"portrait"}}
 JSON
 printf '100.0 0.0\n' > "$TMP/uptime"
@@ -114,6 +121,8 @@ printf 'fixture-nonce\n' > "$TMP/nonce"
 cat > "$ROOT/bin/pluto-embedder" <<'EMBEDDER'
 #!/bin/sh
 printf '%s %s\n' "$PLUTO_APP_ID" "$*" >> "$PLUTO_TEST_INVOCATIONS"
+printf '%s|%s|%s\n' "$PLUTO_APP_ID" "${PAPER_CODEX_BIN:-}" "$PATH" >> \
+  "$PLUTO_TEST_ENVIRONMENTS"
 ready_file=""
 health_file=""
 for arg in "$@"; do
@@ -137,16 +146,17 @@ case "$PLUTO_APP_ID" in
     case "$count" in
       1)
         wait_count=0
-        while [ ! -s "$PLUTO_TEST_BOOT_CONFIRM_COUNT" ] &&
+        while [ ! -s "$PLUTO_ROOT/state/boot-confirmed" ] &&
               [ "$wait_count" -lt 60 ]; do
           sleep 0.05
           wait_count=$((wait_count + 1))
         done
-        [ -s "$PLUTO_TEST_BOOT_CONFIRM_COUNT" ] || exit 66
+        [ -s "$PLUTO_ROOT/state/boot-confirmed" ] || exit 66
         printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/launch"
         ;;
       2) printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/debug-launch" ;;
       3) printf 'dev.example.release\n' > "$PLUTO_RUN_DIR/launch" ;;
+      4) printf 'dev.pluto.codex\n' > "$PLUTO_RUN_DIR/launch" ;;
       *) : > "$PLUTO_RUN_DIR/stock" ;;
     esac
     ;;
@@ -156,6 +166,9 @@ case "$PLUTO_APP_ID" in
     printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/launch"
     ;;
   dev.example.release)
+    printf 'dev.pluto.launcher\n' > "$PLUTO_RUN_DIR/launch"
+    ;;
+  dev.pluto.codex)
     : > "$PLUTO_RUN_DIR/stock"
     ;;
   *) exit 99 ;;
@@ -163,7 +176,7 @@ esac
 sleep 0.2
 EMBEDDER
 chmod +x "$TMP/bin/systemctl" "$TMP/bin/xochitl" \
-  "$TMP/bin/boot-recovery" "$ROOT/bin/pluto-embedder"
+  "$TMP/bin/boot-recovery" "$ROOT/bin/pluto-embedder" "$ROOT/bin/codex"
 
 start_session() {
   PATH="$TMP/bin:$PATH" \
@@ -185,6 +198,7 @@ start_session() {
   PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
   PLUTO_UPTIME_FILE="$TMP/uptime" \
   PLUTO_TEST_INVOCATIONS="$TMP/invocations" \
+  PLUTO_TEST_ENVIRONMENTS="$TMP/environments" \
   PLUTO_TEST_LAUNCHER_COUNT="$TMP/launcher-count" \
   PLUTO_TEST_STOCK_PID="$TMP/stock-pid" \
   PLUTO_TEST_STOCK_ARGS="$TMP/stock-args" \
@@ -212,12 +226,18 @@ fi
 wait "$SESSION_PID" || fail "supervisor returned failure"
 SESSION_PID=""
 
-[ "$(grep -c '^dev.pluto.launcher ' "$TMP/invocations")" -eq 3 ] ||
-  fail "expected three launcher handoffs"
+[ "$(grep -c '^dev.pluto.launcher ' "$TMP/invocations")" -eq 4 ] ||
+  fail "expected four launcher handoffs"
 [ "$(grep -c '^dev.example.debug .*--debug' "$TMP/invocations")" -eq 1 ] ||
   fail "debug embedder must run exactly once for the explicit authorization"
 [ "$(grep -c '^dev.example.release .*--release' "$TMP/invocations")" -eq 1 ] ||
   fail "ordinary release AOT launch changed unexpectedly"
+[ "$(grep -c '^dev.pluto.codex .*--release' "$TMP/invocations")" -eq 1 ] ||
+  fail "Codex release AOT launch changed unexpectedly"
+grep -Fq "dev.pluto.codex|$ROOT/bin/codex|$ROOT/bin:" "$TMP/environments" ||
+  fail "Codex did not receive the installed target-native binary and runtime PATH"
+grep -Fq "dev.example.release||$ROOT/bin:" "$TMP/environments" ||
+  fail "ordinary app inherited a Codex override or missed the common runtime PATH"
 grep -q '^dev.pluto.launcher .*--rotation=0 .*--allowed-rotations=0,180,90,270 .*--auto-rotate' "$TMP/invocations" ||
   fail "launcher did not receive its four-orientation Auto policy"
 grep -q '^dev.example.release .*--rotation=0 .*--allowed-rotations=0 ' "$TMP/invocations" ||

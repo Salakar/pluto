@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -81,6 +82,69 @@ int32_t degrees_for_sensor_orientation(SensorOrientation orientation) {
 }
 
 } // namespace
+
+std::optional<std::string>
+read_direct_switcher_target(const std::string &run_dir) {
+  constexpr std::size_t kMaximumStateBytes = 4096;
+  const std::filesystem::path path =
+      std::filesystem::path(run_dir) / "switcher-active";
+  const int fd =
+      ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0) {
+    return std::nullopt;
+  }
+  struct stat metadata {};
+  if (::fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+      metadata.st_uid != ::geteuid() || metadata.st_nlink != 1 ||
+      metadata.st_size <= 0 ||
+      static_cast<std::uint64_t>(metadata.st_size) > kMaximumStateBytes) {
+    ::close(fd);
+    return std::nullopt;
+  }
+
+  std::string state(static_cast<std::size_t>(metadata.st_size), '\0');
+  std::size_t offset = 0;
+  while (offset < state.size()) {
+    const ssize_t count =
+        ::read(fd, state.data() + offset, state.size() - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    ::close(fd);
+    return std::nullopt;
+  }
+  ::close(fd);
+
+  const std::size_t first_end = state.find('\n');
+  const std::size_t second_end = first_end == std::string::npos
+                                     ? std::string::npos
+                                     : state.find('\n', first_end + 1);
+  if (first_end == std::string::npos || second_end == std::string::npos ||
+      first_end == 0 || second_end == first_end + 1) {
+    return std::nullopt;
+  }
+  const std::string_view origin(state.data(), first_end);
+  const std::string_view target(state.data() + first_end + 1,
+                                second_end - first_end - 1);
+  const auto valid_app_id = [](std::string_view value) {
+    if (value.empty() || value.size() > 128) {
+      return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](const char byte) {
+      return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+             (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' ||
+             byte == '-';
+    });
+  };
+  if (!valid_app_id(origin) || !valid_app_id(target) || origin == target) {
+    return std::nullopt;
+  }
+  return std::string(target);
+}
 
 const char *engine_mode_name(EngineMode mode) {
   switch (mode) {
@@ -401,27 +465,12 @@ bool EngineHost::send_synthetic_tap(double x, double y) {
     return false;
   }
   const size_t now_us = static_cast<size_t>(event_loop_.now_nanos() / 1000ull);
-  FlutterPointerEvent events[4]{};
-  auto fill = [&](size_t index, FlutterPointerPhase phase, size_t delta_us) {
-    events[index].struct_size = sizeof(FlutterPointerEvent);
-    events[index].phase = phase;
-    events[index].timestamp = now_us + delta_us;
-    events[index].x = x;
-    events[index].y = y;
-    events[index].device = 1;
-    events[index].signal_kind = kFlutterPointerSignalKindNone;
-    events[index].device_kind = kFlutterPointerDeviceKindTouch;
-    events[index].view_id = 0;
-    events[index].pressure = phase == kDown || phase == kMove ? 1.0 : 0.0;
-    events[index].pressure_min = 0.0;
-    events[index].pressure_max = 1.0;
-  };
-  fill(0, kAdd, 0);
-  fill(1, kDown, 1000);
-  fill(2, kUp, 32000);
-  fill(3, kRemove, 33000);
-  return engine_library_.procs().SendPointerEvent(engine_, events, 4) ==
-         kSuccess;
+  std::array<FlutterPointerEvent, kDirectTouchTapEventCount> events{};
+  if (!build_direct_touch_tap_events(x, y, now_us, &events)) {
+    return false;
+  }
+  return engine_library_.procs().SendPointerEvent(engine_, events.data(),
+                                                  events.size()) == kSuccess;
 }
 
 bool EngineHost::transition_lifecycle(LifecycleState state) {
@@ -560,8 +609,39 @@ bool build_direct_ink_stroke_events(
   return true;
 }
 
+bool build_direct_touch_tap_events(
+    double x, double y, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectTouchTapEventCount> *events) {
+  if (events == nullptr || !std::isfinite(x) || !std::isfinite(y) || x < 0.0 ||
+      y < 0.0) {
+    return false;
+  }
+  *events = {};
+  const auto fill = [&](std::size_t index, FlutterPointerPhase phase,
+                        std::size_t delta_us) {
+    FlutterPointerEvent &event = (*events)[index];
+    event.struct_size = sizeof(FlutterPointerEvent);
+    event.phase = phase;
+    event.timestamp = started_us + delta_us;
+    event.x = x;
+    event.y = y;
+    event.device = 1;
+    event.signal_kind = kFlutterPointerSignalKindNone;
+    event.device_kind = kFlutterPointerDeviceKindTouch;
+    event.view_id = 0;
+    event.pressure = phase == kDown || phase == kMove ? 1.0 : 0.0;
+    event.pressure_min = 0.0;
+    event.pressure_max = 1.0;
+  };
+  fill(0, kAdd, 0);
+  fill(1, kDown, 1000);
+  fill(2, kUp, 32000);
+  fill(3, kRemove, 33000);
+  return true;
+}
+
 bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
-                                        DirectStrokeResult *result,
+                                        DirectPointerResult *result,
                                         DirectControlFailure *failure) {
   const auto fail = [failure](const char *code, const char *message) {
     if (failure != nullptr) {
@@ -602,10 +682,60 @@ bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
     return fail("pointer-send-failed",
                 "Flutter rejected the programmatic Ink stroke");
   }
-  *result = DirectStrokeResult{
+  *result = DirectPointerResult{
       .app_id = config_.app_id,
       .pid = static_cast<std::int64_t>(::getpid()),
       .event_count = events.size(),
+  };
+  return true;
+}
+
+bool EngineHost::send_direct_switcher_preview_tap(
+    const std::string &requested_app_id, DirectPointerResult *result,
+    DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (result == nullptr || failure == nullptr) {
+    return false;
+  }
+  if (requested_app_id != config_.app_id) {
+    return fail("wrong-app", "requested app is not the foreground embedder");
+  }
+  if (config_.app_id != "dev.pluto.launcher") {
+    return fail("unsupported-app",
+                "tap-switcher-preview is restricted to Pluto Home");
+  }
+  if (engine_ == nullptr || !engine_library_.loaded()) {
+    return fail("unavailable", "Flutter engine is unavailable");
+  }
+
+  // The center of every responsive switcher viewport is inside the selected
+  // preview. Require the supervisor-authored activation to contain an actual
+  // non-origin target before sending a pointer; this keeps the acceptance-only
+  // control from turning into a generic launcher automation endpoint.
+  if (!read_direct_switcher_target(config_.run_dir).has_value()) {
+    return fail("unavailable", "no selectable switcher preview is active");
+  }
+
+  const double width = static_cast<double>(logical_width(config_));
+  const double height = static_cast<double>(logical_height(config_));
+  if (width <= 0.0 || height <= 0.0) {
+    return fail("invalid-geometry",
+                "panel geometry cannot host a switcher tap");
+  }
+  if (!send_synthetic_tap(width * 0.5, height * 0.5)) {
+    return fail("pointer-send-failed",
+                "Flutter rejected the programmatic switcher tap");
+  }
+  *result = DirectPointerResult{
+      .app_id = config_.app_id,
+      .pid = static_cast<std::int64_t>(::getpid()),
+      .event_count = kDirectTouchTapEventCount,
   };
   return true;
 }
@@ -624,9 +754,15 @@ void EngineHost::start_foreground_services() {
                                              failure);
           };
       control.draw_stroke = [this](const std::string &requested_app_id,
-                                   DirectStrokeResult *result,
+                                   DirectPointerResult *result,
                                    DirectControlFailure *failure) {
         return send_direct_ink_stroke(requested_app_id, result, failure);
+      };
+      control.tap_switcher_preview = [this](const std::string &requested_app_id,
+                                            DirectPointerResult *result,
+                                            DirectControlFailure *failure) {
+        return send_direct_switcher_preview_tap(requested_app_id, result,
+                                                failure);
       };
       direct_control_server_ =
           std::make_unique<DirectControlServer>(std::move(control));
