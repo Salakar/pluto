@@ -45,6 +45,7 @@ bash tools/device/test/pluto-session-once_test.sh
 bash tools/device/test/pluto-session-warm-resume_test.sh
 bash tools/device/test/pluto-session-switcher_test.sh
 bash tools/device/test/pluto-session-power-menu_test.sh
+bash tools/device/test/acceptance-metrics_test.sh
 bash tools/device/test/pluto-boot-install_test.sh
 bash tools/device/test/pluto-uninstall_test.sh
 sh tools/device/test/device-profiles_test.sh
