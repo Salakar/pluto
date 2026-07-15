@@ -224,6 +224,7 @@ final class DeviceRuntimeProfile {
     required this.nativeSessionEnabled,
     required this.firmwareBuild,
     required this.kernelRelease,
+    required this.maxResidentApps,
     required this.takeoverQuiesceMilliseconds,
     required this.displayDevice,
     required this.display,
@@ -249,6 +250,9 @@ final class DeviceRuntimeProfile {
 
   /// Exact `uname -r` release admitted by this runtime contract.
   final String kernelRelease;
+
+  /// Total resident release/profile processes, including the foreground app.
+  final int maxResidentApps;
 
   /// Delay after stock UI shutdown before native code claims panel ownership.
   final int takeoverQuiesceMilliseconds;

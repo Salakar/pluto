@@ -109,13 +109,12 @@ PATH="$TMP/bin:$PATH" \
 PLUTO_ROOT="$ROOT" \
 PLUTO_PROFILE_FILE="$PROFILE_FILE" \
 PLUTO_TESTING=1 \
-PLUTO_TEST_PROFILE_ID=move \
+PLUTO_TEST_PROFILE_ID=rm1 \
 PLUTO_RUN_DIR="$CTL" \
 PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
 PLUTO_UPTIME_FILE="$TMP/uptime" \
 PLUTO_HIBERNATE_WAIT_TICKS=240 \
 PLUTO_RESUME_WAIT_TICKS=120 \
-PLUTO_MAX_WARM_APPS=2 \
 PLUTO_TEST_SLOW_HIBERNATE_APP=dev.pluto.launcher \
 PLUTO_TEST_STARTS="$TMP/starts" \
 PLUTO_TEST_INVOCATIONS="$TMP/invocations" \
@@ -128,6 +127,8 @@ for _ in $(seq 1 220); do
   sleep 0.05
 done
 [ -n "${launcher_pid:-}" ] || fail "launcher never became foreground"
+grep -q 'profile accepted: rm1 .* resident=2' "$TMP/session.log" ||
+  fail "RM1 generated resident-process limit was not applied"
 wait_for_value "$TMP/starts/dev.pluto.launcher" 1 ||
   fail "launcher test process did not finish installing signal handlers"
 wait_for_file "$TMP/starts/dev.pluto.launcher.ready" ||
@@ -178,7 +179,7 @@ for _ in $(seq 1 120); do
   sleep 0.05
 done
 kill -0 "$paper_pid" 2>/dev/null &&
-  fail "LRU did not evict the oldest app at the configured limit"
+  fail "LRU did not evict the oldest app at the RM1 profile limit"
 [ ! -e "$CTL/warm-apps/dev.example.paper.pid" ] ||
   fail "LRU left the evicted app registered"
 [ "$(find "$CTL/warm-apps" -name '*.pid' -type f | wc -l | tr -d ' ')" -eq 2 ] ||

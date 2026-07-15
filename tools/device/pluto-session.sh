@@ -36,9 +36,9 @@ BOOT_FATAL_FILE="$CTL/boot-fatal"
 WARM_DIR="$CTL/warm-apps"
 HIBERNATED_DIR="$CTL/hibernated"
 # Total resident release/profile processes, including the foreground app.
-# Four keeps launcher + three recent apps instant while bounding RAM on the
-# device. Set to 1 to retain the protocol but effectively disable caching.
-MAX_WARM_APPS="${PLUTO_MAX_WARM_APPS:-4}"
+# The generated device profile owns this production memory policy. Tests may
+# exercise smaller pools through the guarded PLUTO_MAX_WARM_APPS seam.
+MAX_RESIDENT_APPS=""
 # Native detach owns a 5s optical fence before renderer encoding, atomic tmpfs
 # publication, presenter close, and marker publication. Keep the supervisor's
 # envelope strictly wider so a safe exact-color close is never killed at its
@@ -241,6 +241,11 @@ configure_profile() {
   fi
   # shellcheck source=generated/device-profiles.sh
   . "$PROFILE_FILE"
+  if [ "${PLUTO_TESTING:-0}" != 1 ] &&
+     [ "${PLUTO_MAX_WARM_APPS+x}" = x ]; then
+    log "profile rejected: PLUTO_MAX_WARM_APPS is test-only"
+    return 78
+  fi
   if [ -n "${PLUTO_TEST_PROFILE_ID:-}" ]; then
     if [ "${PLUTO_TESTING:-0}" != 1 ]; then
       log "profile rejected: test identity override outside test mode"
@@ -266,6 +271,17 @@ configure_profile() {
   if ! is_uint "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" ||
      [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" -gt 10000 ]; then
     log "profile rejected: panel takeover quiesce is invalid"
+    return 78
+  fi
+  MAX_RESIDENT_APPS="${PLUTO_PROFILE_MAX_RESIDENT_APPS:-}"
+  if [ "${PLUTO_TESTING:-0}" = 1 ] &&
+     [ "${PLUTO_MAX_WARM_APPS+x}" = x ]; then
+    MAX_RESIDENT_APPS="$PLUTO_MAX_WARM_APPS"
+  fi
+  if ! is_uint "$MAX_RESIDENT_APPS" ||
+     [ "$MAX_RESIDENT_APPS" -lt 1 ] ||
+     [ "$MAX_RESIDENT_APPS" -gt 8 ]; then
+    log "profile rejected: resident app limit is invalid"
     return 78
   fi
   validate_profile_runtime_identity || return $?
@@ -338,7 +354,7 @@ configure_profile() {
   export PLUTO_BEZEL_REDRAW_IIO="$BEZEL_REDRAW_IIO"
   export PLUTO_BEZEL_REDRAW_ENABLE="$BEZEL_REDRAW_ENABLE"
   PROFILE_CONFIGURED=1
-  log "profile accepted: $PLUTO_PROFILE_ID driver=$PLUTO_PROFILE_DISPLAY_DRIVER target=$PLUTO_PROFILE_TARGET"
+  log "profile accepted: $PLUTO_PROFILE_ID driver=$PLUTO_PROFILE_DISPLAY_DRIVER target=$PLUTO_PROFILE_TARGET resident=$MAX_RESIDENT_APPS"
 }
 
 proc_start_ticks() {
@@ -849,7 +865,7 @@ launch_app() {
   fi
   warm=0
   if [ "$standby_launch" -eq 0 ] && [ "$mode" != debug ] && \
-     [ "$MAX_WARM_APPS" -gt 0 ] 2>/dev/null; then
+     [ "$MAX_RESIDENT_APPS" -gt 0 ] 2>/dev/null; then
     warm=1
     set -- "$@" --hibernate
   fi
@@ -1053,7 +1069,7 @@ evict_warm_excess() {
         oldest_id="$id"; oldest_used="$used"; oldest_pid="$pid"
       fi
     done
-    [ "$count" -le "$MAX_WARM_APPS" ] && return 0
+    [ "$count" -le "$MAX_RESIDENT_APPS" ] && return 0
     log "evicting least-recent warm app '$oldest_id' pid=$oldest_pid"
     terminate_embedder "$oldest_pid"
     forget_warm_pid "$oldest_id" "$oldest_pid"
@@ -1370,7 +1386,7 @@ start() {
   configure_profile || return $?
   mkdir -p "$CTL" "$WARM_DIR" "$HIBERNATED_DIR" "$CTL/previews" \
     "$ROOT/logs"
-  case "$MAX_WARM_APPS:$HIBERNATE_WAIT_TICKS:$RESUME_WAIT_TICKS:$FOREGROUND_EXIT_WAIT_TICKS:$BOOT_STABLE_WINDOW:$BOOT_READY_TIMEOUT:$RENDERER_HEALTH_STALE_SECONDS:$RENDERER_HEALTH_STARTUP_SECONDS" in
+  case "$HIBERNATE_WAIT_TICKS:$RESUME_WAIT_TICKS:$FOREGROUND_EXIT_WAIT_TICKS:$BOOT_STABLE_WINDOW:$BOOT_READY_TIMEOUT:$RENDERER_HEALTH_STALE_SECONDS:$RENDERER_HEALTH_STARTUP_SECONDS" in
     *[!0-9:]*|:*|*::*|*:) log "invalid warm-pool configuration"; return 64 ;;
   esac
   [ "$BOOT_READY_TIMEOUT" -gt 0 ] &&

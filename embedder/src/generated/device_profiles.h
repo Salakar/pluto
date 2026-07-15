@@ -81,6 +81,7 @@ struct GeneratedRuntimeProfile {
   bool native_session_enabled;
   std::string_view firmware_build;
   std::string_view kernel_release;
+  std::uint32_t max_resident_apps;
   std::uint32_t takeover_quiesce_milliseconds;
   std::string_view display_device;
   GeneratedDisplayContract display;
@@ -265,6 +266,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .native_session_enabled = true,
                     .firmware_build = "20260612085811",
                     .kernel_release = "5.4.70-v1.6.3-rm10x",
+                    .max_resident_apps = 2,
                     .takeover_quiesce_milliseconds = 5500,
                     .display_device = "/dev/fb0",
                     .display =
@@ -349,6 +351,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .native_session_enabled = true,
                     .firmware_build = "20260629074044",
                     .kernel_release = "5.4.70-v1.6.3-rm11x",
+                    .max_resident_apps = 4,
                     .takeover_quiesce_milliseconds = 300,
                     .display_device = "/dev/fb0",
                     .display =
@@ -433,6 +436,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                     .native_session_enabled = true,
                     .firmware_build = "20260629074044",
                     .kernel_release = "6.12.49+git-imx93-chiappa-gf4c2ab7040e8",
+                    .max_resident_apps = 4,
                     .takeover_quiesce_milliseconds = 300,
                     .display_device = "/dev/dri/card0",
                     .display =

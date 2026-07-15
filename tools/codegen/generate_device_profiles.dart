@@ -63,6 +63,7 @@ final class _Runtime {
     : nativeSessionEnabled = _boolean(json, 'nativeSessionEnabled'),
       firmwareBuild = _string(json, 'firmwareBuild'),
       kernelRelease = _string(json, 'kernelRelease'),
+      maxResidentApps = _integer(json, 'maxResidentApps'),
       takeoverQuiesceMilliseconds = _integer(
         json,
         'takeoverQuiesceMilliseconds',
@@ -88,6 +89,7 @@ final class _Runtime {
   final bool nativeSessionEnabled;
   final String firmwareBuild;
   final String kernelRelease;
+  final int maxResidentApps;
   final int takeoverQuiesceMilliseconds;
   final String displayDevice;
   final _DisplayContract display;
@@ -444,6 +446,9 @@ void _validate(List<_Profile> profiles) {
     ).hasMatch(profile.runtime.kernelRelease)) {
       _fail('${profile.id} kernel release is not a safe exact token');
     }
+    if (profile.runtime.maxResidentApps > 8) {
+      _fail('${profile.id} max resident apps must be in 1..8');
+    }
     if (profile.runtime.takeoverQuiesceMilliseconds > 10000) {
       _fail('${profile.id} panel takeover quiesce exceeds 10 seconds');
     }
@@ -773,6 +778,7 @@ String _cpp(List<_Profile> profiles) {
     ..writeln('  bool native_session_enabled;')
     ..writeln('  std::string_view firmware_build;')
     ..writeln('  std::string_view kernel_release;')
+    ..writeln('  std::uint32_t max_resident_apps;')
     ..writeln('  std::uint32_t takeover_quiesce_milliseconds;')
     ..writeln('  std::string_view display_device;')
     ..writeln('  GeneratedDisplayContract display;')
@@ -884,6 +890,9 @@ String _cpp(List<_Profile> profiles) {
       )
       ..writeln(
         '                    .kernel_release = ${_cppString(profile.runtime.kernelRelease)},',
+      )
+      ..writeln(
+        '                    .max_resident_apps = ${profile.runtime.maxResidentApps},',
       )
       ..writeln(
         '                    .takeover_quiesce_milliseconds = ${profile.runtime.takeoverQuiesceMilliseconds},',
@@ -1190,6 +1199,9 @@ String _dart(List<_Profile> profiles) {
         '          kernelRelease: ${_dartString(profile.runtime.kernelRelease)},',
       )
       ..writeln(
+        '          maxResidentApps: ${profile.runtime.maxResidentApps},',
+      )
+      ..writeln(
         '          takeoverQuiesceMilliseconds: ${profile.runtime.takeoverQuiesceMilliseconds},',
       )
       ..writeln(
@@ -1431,6 +1443,9 @@ String _shell(List<_Profile> profiles) {
         "      PLUTO_PROFILE_KERNEL_RELEASE=${_shellString(profile.runtime.kernelRelease)}",
       )
       ..writeln(
+        '      PLUTO_PROFILE_MAX_RESIDENT_APPS=${profile.runtime.maxResidentApps}',
+      )
+      ..writeln(
         '      PLUTO_PROFILE_TAKEOVER_QUIESCE_MS=${profile.runtime.takeoverQuiesceMilliseconds}',
       )
       ..writeln(
@@ -1557,6 +1572,7 @@ String _shell(List<_Profile> profiles) {
     ..writeln('  export PLUTO_PROFILE_NATIVE_SESSION_ENABLED')
     ..writeln('  export PLUTO_PROFILE_FIRMWARE_BUILD')
     ..writeln('  export PLUTO_PROFILE_KERNEL_RELEASE')
+    ..writeln('  export PLUTO_PROFILE_MAX_RESIDENT_APPS')
     ..writeln('  export PLUTO_PROFILE_DISPLAY_DEVICE')
     ..writeln(
       '  export PLUTO_PROFILE_SCANOUT_WIDTH PLUTO_PROFILE_SCANOUT_HEIGHT',
@@ -1707,14 +1723,14 @@ String _markdown(List<_Profile> profiles) {
   final StringBuffer output = StringBuffer()
     ..writeln('<!-- GENERATED FILE: edit config/device_profiles.json. -->')
     ..writeln(
-      '| Device | Profile | Codename | Tested OS | Target | Native driver | Panel | Scanout contract | Recovery | Boot default | Build modes |',
+      '| Device | Profile | Codename | Tested OS | Target | Native driver | Panel | Resident apps | Scanout contract | Recovery | Boot default | Build modes |',
     )
     ..writeln(
-      '| --- | --- | --- | --- | --- | --- | ---: | --- | --- | --- | --- |',
+      '| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- | --- | --- |',
     );
   for (final _Profile profile in profiles) {
     output.writeln(
-      '| ${profile.marketingName} | `${profile.id}` | `${profile.codename}` | ${profile.testedOs} | `${profile.targetSlice}` | `${profile.displayDriver}` | ${profile.panel.width} × ${profile.panel.height} @ ${profile.panel.dpi} dpi | ${_displaySummary(profile.runtime.display)} | `${profile.runtime.recovery.confirmationStrategy}` / `${profile.runtime.recovery.failureStrategy}` | ${profile.runtime.recovery.bootDefaultEnabled ? 'enabled' : 'staging only'} | ${profile.buildModes.map((String mode) => '`$mode`').join(', ')} |',
+      '| ${profile.marketingName} | `${profile.id}` | `${profile.codename}` | ${profile.testedOs} | `${profile.targetSlice}` | `${profile.displayDriver}` | ${profile.panel.width} × ${profile.panel.height} @ ${profile.panel.dpi} dpi | ${profile.runtime.maxResidentApps} | ${_displaySummary(profile.runtime.display)} | `${profile.runtime.recovery.confirmationStrategy}` / `${profile.runtime.recovery.failureStrategy}` | ${profile.runtime.recovery.bootDefaultEnabled ? 'enabled' : 'staging only'} | ${profile.buildModes.map((String mode) => '`$mode`').join(', ')} |',
     );
   }
   return output.toString();

@@ -47,6 +47,8 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
 [ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
     '20260612085811:5.4.70-v1.6.3-rm10x' ] ||
   fail "rm1 exact firmware or kernel release drifted"
+[ "$PLUTO_PROFILE_MAX_RESIDENT_APPS" = 2 ] ||
+  fail "rm1 resident-process limit drifted"
 [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" = 5500 ] ||
   fail "rm1 stock-panel quiesce window drifted"
 [ "$PLUTO_PROFILE_DISPLAY_DEVICE" = /dev/fb0 ] ||
@@ -91,6 +93,8 @@ pluto_profile_load rm2 || fail "could not load rm2 runtime profile"
 [ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
     '20260629074044:5.4.70-v1.6.3-rm11x' ] ||
   fail "rm2 exact firmware or kernel release drifted"
+[ "$PLUTO_PROFILE_MAX_RESIDENT_APPS" = 4 ] ||
+  fail "rm2 resident-process limit drifted"
 [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" = 300 ] ||
   fail "rm2 stock-panel quiesce window drifted"
 [ "$PLUTO_PROFILE_PANEL_SIGNATURE" = ED103TC2C5 ] ||
@@ -148,6 +152,8 @@ pluto_profile_load move || fail "could not load Move runtime profile"
 [ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
     '20260629074044:6.12.49+git-imx93-chiappa-gf4c2ab7040e8' ] ||
   fail "Move exact firmware or kernel release drifted"
+[ "$PLUTO_PROFILE_MAX_RESIDENT_APPS" = 4 ] ||
+  fail "Move resident-process limit drifted"
 [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" = 300 ] ||
   fail "Move stock-panel quiesce window drifted"
 [ "$PLUTO_PROFILE_DISPLAY_DEVICE" = /dev/dri/card0 ] ||

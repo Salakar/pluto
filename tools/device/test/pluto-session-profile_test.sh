@@ -30,33 +30,6 @@ printf '%s\n' "$PLUTO_TEST_KERNEL_RELEASE_OUTPUT"
 UNAME
 chmod +x "$TMP/bin/uname"
 
-run_refused() {
-  profile_id="$1"
-  : > "$TMP/session.log"
-  rm -f "$TMP/systemctl.log"
-  set +e
-  PATH="$TMP/bin:$PATH" \
-  PLUTO_ROOT="$TMP/root" \
-  PLUTO_PROFILE_FILE="$PROFILE_FILE" \
-  PLUTO_TESTING=1 \
-  PLUTO_TEST_PROFILE_ID="$profile_id" \
-  PLUTO_TEST_SYSTEMCTL_LOG="$TMP/systemctl.log" \
-    sh "$SUPERVISOR" start > "$TMP/session.log" 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -eq 78 ] || fail "$profile_id refusal returned $rc, expected 78"
-  [ ! -s "$TMP/systemctl.log" ] ||
-    fail "$profile_id refusal touched xochitl.service"
-}
-
-run_refused rm1
-grep -q "native session for 'rm1' has not passed" "$TMP/session.log" ||
-  fail "rm1 acceptance-gate refusal was not explicit"
-
-run_refused rm2
-grep -q "native session for 'rm2' has not passed" "$TMP/session.log" ||
-  fail "rm2 acceptance-gate refusal was not explicit"
-
 run_identity_refused() {
   build="$1"
   kernel="$2"
@@ -70,6 +43,7 @@ run_identity_refused() {
   PLUTO_PROFILE_FILE="$PROFILE_FILE" \
   PLUTO_TESTING=1 \
   PLUTO_TEST_PROFILE_ID=move \
+  PLUTO_MAX_WARM_APPS=1 \
   PLUTO_TEST_FIRMWARE_BUILD_FILE="$TMP/version" \
   PLUTO_TEST_UNAME="$TMP/bin/uname" \
   PLUTO_TEST_KERNEL_RELEASE_OUTPUT="$kernel" \
@@ -97,6 +71,25 @@ PLUTO_ROOT="$TMP/root" \
 PLUTO_PROFILE_FILE="$PROFILE_FILE" \
 PLUTO_TESTING=1 \
 PLUTO_TEST_PROFILE_ID=move \
+PLUTO_MAX_WARM_APPS=9 \
+PLUTO_TEST_SYSTEMCTL_LOG="$TMP/systemctl.log" \
+  sh "$SUPERVISOR" start > "$TMP/session.log" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 78 ] || fail "invalid resident override returned $rc, expected 78"
+grep -q 'resident app limit is invalid' "$TMP/session.log" ||
+  fail "invalid resident override was not rejected"
+[ ! -s "$TMP/systemctl.log" ] ||
+  fail "invalid resident override touched xochitl.service"
+
+: > "$TMP/session.log"
+rm -f "$TMP/systemctl.log"
+set +e
+PATH="$TMP/bin:$PATH" \
+PLUTO_ROOT="$TMP/root" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=move \
 PLUTO_WAVEFORM=/usr/share/remarkable/unaccepted-waveform.wbf \
 PLUTO_TEST_SYSTEMCTL_LOG="$TMP/systemctl.log" \
   sh "$SUPERVISOR" start > "$TMP/session.log" 2>&1
@@ -107,6 +100,23 @@ grep -q 'requested waveform is not an accepted source' "$TMP/session.log" ||
   fail "unaccepted waveform refusal was not explicit"
 [ ! -s "$TMP/systemctl.log" ] ||
   fail "unaccepted waveform touched xochitl.service"
+
+: > "$TMP/session.log"
+rm -f "$TMP/systemctl.log"
+set +e
+PATH="$TMP/bin:$PATH" \
+PLUTO_ROOT="$TMP/root" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_MAX_WARM_APPS=1 \
+PLUTO_TEST_SYSTEMCTL_LOG="$TMP/systemctl.log" \
+  sh "$SUPERVISOR" start > "$TMP/session.log" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 78 ] || fail "production resident override returned $rc, expected 78"
+grep -q 'PLUTO_MAX_WARM_APPS is test-only' "$TMP/session.log" ||
+  fail "production resident override was not rejected explicitly"
+[ ! -s "$TMP/systemctl.log" ] ||
+  fail "production resident override touched xochitl.service"
 
 set +e
 PLUTO_ROOT="$TMP/root" \

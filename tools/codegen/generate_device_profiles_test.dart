@@ -93,6 +93,24 @@ void main() {
       runtime['kernelRelease'] = '5.4.70 rm1';
     },
   );
+  _expectRejected(
+    generator,
+    source,
+    profileId: 'rm1',
+    message: 'maxResidentApps must be a positive integer',
+    mutateRuntime: (Map<String, Object?> runtime) {
+      runtime['maxResidentApps'] = 0;
+    },
+  );
+  _expectRejected(
+    generator,
+    source,
+    profileId: 'rm1',
+    message: 'rm1 max resident apps must be in 1..8',
+    mutateRuntime: (Map<String, Object?> runtime) {
+      runtime['maxResidentApps'] = 9;
+    },
+  );
 
   stdout.writeln('generate_device_profiles_test: ok');
 }
