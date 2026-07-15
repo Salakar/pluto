@@ -229,7 +229,6 @@ PlutoStatus MxsLcdifDevice::initialize() {
   requested.yoffset = (slot_count_ - 1U) * requested.yres;
   if (syscalls_->ioctl(fd_, uapi::kPutVariableScreenInfo, &requested) < 0) {
     const int error = errno;
-    best_effort_unblank_before_close();
     close();
     status = status_for_errno(error);
     return fail(status == kPlutoStatusInvalidArgument ? kPlutoStatusUnsupported
@@ -242,7 +241,6 @@ PlutoStatus MxsLcdifDevice::initialize() {
   if (syscalls_->ioctl(fd_, uapi::kGetFixedScreenInfo, &fixed) < 0 ||
       syscalls_->ioctl(fd_, uapi::kGetVariableScreenInfo, &variable) < 0) {
     const int error = errno;
-    best_effort_unblank_before_close();
     close();
     return fail(status_for_errno(error),
                 errno_message("revalidate RM2 framebuffer mode", error));
@@ -250,7 +248,6 @@ PlutoStatus MxsLcdifDevice::initialize() {
   if (!fixed_mode_valid(fixed, display_) ||
       !variable_mode_valid(variable, display_, true) ||
       fixed.smem_start != observed_fixed_.smem_start) {
-    best_effort_unblank_before_close();
     close();
     return fail(kPlutoStatusUnsupported,
                 "RM2 framebuffer contract changed during initialization");
@@ -261,7 +258,6 @@ PlutoStatus MxsLcdifDevice::initialize() {
   if (mapping_ == MAP_FAILED) {
     mapping_ = nullptr;
     const int error = errno;
-    best_effort_unblank_before_close();
     close();
     return fail(status_for_errno(error), errno_message("mmap(fb0)", error));
   }
@@ -390,14 +386,6 @@ PlutoStatus MxsLcdifDevice::blank_powerdown() {
   blanked_ = true;
   last_error_.clear();
   return kPlutoStatusOk;
-}
-
-void MxsLcdifDevice::best_effort_unblank_before_close() {
-  if (fd_ >= 0 && blanked_) {
-    (void)syscalls_->ioctl(fd_, uapi::kBlank,
-                           reinterpret_cast<void *>(uapi::kBlankUnblank));
-    blanked_ = false;
-  }
 }
 
 } // namespace pluto::native::rm2

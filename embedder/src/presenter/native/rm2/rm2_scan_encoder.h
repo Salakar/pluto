@@ -55,6 +55,12 @@ inline std::uint8_t rgb565_to_rm2_level(std::uint16_t pixel) {
   return kRm2Rgb565LevelLut[pixel];
 }
 
+// The RM2 Fast class is backed by waveform mode 6 (AF/A2). It must only be
+// credited with the binary physical endpoints that waveform can settle.
+inline std::uint8_t rm2_fast_level(std::uint8_t gray4) {
+  return gray4 >= 8U ? 15U : 0U;
+}
+
 } // namespace pluto::native::rm2
 
 #endif // PLUTO_PRESENTER_NATIVE_RM2_RM2_SCAN_ENCODER_H_

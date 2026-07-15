@@ -104,13 +104,19 @@ public:
 
   Impl(const GeneratedDeviceProfile &profile,
        std::unique_ptr<MxsLcdifDevice> device,
-       Rm2TemperatureReader temperature_reader)
+       Rm2TemperatureReader temperature_reader,
+       Rm2PowerReadyReader power_ready_reader)
       : profile_(profile),
         device_(device == nullptr ? std::make_unique<MxsLcdifDevice>()
                                   : std::move(device)),
         temperature_reader_(temperature_reader
                                 ? std::move(temperature_reader)
-                                : read_rm2_panel_temperature_millidegrees) {}
+                                : read_rm2_panel_temperature_millidegrees),
+        power_ready_reader_(power_ready_reader
+                                ? std::move(power_ready_reader)
+                                : [](std::string *error) {
+                                    return read_rm2_panel_power_ready(error);
+                                  }) {}
 
   ~Impl() { stop(); }
 
@@ -165,17 +171,14 @@ public:
     if (!waveforms_.open(profile_, waveform_path, &error)) {
       return kPlutoStatusUnsupported;
     }
-    const std::optional<int> temperature = temperature_reader_(&error);
-    std::vector<std::uint8_t> init_codes;
-    Rm2WaveformSelection selection;
-    if (!temperature.has_value() ||
-        !waveforms_.select(kPlutoRefreshFast, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshUi, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshText, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshFull, *temperature, &selection) ||
-        !waveforms_.init_pan_codes(*temperature, &init_codes)) {
+    try {
+      settled_levels_.assign(kRm2PanelWidth * kRm2PanelHeight, 15);
+      mirror_.assign(kRm2PanelWidth * kRm2PanelHeight, 0xffffU);
+    } catch (const std::bad_alloc &) {
+      settled_levels_.clear();
+      mirror_.clear();
       waveforms_.clear();
-      return kPlutoStatusUnsupported;
+      return kPlutoStatusInternal;
     }
 
     PlutoStatus status = device_->initialize();
@@ -186,27 +189,22 @@ public:
     }
     for (std::uint32_t slot = 0; slot < kRm2MappedSlots; ++slot) {
       if (!fill_rm2_scan_slot(device_->slot(slot), 0)) {
-        mark_lost();
-        device_->close();
-        waveforms_.clear();
-        return kPlutoStatusInternal;
+        return fail_powered_start(kPlutoStatusInternal);
       }
     }
-    if (!run_init_clear(init_codes)) {
-      mark_lost();
-      device_->close();
-      waveforms_.clear();
-      return kPlutoStatusDeviceLost;
+    const std::optional<int> temperature = read_powered_temperature(&error);
+    std::vector<std::uint8_t> init_codes;
+    Rm2WaveformSelection selection;
+    if (!temperature.has_value() ||
+        !waveforms_.select(kPlutoRefreshFast, *temperature, &selection) ||
+        !waveforms_.select(kPlutoRefreshUi, *temperature, &selection) ||
+        !waveforms_.select(kPlutoRefreshText, *temperature, &selection) ||
+        !waveforms_.select(kPlutoRefreshFull, *temperature, &selection) ||
+        !waveforms_.init_pan_codes(*temperature, &init_codes)) {
+      return fail_powered_start(kPlutoStatusDeviceLost);
     }
-
-    try {
-      settled_levels_.assign(kRm2PanelWidth * kRm2PanelHeight, 15);
-      mirror_.assign(kRm2PanelWidth * kRm2PanelHeight, 0xffffU);
-    } catch (const std::bad_alloc &) {
-      mark_lost();
-      device_->close();
-      waveforms_.clear();
-      return kPlutoStatusInternal;
+    if (!run_init_clear(init_codes)) {
+      return fail_powered_start(kPlutoStatusDeviceLost);
     }
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -262,7 +260,29 @@ public:
       return validation;
     }
     if ((request->flags & kPlutoPresentFlagSparkle) != 0) {
-      return kPlutoStatusUnsupported;
+      // RM2 has no sparse white top-off primitive. The presenter ABI requires
+      // unsupported Sparkle maintenance to complete as an accepted no-op.
+      // RegionScheduler installs its provisional inflight entry before this
+      // call, so a synchronous callback is race-safe.
+      std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+      PlutoPresentCompleteCallback callback = nullptr;
+      void *callback_user_data = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (lost_) {
+          return kPlutoStatusDeviceLost;
+        }
+        if (!started_ || !accepting_ || outstanding_) {
+          return kPlutoStatusAgain;
+        }
+        callback = callback_;
+        callback_user_data = callback_user_data_;
+        ++completed_jobs_;
+      }
+      if (callback != nullptr) {
+        callback(request->frame_id, callback_user_data);
+      }
+      return kPlutoStatusOk;
     }
 
     std::lock_guard<std::mutex> admission_lock(admission_mutex_);
@@ -417,14 +437,47 @@ public:
   }
 
 private:
+  std::optional<int> read_powered_temperature(std::string *error) {
+    if (device_->is_blanked()) {
+      if (device_->unblank(kRm2IdleSlot) != kPlutoStatusOk ||
+          !pan_with_deadline(kRm2IdleSlot)) {
+        (void)device_->blank_powerdown();
+        return std::nullopt;
+      }
+    }
+    // FB_BLANK_UNBLANK synchronously enables the LCDIF supply through the
+    // vendor kernel's SY7636A regulator path. The independent MFD attributes
+    // must then agree before and after the signed temperature register read.
+    if (!power_ready_reader_(error)) {
+      (void)device_->blank_powerdown();
+      return std::nullopt;
+    }
+    const std::optional<int> temperature = temperature_reader_(error);
+    if (!temperature.has_value() ||
+        !waveforms_.temperature_supported(*temperature) ||
+        !power_ready_reader_(error)) {
+      (void)device_->blank_powerdown();
+      return std::nullopt;
+    }
+    return temperature;
+  }
+
+  PlutoStatus fail_powered_start(PlutoStatus status) {
+    (void)device_->blank_powerdown();
+    mark_lost();
+    device_->close();
+    waveforms_.clear();
+    return status;
+  }
+
   bool run_init_clear(const std::vector<std::uint8_t> &codes) {
-    if (codes.empty() || !fill_rm2_scan_slot(device_->slot(0), 0) ||
+    if (codes.empty() || device_->is_blanked() ||
+        !fill_rm2_scan_slot(device_->slot(0), 0) ||
         !fill_rm2_scan_slot(device_->slot(1), 0x5555U) ||
         !fill_rm2_scan_slot(device_->slot(2), 0xaaaaU)) {
       return false;
     }
-    if (device_->unblank(codes.front()) != kPlutoStatusOk ||
-        !pan_with_deadline(kRm2IdleSlot)) {
+    if (!pan_with_deadline(codes.front()) || !pan_with_deadline(kRm2IdleSlot)) {
       return false;
     }
     for (std::size_t phase = 1; phase < codes.size(); ++phase) {
@@ -517,7 +570,7 @@ private:
     job.panel_rect = panel_rect;
     job.suppress_unchanged =
         request.refresh_class != kPlutoRefreshFull || regional_full;
-    const std::optional<int> temperature = temperature_reader_(nullptr);
+    const std::optional<int> temperature = read_powered_temperature(nullptr);
     if (!temperature || !waveforms_.select(request.refresh_class, *temperature,
                                            &job.waveform)) {
       return std::nullopt;
@@ -547,7 +600,11 @@ private:
         const std::size_t state_offset =
             (kRm2PanelWidth - 1U - column) * kRm2PanelHeight + row;
         const std::uint8_t old_level = settled_levels_[state_offset] & 0x0fU;
-        const std::uint8_t new_level = rgb565_to_rm2_level(pixel);
+        const std::uint8_t quantized_level = rgb565_to_rm2_level(pixel);
+        const std::uint8_t new_level =
+            request.refresh_class == kPlutoRefreshFast
+                ? rm2_fast_level(quantized_level)
+                : quantized_level;
         job.target_pixels[offset] = pixel;
         job.transition_keys[offset] =
             static_cast<std::uint8_t>((new_level << 4U) | old_level);
@@ -712,6 +769,7 @@ private:
   const GeneratedDeviceProfile &profile_;
   std::unique_ptr<MxsLcdifDevice> device_;
   Rm2TemperatureReader temperature_reader_;
+  Rm2PowerReadyReader power_ready_reader_;
   Rm2WaveformProgram waveforms_;
 
   mutable std::mutex state_mutex_;
@@ -739,9 +797,11 @@ private:
 LcdifTconDisplayBackend::LcdifTconDisplayBackend(
     const GeneratedDeviceProfile &profile,
     std::unique_ptr<MxsLcdifDevice> device,
-    Rm2TemperatureReader temperature_reader)
+    Rm2TemperatureReader temperature_reader,
+    Rm2PowerReadyReader power_ready_reader)
     : impl_(std::make_unique<Impl>(profile, std::move(device),
-                                   std::move(temperature_reader))) {}
+                                   std::move(temperature_reader),
+                                   std::move(power_ready_reader))) {}
 
 LcdifTconDisplayBackend::~LcdifTconDisplayBackend() = default;
 

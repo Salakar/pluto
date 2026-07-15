@@ -205,9 +205,9 @@ TEST(MxsLcdifDevice, RejectsWrongDriverGeometryAndPostPutDrift) {
   drift.drift_after_put = true;
   EXPECT_EQ(drift_device.initialize(), kPlutoStatusUnsupported);
   EXPECT_FALSE(drift_device.is_open());
-  ASSERT_GE(drift.blank_values.size(), 2U);
+  ASSERT_TRUE(!drift.blank_values.empty());
   EXPECT_EQ(drift.blank_values.front(), uapi::kBlankPowerdown);
-  EXPECT_EQ(drift.blank_values.back(), uapi::kBlankUnblank);
+  EXPECT_EQ(drift.blank_values.back(), uapi::kBlankPowerdown);
 }
 
 TEST(MxsLcdifDevice, MapsIoctlAndMmapFailuresFailClosed) {

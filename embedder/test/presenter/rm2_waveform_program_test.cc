@@ -14,6 +14,54 @@
 namespace pluto::native::rm2 {
 namespace {
 
+void write_text(const std::filesystem::path &path, std::string_view value) {
+  std::ofstream output(path);
+  output << value << '\n';
+}
+
+TEST(Rm2WaveformProgram, DiscoversExactPoweredFaultFreeSy7636aParent) {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() /
+                        ("pluto_rm2_power_state_" +
+                         std::to_string(static_cast<long long>(::getpid())));
+  std::error_code filesystem_error;
+  fs::remove_all(root, filesystem_error);
+  const fs::path device = root / "3-0062";
+  fs::create_directories(device);
+  write_text(device / "name", "sy7636a");
+  write_text(device / "power_good", "ON");
+  write_text(device / "state", "no fault event");
+
+  std::string error;
+  EXPECT_TRUE(read_rm2_panel_power_ready(&error, root.string())) << error;
+
+  write_text(device / "power_good", "OFF");
+  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+  EXPECT_FALSE(error.empty());
+
+  write_text(device / "power_good", "ON");
+  write_text(device / "state", "VNEG fault event");
+  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+
+  write_text(device / "state", "no fault event");
+  fs::remove(device / "power_good", filesystem_error);
+  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+
+  write_text(device / "power_good", "ON");
+  fs::remove(device / "state", filesystem_error);
+  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+
+  write_text(device / "state", "no fault event");
+  const fs::path ambiguous = root / "4-0062";
+  fs::create_directories(ambiguous);
+  write_text(ambiguous / "name", "sy7636a");
+  write_text(ambiguous / "power_good", "ON");
+  write_text(ambiguous / "state", "no fault event");
+  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+
+  fs::remove_all(root, filesystem_error);
+}
+
 #if defined(PLUTO_RM2_WBF_FIXTURE)
 TEST(Rm2WaveformProgram, BindsExactArtifactAndPreexpandsEveryRuntimeMode) {
   namespace fs = std::filesystem;
@@ -45,6 +93,10 @@ TEST(Rm2WaveformProgram, BindsExactArtifactAndPreexpandsEveryRuntimeMode) {
   Rm2WaveformProgram program;
   std::string error;
   ASSERT_TRUE(program.open(profile, path, &error)) << error;
+  EXPECT_TRUE(program.temperature_supported(0));
+  EXPECT_TRUE(program.temperature_supported(47999));
+  EXPECT_FALSE(program.temperature_supported(-1));
+  EXPECT_FALSE(program.temperature_supported(48000));
 
   Rm2WaveformSelection fast;
   Rm2WaveformSelection ui;
@@ -76,6 +128,8 @@ TEST(Rm2WaveformProgram, BindsExactArtifactAndPreexpandsEveryRuntimeMode) {
   EXPECT_EQ(init_codes.size(), 105U);
   EXPECT_TRUE(std::all_of(init_codes.begin(), init_codes.end(),
                           [](std::uint8_t code) { return code <= 2U; }));
+  EXPECT_FALSE(program.select(kPlutoRefreshFast, 48000, &fast));
+  EXPECT_FALSE(program.init_pan_codes(48000, &init_codes));
 
   fs::remove(local_path, filesystem_error);
 }

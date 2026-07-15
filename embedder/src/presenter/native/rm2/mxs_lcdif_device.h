@@ -37,7 +37,9 @@ public:
   MxsLcdifDevice &operator=(const MxsLcdifDevice &) = delete;
 
   // Read-only. Exact mode reassertion, blanking, and mmap happen only in
-  // initialize(), after the WBF and temperature preflight has succeeded.
+  // initialize(), after the WBF identity/structure preflight has succeeded.
+  // The caller must populate every slot with safe HOLD before unblanking for
+  // the powered temperature and waveform-selection preflight.
   PlutoStatus open(const GeneratedDeviceProfile &profile);
   PlutoStatus initialize();
   void close();
@@ -56,7 +58,6 @@ public:
 private:
   PlutoStatus fail(PlutoStatus status, std::string message);
   PlutoStatus set_offset(std::uint32_t index);
-  void best_effort_unblank_before_close();
 
   MxsLcdifSyscalls *syscalls_;
   int fd_ = -1;

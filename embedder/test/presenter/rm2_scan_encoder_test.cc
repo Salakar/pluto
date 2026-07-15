@@ -112,6 +112,11 @@ TEST(Rm2ScanEncoder, GeneratedRgb565LutHasPinnedEndpointsAndGrayOrdering) {
   EXPECT_EQ(rgb565_to_rm2_level(0xffffU), 15U);
   EXPECT_LT(rgb565_to_rm2_level(0x4208U), rgb565_to_rm2_level(0x8410U));
   EXPECT_LT(rgb565_to_rm2_level(0x8410U), rgb565_to_rm2_level(0xc618U));
+
+  EXPECT_EQ(rm2_fast_level(0U), 0U);
+  EXPECT_EQ(rm2_fast_level(7U), 0U);
+  EXPECT_EQ(rm2_fast_level(8U), 15U);
+  EXPECT_EQ(rm2_fast_level(15U), 15U);
 }
 
 } // namespace

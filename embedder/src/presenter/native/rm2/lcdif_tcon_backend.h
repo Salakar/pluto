@@ -15,12 +15,14 @@ namespace pluto::native::rm2 {
 
 using Rm2TemperatureReader =
     std::function<std::optional<int>(std::string *error)>;
+using Rm2PowerReadyReader = std::function<bool(std::string *error)>;
 
 class LcdifTconDisplayBackend final : public NativeDisplayBackend {
 public:
   LcdifTconDisplayBackend(const GeneratedDeviceProfile &profile,
                           std::unique_ptr<MxsLcdifDevice> device = nullptr,
-                          Rm2TemperatureReader temperature_reader = {});
+                          Rm2TemperatureReader temperature_reader = {},
+                          Rm2PowerReadyReader power_ready_reader = {});
   ~LcdifTconDisplayBackend() override;
 
   LcdifTconDisplayBackend(const LcdifTconDisplayBackend &) = delete;

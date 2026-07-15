@@ -34,6 +34,11 @@ public:
   bool valid() const { return decoder_.valid(); }
   const WbfDecoder &decoder() const { return decoder_; }
 
+  // The first and final boundaries in the accepted WBF define a
+  // lower-inclusive, upper-exclusive operating envelope. Values outside it
+  // must not be silently clamped to an endpoint record.
+  bool temperature_supported(int milli_celsius) const;
+
   bool select(PlutoRefreshClass refresh_class, int milli_celsius,
               Rm2WaveformSelection *out_selection) const;
   bool init_pan_codes(int milli_celsius,
@@ -57,6 +62,13 @@ private:
 // Reads only the explicitly named SY7636A panel sensor. It never falls back
 // to an arbitrary SoC hwmon node.
 std::optional<int> read_rm2_panel_temperature_millidegrees(std::string *error);
+
+// Finds exactly one SY7636A I2C parent by address and driver identity, then
+// requires the vendor-kernel MFD power/fault attributes to prove that panel
+// power is good before a temperature value is trusted.
+bool read_rm2_panel_power_ready(
+    std::string *error,
+    std::string_view i2c_devices_root = "/sys/bus/i2c/devices");
 
 } // namespace pluto::native::rm2
 

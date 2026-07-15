@@ -1,5 +1,6 @@
 #include "presenter/native/rm2/rm2_waveform_program.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <charconv>
@@ -23,8 +24,6 @@ constexpr std::uint32_t kModeFast = 6;
 constexpr std::uint32_t kModeUi = 3;
 constexpr std::uint32_t kModeText = 2;
 constexpr std::uint32_t kModeFull = 2;
-constexpr int kMinimumAcceptedTemperatureMilliCelsius = 0;
-constexpr int kMaximumAcceptedTemperatureMilliCelsius = 80000;
 constexpr std::array<std::uint32_t, 3> kRequiredRefreshModes = {
     kModeText,
     kModeUi,
@@ -155,6 +154,37 @@ std::optional<int> parse_temperature_file(const std::filesystem::path &path,
   return value;
 }
 
+std::optional<std::string> read_trimmed_file(const std::filesystem::path &path,
+                                             std::size_t maximum_bytes = 64U) {
+  std::ifstream input(path);
+  std::string text;
+  if (!input || !std::getline(input, text) || text.size() > maximum_bytes) {
+    return std::nullopt;
+  }
+  const auto first = std::find_if_not(text.begin(), text.end(), [](char value) {
+    return std::isspace(static_cast<unsigned char>(value));
+  });
+  const auto last =
+      std::find_if_not(text.rbegin(), text.rend(), [](char value) {
+        return std::isspace(static_cast<unsigned char>(value));
+      }).base();
+  if (first >= last) {
+    return std::nullopt;
+  }
+  return std::string(first, last);
+}
+
+bool sy7636a_i2c_entry_name(std::string_view name) {
+  constexpr std::string_view kAddressSuffix = "-0062";
+  if (!name.ends_with(kAddressSuffix) || name.size() == kAddressSuffix.size()) {
+    return false;
+  }
+  return std::all_of(name.begin(), name.end() - kAddressSuffix.size(),
+                     [](char value) {
+                       return std::isdigit(static_cast<unsigned char>(value));
+                     });
+}
+
 } // namespace
 
 bool Rm2WaveformProgram::open(const GeneratedDeviceProfile &profile,
@@ -276,12 +306,24 @@ Rm2WaveformProgram::expanded_record(std::uint32_t mode,
   return &expanded_records_[index];
 }
 
+bool Rm2WaveformProgram::temperature_supported(int milli_celsius) const {
+  const auto &metadata = decoder_.metadata();
+  if (!valid() || metadata.temperature_count == 0 ||
+      metadata.temperature_boundaries_celsius.size() !=
+          static_cast<std::size_t>(metadata.temperature_count) + 1U) {
+    return false;
+  }
+  const int minimum =
+      static_cast<int>(metadata.temperature_boundaries_celsius.front()) * 1000;
+  const int maximum =
+      static_cast<int>(metadata.temperature_boundaries_celsius.back()) * 1000;
+  return milli_celsius >= minimum && milli_celsius < maximum;
+}
+
 bool Rm2WaveformProgram::select(PlutoRefreshClass refresh_class,
                                 int milli_celsius,
                                 Rm2WaveformSelection *out_selection) const {
-  if (!valid() || out_selection == nullptr ||
-      milli_celsius < kMinimumAcceptedTemperatureMilliCelsius ||
-      milli_celsius > kMaximumAcceptedTemperatureMilliCelsius) {
+  if (out_selection == nullptr || !temperature_supported(milli_celsius)) {
     return false;
   }
   const std::optional<std::uint32_t> mode = mode_for(refresh_class);
@@ -309,9 +351,7 @@ bool Rm2WaveformProgram::select(PlutoRefreshClass refresh_class,
 
 bool Rm2WaveformProgram::init_pan_codes(
     int milli_celsius, std::vector<std::uint8_t> *out_codes) const {
-  if (!valid() || out_codes == nullptr ||
-      milli_celsius < kMinimumAcceptedTemperatureMilliCelsius ||
-      milli_celsius > kMaximumAcceptedTemperatureMilliCelsius) {
+  if (out_codes == nullptr || !temperature_supported(milli_celsius)) {
     return false;
   }
   std::uint32_t temperature = 0;
@@ -372,6 +412,54 @@ std::optional<int> read_rm2_panel_temperature_millidegrees(std::string *error) {
                  : "SY7636A panel temperature sensor was not found";
   }
   return std::nullopt;
+}
+
+bool read_rm2_panel_power_ready(std::string *error,
+                                std::string_view i2c_devices_root) {
+  namespace fs = std::filesystem;
+  std::error_code filesystem_error;
+  std::optional<fs::path> sy7636a_path;
+  const fs::directory_iterator end;
+  for (fs::directory_iterator entry(fs::path(i2c_devices_root),
+                                    filesystem_error);
+       !filesystem_error && entry != end; entry.increment(filesystem_error)) {
+    if (!sy7636a_i2c_entry_name(entry->path().filename().string())) {
+      continue;
+    }
+    const std::optional<std::string> name =
+        read_trimmed_file(entry->path() / "name");
+    if (!name.has_value() || *name != "sy7636a") {
+      continue;
+    }
+    if (sy7636a_path.has_value()) {
+      return fail(error, "multiple SY7636A I2C parents are ambiguous");
+    }
+    sy7636a_path = entry->path();
+  }
+  if (filesystem_error) {
+    return fail(error, "cannot enumerate RM2 I2C devices");
+  }
+  if (!sy7636a_path.has_value()) {
+    return fail(error, "SY7636A I2C parent was not found");
+  }
+
+  const std::optional<std::string> power_good =
+      read_trimmed_file(*sy7636a_path / "power_good");
+  const std::optional<std::string> state =
+      read_trimmed_file(*sy7636a_path / "state");
+  if (!power_good.has_value() || !state.has_value()) {
+    return fail(error, "SY7636A power/fault attributes are unreadable");
+  }
+  if (*power_good != "ON") {
+    return fail(error, "SY7636A panel power-good is not ON");
+  }
+  if (*state != "no fault event") {
+    return fail(error, "SY7636A reports a panel power fault");
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
 }
 
 } // namespace pluto::native::rm2
