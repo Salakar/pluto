@@ -19,7 +19,7 @@ class MxcfbDisplayBackend final : public NativeDisplayBackend {
 public:
   MxcfbDisplayBackend(const GeneratedDeviceProfile &profile,
                       std::unique_ptr<MxcfbDevice> device = nullptr,
-                      std::uint32_t first_marker = 1);
+                      std::uint32_t first_marker = 0);
   ~MxcfbDisplayBackend() override;
 
   MxcfbDisplayBackend(const MxcfbDisplayBackend &) = delete;

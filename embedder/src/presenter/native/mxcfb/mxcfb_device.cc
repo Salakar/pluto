@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 namespace pluto::native::mxcfb {
@@ -20,6 +21,12 @@ constexpr std::uint32_t kExpectedBytesPerPixel = 2;
 
 class SystemMxcfbSyscalls final : public MxcfbSyscalls {
 public:
+  std::string kernel_release() override {
+    struct utsname identity {};
+    return ::uname(&identity) == 0 ? std::string(identity.release)
+                                   : std::string();
+  }
+
   int open(const char *path, int flags) override { return ::open(path, flags); }
 
   int ioctl(int fd, unsigned long request, void *argument) override {
@@ -163,7 +170,7 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
       profile.runtime.display_device != kExpectedFramebuffer ||
       profile.panel.source_pixel_format != kExpectedPixelFormat ||
       profile.panel.color || profile.panel.width <= 0 ||
-      profile.panel.height <= 0 ||
+      profile.panel.height <= 0 || profile.runtime.kernel_release.empty() ||
       display.scanout_width !=
           static_cast<std::uint32_t>(profile.panel.width) ||
       display.scanout_height !=
@@ -177,6 +184,12 @@ PlutoStatus MxcfbDevice::open(const GeneratedDeviceProfile &profile) {
       display.damage_alignment_pixels == 0) {
     return fail(kPlutoStatusUnsupported,
                 "generated profile is not the RM1 MXCFB contract");
+  }
+
+  const std::string actual_kernel_release = syscalls_->kernel_release();
+  if (actual_kernel_release != profile.runtime.kernel_release) {
+    return fail(kPlutoStatusUnsupported,
+                "kernel release does not match the generated RM1 profile");
   }
 
   fd_ = syscalls_->open(kExpectedFramebuffer.data(), O_RDWR | O_CLOEXEC);
@@ -315,6 +328,30 @@ PlutoStatus MxcfbDevice::initialize() {
   fixed_info_ = fixed;
   variable_info_ = variable;
   initialized_ = true;
+  display_ready_ = false;
+  last_error_.clear();
+  return kPlutoStatusOk;
+}
+
+PlutoStatus MxcfbDevice::unblank() {
+  if (!is_open() || !initialized_) {
+    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not initialized");
+  }
+  if (display_ready_) {
+    return fail(kPlutoStatusInvalidArgument,
+                "MXCFB framebuffer is already unblanked");
+  }
+  if (syscalls_->ioctl(fd_, uapi::kFramebufferBlank,
+                       reinterpret_cast<void *>(uapi::kFramebufferUnblank)) <
+      0) {
+    const int error = errno;
+    close();
+    const PlutoStatus status = status_for_errno(error);
+    return fail(status == kPlutoStatusInvalidArgument ? kPlutoStatusUnsupported
+                                                      : status,
+                errno_message("FBIOBLANK(FB_BLANK_UNBLANK)", error));
+  }
+  display_ready_ = true;
   last_error_.clear();
   return kPlutoStatusOk;
 }
@@ -332,6 +369,7 @@ void MxcfbDevice::close() {
   fixed_info_ = {};
   variable_info_ = {};
   initialized_ = false;
+  display_ready_ = false;
 }
 
 std::span<std::byte> MxcfbDevice::framebuffer() {
@@ -342,8 +380,9 @@ std::span<std::byte> MxcfbDevice::framebuffer() {
 }
 
 PlutoStatus MxcfbDevice::send_update(uapi::UpdateData *update) {
-  if (!is_open() || !initialized_) {
-    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not initialized");
+  if (!is_open() || !initialized_ || !display_ready_) {
+    return fail(kPlutoStatusDeviceLost,
+                "MXCFB framebuffer is not ready for updates");
   }
   if (update == nullptr || update->update_marker == 0 ||
       update->update_region.width == 0 || update->update_region.height == 0 ||
@@ -370,8 +409,9 @@ PlutoStatus MxcfbDevice::wait_for_update_complete(std::uint32_t marker,
   if (out_collision != nullptr) {
     *out_collision = false;
   }
-  if (!is_open() || !initialized_) {
-    return fail(kPlutoStatusDeviceLost, "MXCFB framebuffer is not initialized");
+  if (!is_open() || !initialized_ || !display_ready_) {
+    return fail(kPlutoStatusDeviceLost,
+                "MXCFB framebuffer is not ready for completion waits");
   }
   if (marker == 0) {
     return fail(kPlutoStatusInvalidArgument,

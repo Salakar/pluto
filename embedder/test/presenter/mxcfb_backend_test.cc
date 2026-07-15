@@ -33,6 +33,7 @@ constexpr std::uint32_t kStride = kVirtualWidth * 2;
 constexpr std::size_t kTightStride = kWidth * 2;
 constexpr std::uint32_t kMappingBytes = kStride * kVirtualHeight;
 constexpr std::uint8_t kInitialPixel = 0x5a;
+constexpr std::uint8_t kSafeInitialPixel = 0xff;
 
 const pluto::GeneratedDeviceProfile &rm1_profile() {
   return *pluto::generated_device_profile_by_id("rm1");
@@ -61,6 +62,8 @@ public:
     variable.transp = {.offset = 0, .length = 0, .msb_right = 0};
   }
 
+  std::string kernel_release() override { return "5.4.70-v1.6.3-rm10x"; }
+
   int open(const char *, int flags) override {
     open_flags = flags;
     ++open_count;
@@ -79,6 +82,11 @@ public:
     if (request == uapi::kPutVariableScreenInfo) {
       variable = *static_cast<uapi::FramebufferVariableInfoArm32 *>(argument);
       ++put_count;
+      return 0;
+    }
+    if (request == uapi::kFramebufferBlank) {
+      blank_value = reinterpret_cast<std::uintptr_t>(argument);
+      ++blank_count;
       return 0;
     }
     if (request == uapi::kSendUpdate) {
@@ -142,6 +150,17 @@ public:
     condition_.notify_all();
   }
 
+  void block_initial_completion() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    completion_permits_ = 0;
+  }
+
+  void clear_update_history() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sent_updates_.clear();
+    waited_markers_.clear();
+  }
+
   std::vector<uapi::UpdateData> sent_updates() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return sent_updates_;
@@ -165,13 +184,17 @@ public:
   int open_count = 0;
   int mmap_count = 0;
   int put_count = 0;
+  int blank_count = 0;
+  std::uintptr_t blank_value = std::numeric_limits<std::uintptr_t>::max();
   int munmap_count = 0;
   int close_count = 0;
 
 private:
   mutable std::mutex mutex_;
   std::condition_variable condition_;
-  std::size_t completion_permits_ = 0;
+  // The backend synchronously proves one known-state full update during
+  // start(). App submissions block until tests grant later permits.
+  std::size_t completion_permits_ = 1;
   std::vector<uapi::UpdateData> sent_updates_;
   std::vector<std::uint32_t> waited_markers_;
 };
@@ -258,12 +281,17 @@ PlutoPresenterConfig presenter_config(CallbackCapture *capture = nullptr) {
 }
 
 bool probe_and_start(MxcfbDisplayBackend *backend,
+                     BlockingMxcfbSyscalls *syscalls,
                      CallbackCapture *capture = nullptr) {
   if (backend->probe(rm1_profile()) != kPlutoStatusOk) {
     return false;
   }
   const PlutoPresenterConfig config = presenter_config(capture);
-  return backend->start(config) == kPlutoStatusOk;
+  if (backend->start(config) != kPlutoStatusOk) {
+    return false;
+  }
+  syscalls->clear_update_history();
+  return true;
 }
 
 std::uint8_t source_byte(const OwnedRequest &owned, std::uint32_t x_byte,
@@ -273,10 +301,10 @@ std::uint8_t source_byte(const OwnedRequest &owned, std::uint32_t x_byte,
 
 } // namespace
 
-TEST(MxcfbBackend, ReportsStrictCapabilitiesWithoutEnablingProductFactory) {
+TEST(MxcfbBackend, ReportsStrictAcceptedProductCapabilities) {
   BlockingMxcfbSyscalls syscalls;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
 
   PlutoDisplayInfo info{};
   info.struct_size = sizeof(info);
@@ -308,13 +336,110 @@ TEST(MxcfbBackend, ProbeIsObservationalAndStartReassertsThePinnedMode) {
   const PlutoPresenterConfig config = presenter_config();
   ASSERT_EQ(backend.start(config), kPlutoStatusOk);
   EXPECT_EQ(syscalls.put_count, 1);
+  EXPECT_EQ(syscalls.blank_count, 1);
+  EXPECT_EQ(syscalls.blank_value, uapi::kFramebufferUnblank);
+  const auto sent = syscalls.sent_updates();
+  const auto waited = syscalls.waited_markers();
+  ASSERT_EQ(sent.size(), 1U);
+  ASSERT_EQ(waited.size(), 1U);
+  EXPECT_EQ(waited[0], sent[0].update_marker);
+  EXPECT_EQ(sent[0].update_region.left, 0U);
+  EXPECT_EQ(sent[0].update_region.top, 0U);
+  EXPECT_EQ(sent[0].update_region.width, kWidth);
+  EXPECT_EQ(sent[0].update_region.height, kHeight);
+  EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeQuality);
+  EXPECT_EQ(sent[0].update_mode, uapi::kUpdateModePartial);
+  EXPECT_EQ(sent[0].temperature, uapi::kTemperatureUseAmbient);
+  EXPECT_EQ(syscalls.mapped_storage.front(), kSafeInitialPixel);
+  EXPECT_EQ(syscalls.mapped_storage.back(), kSafeInitialPixel);
+}
+
+TEST(MxcfbBackend, DefaultMarkerEpochDoesNotRestartAtOnePerProcess) {
+  std::uint32_t first_marker = 0;
+  {
+    BlockingMxcfbSyscalls syscalls;
+    MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+    ASSERT_EQ(backend.probe(rm1_profile()), kPlutoStatusOk);
+    const PlutoPresenterConfig config = presenter_config();
+    ASSERT_EQ(backend.start(config), kPlutoStatusOk);
+    const auto sent = syscalls.sent_updates();
+    ASSERT_EQ(sent.size(), 1U);
+    first_marker = sent[0].update_marker;
+  }
+
+  BlockingMxcfbSyscalls syscalls;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+  ASSERT_EQ(backend.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(backend.start(config), kPlutoStatusOk);
+  const auto sent = syscalls.sent_updates();
+  ASSERT_EQ(sent.size(), 1U);
+  EXPECT_NE(first_marker, 0U);
+  EXPECT_NE(first_marker & 0x80000000U, 0U);
+  EXPECT_NE(sent[0].update_marker, 0U);
+  EXPECT_NE(sent[0].update_marker & 0x80000000U, 0U);
+  EXPECT_NE(sent[0].update_marker, first_marker);
+}
+
+TEST(MxcfbBackend, StartAcceptsNoAppWorkUntilKnownStateMarkerCompletes) {
+  BlockingMxcfbSyscalls syscalls;
+  syscalls.block_initial_completion();
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+  ASSERT_EQ(backend.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  std::atomic<bool> start_returned = false;
+  PlutoStatus start_status = kPlutoStatusInternal;
+  std::thread starter([&] {
+    start_status = backend.start(config);
+    start_returned.store(true, std::memory_order_release);
+  });
+
+  ASSERT_TRUE(syscalls.wait_for_wait_count(1));
+  EXPECT_FALSE(start_returned.load(std::memory_order_acquire));
+  EXPECT_FALSE(backend.ready(kPlutoRefreshUi));
+  syscalls.complete_one();
+  starter.join();
+
+  EXPECT_EQ(start_status, kPlutoStatusOk);
+  EXPECT_TRUE(start_returned.load(std::memory_order_acquire));
+  EXPECT_TRUE(backend.ready(kPlutoRefreshUi));
+}
+
+TEST(MxcfbBackend, KnownStateSendOrCompletionFailureFailsStartClosed) {
+  for (const int send_error : {EAGAIN, EBUSY, EINVAL, ETIMEDOUT, EIO}) {
+    BlockingMxcfbSyscalls syscalls;
+    syscalls.send_error = send_error;
+    MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+    ASSERT_EQ(backend.probe(rm1_profile()), kPlutoStatusOk);
+    const PlutoPresenterConfig config = presenter_config();
+
+    EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+    EXPECT_FALSE(backend.ready(kPlutoRefreshUi));
+    EXPECT_EQ(static_cast<int>(backend.health().state),
+              static_cast<int>(NativeBackendHealthState::kDeviceLost));
+    EXPECT_EQ(syscalls.close_count, 1);
+  }
+  {
+    BlockingMxcfbSyscalls syscalls;
+    syscalls.block_waits = false;
+    syscalls.wait_error = ETIMEDOUT;
+    MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+    ASSERT_EQ(backend.probe(rm1_profile()), kPlutoStatusOk);
+    const PlutoPresenterConfig config = presenter_config();
+
+    EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+    EXPECT_FALSE(backend.ready(kPlutoRefreshUi));
+    EXPECT_EQ(static_cast<int>(backend.health().state),
+              static_cast<int>(NativeBackendHealthState::kDeviceLost));
+    EXPECT_EQ(syscalls.close_count, 1);
+  }
 }
 
 TEST(MxcfbBackend, CopiesOnlyExactDamageRowsAndPreservesBothStrides) {
   BlockingMxcfbSyscalls syscalls;
   CallbackCapture callbacks;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend, &callbacks));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls, &callbacks));
   OwnedRequest owned({
       {.x = 2, .y = 1, .width = 3, .height = 2},
       {.x = 8, .y = 4, .width = 2, .height = 1},
@@ -330,7 +455,7 @@ TEST(MxcfbBackend, CopiesOnlyExactDamageRowsAndPreservesBothStrides) {
   EXPECT_EQ(sent[0].update_region.top, 1U);
   EXPECT_EQ(sent[0].update_region.width, 8U);
   EXPECT_EQ(sent[0].update_region.height, 4U);
-  EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeAuto);
+  EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeQuality);
   EXPECT_EQ(sent[0].update_mode, uapi::kUpdateModePartial);
   EXPECT_NE(sent[0].update_marker, 0U);
   EXPECT_EQ(sent[0].temperature, uapi::kTemperatureUseAmbient);
@@ -346,9 +471,9 @@ TEST(MxcfbBackend, CopiesOnlyExactDamageRowsAndPreservesBothStrides) {
     EXPECT_EQ(syscalls.mapped_storage[4U * kStride + x_byte],
               source_byte(owned, x_byte, 4));
   }
-  EXPECT_EQ(syscalls.mapped_storage[3U * kStride + 6U], kInitialPixel);
-  EXPECT_EQ(syscalls.mapped_storage[kTightStride], kInitialPixel);
-  EXPECT_EQ(syscalls.mapped_storage[kStride - 1], kInitialPixel);
+  EXPECT_EQ(syscalls.mapped_storage[3U * kStride + 6U], kSafeInitialPixel);
+  EXPECT_EQ(syscalls.mapped_storage[kTightStride], kSafeInitialPixel);
+  EXPECT_EQ(syscalls.mapped_storage[kStride - 1], kSafeInitialPixel);
 
   const std::size_t output_stride = kTightStride + 17;
   std::vector<std::uint8_t> output(output_stride * kHeight, 0xcc);
@@ -361,7 +486,7 @@ TEST(MxcfbBackend, CopiesOnlyExactDamageRowsAndPreservesBothStrides) {
   };
   ASSERT_EQ(backend.snapshot(&snapshot), kPlutoStatusOk);
   EXPECT_EQ(output[1U * output_stride + 4U], source_byte(owned, 4, 1));
-  EXPECT_EQ(output[3U * output_stride + 6U], kInitialPixel);
+  EXPECT_EQ(output[3U * output_stride + 6U], kSafeInitialPixel);
   EXPECT_EQ(output[kTightStride], 0xcc);
 
   syscalls.complete_one();
@@ -370,10 +495,10 @@ TEST(MxcfbBackend, CopiesOnlyExactDamageRowsAndPreservesBothStrides) {
   EXPECT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
 }
 
-TEST(MxcfbBackend, MapsFullClassToAutoFullScreenUpdate) {
+TEST(MxcfbBackend, MapsFullClassToObservedQualityFullScreenUpdate) {
   BlockingMxcfbSyscalls syscalls;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
   OwnedRequest owned({{{.x = 100, .y = 200, .width = 4, .height = 5}}},
                      kPlutoRefreshFull);
 
@@ -381,14 +506,83 @@ TEST(MxcfbBackend, MapsFullClassToAutoFullScreenUpdate) {
   ASSERT_TRUE(syscalls.wait_for_wait_count(1));
   const auto sent = syscalls.sent_updates();
   ASSERT_EQ(sent.size(), 1U);
-  EXPECT_EQ(sent[0].update_mode, uapi::kUpdateModeFull);
+  EXPECT_EQ(sent[0].update_mode, uapi::kUpdateModePartial);
   EXPECT_EQ(sent[0].update_region.left, 0U);
   EXPECT_EQ(sent[0].update_region.top, 0U);
   EXPECT_EQ(sent[0].update_region.width, kWidth);
   EXPECT_EQ(sent[0].update_region.height, kHeight);
-  EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeAuto);
+  EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeQuality);
+  EXPECT_EQ(sent[0].temperature, uapi::kTemperatureUseAmbient);
   syscalls.complete_one();
   EXPECT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
+}
+
+TEST(MxcfbBackend, MapsFastClassToObservedDirectDrawUpdate) {
+  BlockingMxcfbSyscalls syscalls;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
+  OwnedRequest owned({{{.x = 20, .y = 30, .width = 6, .height = 7}}},
+                     kPlutoRefreshFast);
+
+  ASSERT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
+  ASSERT_TRUE(syscalls.wait_for_wait_count(1));
+  const auto sent = syscalls.sent_updates();
+  ASSERT_EQ(sent.size(), 1U);
+  EXPECT_EQ(sent[0].update_region.left, 20U);
+  EXPECT_EQ(sent[0].update_region.top, 30U);
+  EXPECT_EQ(sent[0].update_region.width, 6U);
+  EXPECT_EQ(sent[0].update_region.height, 7U);
+  EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeDirect);
+  EXPECT_EQ(sent[0].update_mode, uapi::kUpdateModePartial);
+  EXPECT_EQ(sent[0].temperature, uapi::kTemperatureRemarkableDraw);
+  syscalls.complete_one();
+  EXPECT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
+}
+
+TEST(MxcfbBackend, PenTruthFullPreservesExactRegionalDamage) {
+  BlockingMxcfbSyscalls syscalls;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
+  OwnedRequest owned(
+      {
+          {.x = 40, .y = 50, .width = 8, .height = 9},
+          {.x = 60, .y = 70, .width = 10, .height = 11},
+      },
+      kPlutoRefreshFull);
+  owned.request.flags = kPlutoPresentFlagPenTruth;
+
+  ASSERT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
+  ASSERT_TRUE(syscalls.wait_for_wait_count(1));
+  const auto sent = syscalls.sent_updates();
+  ASSERT_EQ(sent.size(), 1U);
+  EXPECT_EQ(sent[0].update_region.left, 40U);
+  EXPECT_EQ(sent[0].update_region.top, 50U);
+  EXPECT_EQ(sent[0].update_region.width, 30U);
+  EXPECT_EQ(sent[0].update_region.height, 31U);
+  EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeQuality);
+  EXPECT_EQ(sent[0].update_mode, uapi::kUpdateModePartial);
+  EXPECT_EQ(sent[0].temperature, uapi::kTemperatureUseAmbient);
+  syscalls.complete_one();
+  EXPECT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
+}
+
+TEST(MxcfbBackend, SparkleCompletesSynchronouslyAsAnAcceptedNoOp) {
+  BlockingMxcfbSyscalls syscalls;
+  CallbackCapture callbacks;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls, &callbacks));
+  OwnedRequest owned({{{.x = 10, .y = 20, .width = 4, .height = 5}}},
+                     kPlutoRefreshFast, 88);
+  owned.request.flags =
+      kPlutoPresentFlagSparkle | kPlutoPresentFlagSparkleDevelop | (17U << 8U);
+
+  EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
+  ASSERT_TRUE(callbacks.wait_for_count(1));
+  EXPECT_EQ(callbacks.frame_ids()[0], 88U);
+  EXPECT_TRUE(syscalls.sent_updates().empty());
+  EXPECT_TRUE(syscalls.waited_markers().empty());
+  EXPECT_TRUE(backend.ready(kPlutoRefreshFast));
+  EXPECT_EQ(backend.health().completed_jobs, 1U);
 }
 
 TEST(MxcfbBackend, UsesUniqueNonzeroMarkersAcrossWrap) {
@@ -396,7 +590,7 @@ TEST(MxcfbBackend, UsesUniqueNonzeroMarkersAcrossWrap) {
   CallbackCapture callbacks;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls),
                               std::numeric_limits<std::uint32_t>::max());
-  ASSERT_TRUE(probe_and_start(&backend, &callbacks));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls, &callbacks));
   OwnedRequest first({{{.x = 0, .y = 0, .width = 2, .height = 2}}},
                      kPlutoRefreshUi, 1);
   OwnedRequest second({{{.x = 2, .y = 2, .width = 2, .height = 2}}},
@@ -411,8 +605,8 @@ TEST(MxcfbBackend, UsesUniqueNonzeroMarkersAcrossWrap) {
 
   const auto sent = syscalls.sent_updates();
   ASSERT_EQ(sent.size(), 2U);
-  EXPECT_EQ(sent[0].update_marker, std::numeric_limits<std::uint32_t>::max());
-  EXPECT_EQ(sent[1].update_marker, 1U);
+  EXPECT_EQ(sent[0].update_marker, 1U);
+  EXPECT_EQ(sent[1].update_marker, 2U);
   EXPECT_NE(sent[0].update_marker, sent[1].update_marker);
   const auto waited = syscalls.waited_markers();
   ASSERT_EQ(waited.size(), 2U);
@@ -426,7 +620,7 @@ TEST(MxcfbBackend, AppliesOneRequestBackpressureUntilRealCompletion) {
   BlockingMxcfbSyscalls syscalls;
   CallbackCapture callbacks;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend, &callbacks));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls, &callbacks));
   OwnedRequest first({{{.x = 0, .y = 0, .width = 2, .height = 2}}},
                      kPlutoRefreshUi, 10);
   OwnedRequest second({{{.x = 4, .y = 4, .width = 2, .height = 2}}},
@@ -458,11 +652,11 @@ TEST(MxcfbBackend, AppliesOneRequestBackpressureUntilRealCompletion) {
 
 TEST(MxcfbBackend, MarkerTimeoutFailsClosedWithoutFalseCallback) {
   BlockingMxcfbSyscalls syscalls;
-  syscalls.block_waits = false;
-  syscalls.wait_error = ETIMEDOUT;
   CallbackCapture callbacks;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend, &callbacks));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls, &callbacks));
+  syscalls.block_waits = false;
+  syscalls.wait_error = ETIMEDOUT;
   OwnedRequest owned({{{.x = 0, .y = 0, .width = 2, .height = 2}}});
 
   ASSERT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
@@ -479,15 +673,15 @@ TEST(MxcfbBackend, MarkerTimeoutFailsClosedWithoutFalseCallback) {
 
 TEST(MxcfbBackend, SendBackpressureDoesNotPublishSnapshotOrCompletion) {
   BlockingMxcfbSyscalls syscalls;
-  syscalls.send_error = EBUSY;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
+  syscalls.send_error = EBUSY;
   OwnedRequest owned({{{.x = 1, .y = 1, .width = 2, .height = 2}}});
 
   EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusAgain);
   EXPECT_TRUE(backend.ready(kPlutoRefreshUi));
   EXPECT_EQ(backend.wait_idle(0), kPlutoStatusOk);
-  EXPECT_EQ(syscalls.mapped_storage[kStride + 2U], kInitialPixel);
+  EXPECT_EQ(syscalls.mapped_storage[kStride + 2U], kSafeInitialPixel);
 
   std::vector<std::uint8_t> output(kTightStride * kHeight, 0);
   PlutoSurface snapshot{
@@ -498,7 +692,7 @@ TEST(MxcfbBackend, SendBackpressureDoesNotPublishSnapshotOrCompletion) {
       .format = kPlutoPixelFormatRgb565,
   };
   ASSERT_EQ(backend.snapshot(&snapshot), kPlutoStatusOk);
-  EXPECT_EQ(output[kTightStride + 2U], kInitialPixel);
+  EXPECT_EQ(output[kTightStride + 2U], kSafeInitialPixel);
 
   syscalls.send_error = EIO;
   EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusDeviceLost);
@@ -510,7 +704,7 @@ TEST(MxcfbBackend, SendBackpressureDoesNotPublishSnapshotOrCompletion) {
 TEST(MxcfbBackend, StrictlyRejectsMalformedAndUnsupportedRequests) {
   BlockingMxcfbSyscalls syscalls;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
   OwnedRequest owned({{{.x = 0, .y = 0, .width = 2, .height = 2}}});
 
   EXPECT_EQ(backend.submit(nullptr), kPlutoStatusInvalidArgument);
@@ -539,7 +733,7 @@ TEST(MxcfbBackend, StrictlyRejectsMalformedAndUnsupportedRequests) {
   owned.request.flags = kPlutoPresentFlagSparkleDevelop;
   EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusInvalidArgument);
   owned.request.flags = kPlutoPresentFlagSparkle;
-  EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusUnsupported);
+  EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
   EXPECT_EQ(syscalls.sent_updates().size(), 0U);
 }
 
@@ -547,7 +741,7 @@ TEST(MxcfbBackend, SuspendTimesOutClosedThenDrainsAndClosesCleanly) {
   BlockingMxcfbSyscalls syscalls;
   CallbackCapture callbacks;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend, &callbacks));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls, &callbacks));
   OwnedRequest owned({{{.x = 0, .y = 0, .width = 2, .height = 2}}});
   ASSERT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
   ASSERT_TRUE(syscalls.wait_for_wait_count(1));
@@ -567,7 +761,7 @@ TEST(MxcfbBackend, StopWaitsForAcceptedMarkerBeforeClosingDevice) {
   BlockingMxcfbSyscalls syscalls;
   CallbackCapture callbacks;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
-  ASSERT_TRUE(probe_and_start(&backend, &callbacks));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls, &callbacks));
   OwnedRequest owned({{{.x = 0, .y = 0, .width = 2, .height = 2}}});
   ASSERT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
   ASSERT_TRUE(syscalls.wait_for_wait_count(1));

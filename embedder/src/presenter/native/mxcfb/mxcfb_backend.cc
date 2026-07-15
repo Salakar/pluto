@@ -14,12 +14,15 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 namespace pluto::native::mxcfb {
 namespace {
 
 constexpr std::string_view kDriverName = "mxcfb_epdc";
 constexpr std::size_t kBytesPerPixel = 2;
 constexpr std::size_t kMaximumDamageRects = 64;
+constexpr std::byte kSafeInitialByte{0xff};
 constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagInkPriority | kPlutoPresentFlagPreDithered |
     kPlutoPresentFlagSettle | kPlutoPresentFlagSparkle |
@@ -27,6 +30,27 @@ constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagPixelResetWhite | kPlutoPresentFlagPixelResetRestore |
     kPlutoPresentFlagRequiredSettle | kPlutoPresentFlagPenTruth |
     kPlutoPresentSparklePhaseMask;
+
+std::uint32_t process_marker_epoch() {
+  // MXCFB markers are driver-global and can survive the fd that submitted
+  // them when a wait times out. Do not restart every presenter process at the
+  // same marker. Mix two independent host clocks, the process identity, and a
+  // process-local sequence so clean restarts do not deterministically alias
+  // the ordinary low marker epoch left by an earlier fault. Pluto reserves
+  // the high half of the marker space for entropy-seeded process epochs.
+  static std::atomic<std::uint64_t> sequence{1};
+  std::uint64_t mixed = static_cast<std::uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  mixed ^= static_cast<std::uint64_t>(
+               std::chrono::system_clock::now().time_since_epoch().count()) +
+           0x9e3779b97f4a7c15ULL;
+  mixed ^= static_cast<std::uint64_t>(::getpid()) << 32U;
+  mixed ^= sequence.fetch_add(1, std::memory_order_relaxed);
+  mixed = (mixed ^ (mixed >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+  mixed = (mixed ^ (mixed >> 27U)) * 0x94d049bb133111ebULL;
+  mixed ^= mixed >> 31U;
+  return static_cast<std::uint32_t>(mixed ^ (mixed >> 32U)) | 0x80000000U;
+}
 
 bool refresh_class_valid(PlutoRefreshClass refresh_class) {
   switch (refresh_class) {
@@ -72,6 +96,23 @@ uapi::UpdateRegion bounding_region(const PlutoRect *damage,
   };
 }
 
+void apply_stock_update_policy(PlutoRefreshClass refresh_class,
+                               uapi::UpdateData *update) {
+  update->update_mode = uapi::kUpdateModePartial;
+  switch (refresh_class) {
+  case kPlutoRefreshFast:
+    update->waveform_mode = uapi::kWaveformModeDirect;
+    update->temperature = uapi::kTemperatureRemarkableDraw;
+    return;
+  case kPlutoRefreshUi:
+  case kPlutoRefreshText:
+  case kPlutoRefreshFull:
+    update->waveform_mode = uapi::kWaveformModeQuality;
+    update->temperature = uapi::kTemperatureUseAmbient;
+    return;
+  }
+}
+
 } // namespace
 
 class MxcfbDisplayBackend::Impl final {
@@ -81,7 +122,8 @@ public:
       : profile_(profile),
         device_(device == nullptr ? std::make_unique<MxcfbDevice>()
                                   : std::move(device)),
-        next_marker_(first_marker == 0 ? 1 : first_marker) {}
+        next_marker_(first_marker == 0 ? process_marker_epoch()
+                                       : first_marker) {}
 
   ~Impl() { stop(); }
 
@@ -132,11 +174,9 @@ public:
 
     const PlutoStatus initialization_status = device_->initialize();
     if (initialization_status != kPlutoStatusOk) {
-      if (initialization_status == kPlutoStatusDeviceLost ||
-          initialization_status == kPlutoStatusInternal) {
-        mark_lost();
-      }
-      return initialization_status;
+      device_->close();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
     }
 
     const MxcfbFramebufferInfo &framebuffer_info = device_->framebuffer_info();
@@ -159,15 +199,52 @@ public:
       std::lock_guard<std::mutex> frame_lock(frame_mutex_);
       mirror_.resize(tight_stride *
                      static_cast<std::size_t>(profile_.panel.height));
-      for (int y = 0; y < profile_.panel.height; ++y) {
-        std::memcpy(mirror_.data() + static_cast<std::size_t>(y) * tight_stride,
-                    framebuffer.data() + static_cast<std::size_t>(y) *
-                                             framebuffer_info.stride_bytes,
-                    tight_stride);
-      }
+      std::fill(mirror_.begin(), mirror_.end(),
+                static_cast<std::uint8_t>(kSafeInitialByte));
+      // Initialize both visible and hidden virtual pages. No stale stock or
+      // failed-request bytes may become visible through a later whole-panel
+      // update or a future page experiment.
+      std::fill(framebuffer.begin(), framebuffer.end(), kSafeInitialByte);
+      std::atomic_thread_fence(std::memory_order_release);
     } catch (const std::bad_alloc &) {
       mark_lost();
       return kPlutoStatusInternal;
+    }
+
+    const PlutoStatus unblank_status = device_->unblank();
+    if (unblank_status != kPlutoStatusOk) {
+      device_->close();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+
+    uapi::UpdateData initial_update{};
+    initial_update.update_region = {
+        .top = 0,
+        .left = 0,
+        .width = static_cast<std::uint32_t>(profile_.panel.width),
+        .height = static_cast<std::uint32_t>(profile_.panel.height),
+    };
+    apply_stock_update_policy(kPlutoRefreshFull, &initial_update);
+    initial_update.update_marker = allocate_marker_locked();
+    const PlutoStatus initial_send_status =
+        device_->send_update(&initial_update);
+    if (initial_send_status != kPlutoStatusOk) {
+      device_->close();
+      mark_lost();
+      // No app request exists yet and the update is entirely backend-built.
+      // Once the known-state write boundary has been crossed, any refusal is
+      // a terminal display-ownership failure, including transient-looking
+      // EBUSY/EAGAIN. Retrying in this process could alias inherited EPDC
+      // queue state.
+      return kPlutoStatusDeviceLost;
+    }
+    const PlutoStatus initial_wait_status = device_->wait_for_update_complete(
+        initial_update.update_marker, nullptr);
+    if (initial_wait_status != kPlutoStatusOk) {
+      device_->close();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
     }
 
     {
@@ -181,11 +258,14 @@ public:
     try {
       worker_ = std::thread([this] { completion_worker(); });
     } catch (...) {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      accepting_ = false;
-      started_ = false;
-      lost_ = true;
-      ++hardware_faults_;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        accepting_ = false;
+        started_ = false;
+        lost_ = true;
+        ++hardware_faults_;
+      }
+      device_->close();
       return kPlutoStatusInternal;
     }
     return kPlutoStatusOk;
@@ -208,10 +288,10 @@ public:
     info.rect_alignment = static_cast<std::int32_t>(
         profile_.runtime.display.damage_alignment_pixels);
     info.max_inflight_updates = 1;
-    // Until the stock trace/camera oracle pins individual RM1 modes, every
-    // regional class uses AUTO and therefore shares one conservative fence.
-    // Full retains a pessimistic whole-panel budget.
-    info.nominal_latency_ms[0] = 500;
+    // The stock trace proves these two exact ioctl tuples but carries no action
+    // labels. This candidate maps the direct tuple to Fast and the quality
+    // tuple to UI/Text/Full; real-panel camera acceptance decides the policy.
+    info.nominal_latency_ms[0] = 250;
     info.nominal_latency_ms[1] = 500;
     info.nominal_latency_ms[2] = 500;
     info.nominal_latency_ms[3] = 2000;
@@ -231,7 +311,29 @@ public:
       return validation;
     }
     if ((request->flags & kPlutoPresentFlagSparkle) != 0) {
-      return kPlutoStatusUnsupported;
+      // RM1 has no sparse white top-off primitive. The presenter ABI requires
+      // unsupported Sparkle maintenance to complete as an accepted no-op.
+      // RegionScheduler installs its provisional inflight entry before this
+      // call, so a synchronous callback is race-safe.
+      PlutoPresentCompleteCallback callback = nullptr;
+      void *callback_user_data = nullptr;
+      {
+        std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (lost_) {
+          return kPlutoStatusDeviceLost;
+        }
+        if (!started_ || !accepting_ || outstanding_) {
+          return kPlutoStatusAgain;
+        }
+        callback = callback_;
+        callback_user_data = callback_user_data_;
+        ++completed_jobs_;
+      }
+      if (callback != nullptr) {
+        callback(request->frame_id, callback_user_data);
+      }
+      return kPlutoStatusOk;
     }
 
     std::lock_guard<std::mutex> admission_lock(admission_mutex_);
@@ -254,18 +356,16 @@ public:
     uapi::UpdateData update{};
     update.update_region =
         bounding_region(request->damage, request->damage_count);
-    update.waveform_mode = uapi::kWaveformModeAuto;
-    update.update_mode = uapi::kUpdateModePartial;
     update.update_marker = marker;
-    update.temperature = uapi::kTemperatureUseAmbient;
-    if (request->refresh_class == kPlutoRefreshFull) {
+    apply_stock_update_policy(request->refresh_class, &update);
+    if (request->refresh_class == kPlutoRefreshFull &&
+        (request->flags & kPlutoPresentFlagPenTruth) == 0) {
       update.update_region = {
           .top = 0,
           .left = 0,
           .width = static_cast<std::uint32_t>(profile_.panel.width),
           .height = static_cast<std::uint32_t>(profile_.panel.height),
       };
-      update.update_mode = uapi::kUpdateModeFull;
     }
 
     PlutoStatus send_status = kPlutoStatusInternal;

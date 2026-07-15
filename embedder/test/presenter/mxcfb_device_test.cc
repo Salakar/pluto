@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,6 +53,8 @@ public:
     variable.transp = {.offset = 0, .length = 0, .msb_right = 0};
   }
 
+  std::string kernel_release() override { return kernel_release_value; }
+
   int open(const char *path, int flags) override {
     calls.emplace_back("open");
     open_path = path;
@@ -88,6 +91,11 @@ public:
       if (change_fixed_contract_after_put) {
         ++fixed.capabilities;
       }
+      return 0;
+    }
+    if (request == uapi::kFramebufferBlank) {
+      blank_value = reinterpret_cast<std::uintptr_t>(argument);
+      ++blank_count;
       return 0;
     }
     if (request == uapi::kSendUpdate) {
@@ -149,6 +157,7 @@ public:
   std::vector<std::string> calls;
 
   int open_error = 0;
+  std::string kernel_release_value = "5.4.70-v1.6.3-rm10x";
   unsigned long failing_request = 0;
   int ioctl_error = EIO;
   int mmap_error = 0;
@@ -173,6 +182,8 @@ public:
   off_t mmap_offset = -1;
   int mmap_count = 0;
   int put_count = 0;
+  int blank_count = 0;
+  std::uintptr_t blank_value = std::numeric_limits<std::uintptr_t>::max();
   void *munmap_address = nullptr;
   std::size_t munmap_length = 0;
   int munmap_count = 0;
@@ -197,6 +208,7 @@ uapi::UpdateData valid_update(std::uint32_t marker = 73) {
 void open_and_initialize(MxcfbDevice *device) {
   ASSERT_EQ(device->open(rm1_profile()), kPlutoStatusOk);
   ASSERT_EQ(device->initialize(), kPlutoStatusOk);
+  ASSERT_EQ(device->unblank(), kPlutoStatusOk);
 }
 
 } // namespace
@@ -207,11 +219,12 @@ TEST(MxcfbUapi, PinsArm32StructureAndIoctlNumbers) {
   EXPECT_EQ(sizeof(uapi::UpdateData), 72U);
   EXPECT_EQ(sizeof(uapi::UpdateMarkerData), 8U);
   EXPECT_EQ(uapi::kPutVariableScreenInfo, 0x4601UL);
+  EXPECT_EQ(uapi::kFramebufferBlank, 0x4611UL);
   EXPECT_EQ(uapi::kSendUpdate, 0x4048462eUL);
   EXPECT_EQ(uapi::kWaitForUpdateComplete, 0xc008462fUL);
 }
 
-TEST(MxcfbDevice, ProbeThenInitializeMatchesTheStockModeAndMapOrder) {
+TEST(MxcfbDevice, ProbeThenInitializeMatchesTheOracleAndExplicitlyUnblanks) {
   FakeMxcfbSyscalls fake;
   MxcfbDevice device(&fake);
 
@@ -232,6 +245,7 @@ TEST(MxcfbDevice, ProbeThenInitializeMatchesTheStockModeAndMapOrder) {
   EXPECT_EQ(device.framebuffer_info().stride_bytes, kRm1Stride);
   EXPECT_EQ(device.initialize(), kPlutoStatusOk);
   EXPECT_TRUE(device.is_initialized());
+  EXPECT_FALSE(device.is_display_ready());
   EXPECT_EQ(fake.put_count, 1);
   EXPECT_EQ(fake.mmap_length, kRm1MappingBytes);
   EXPECT_NE(fake.mmap_protection & PROT_READ, 0);
@@ -248,7 +262,26 @@ TEST(MxcfbDevice, ProbeThenInitializeMatchesTheStockModeAndMapOrder) {
   EXPECT_EQ(fake.calls[4], "ioctl");
   EXPECT_EQ(fake.calls[5], "ioctl");
   EXPECT_EQ(fake.calls[6], "mmap");
+  EXPECT_EQ(device.unblank(), kPlutoStatusOk);
+  EXPECT_TRUE(device.is_display_ready());
+  EXPECT_EQ(fake.blank_count, 1);
+  EXPECT_EQ(fake.blank_value, uapi::kFramebufferUnblank);
+  EXPECT_EQ(device.unblank(), kPlutoStatusInvalidArgument);
   EXPECT_EQ(device.initialize(), kPlutoStatusInvalidArgument);
+}
+
+TEST(MxcfbDevice, RefusesUpdatesUntilTheKnownFramebufferIsUnblanked) {
+  FakeMxcfbSyscalls fake;
+  MxcfbDevice device(&fake);
+  ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+  ASSERT_EQ(device.initialize(), kPlutoStatusOk);
+  uapi::UpdateData update = valid_update();
+
+  EXPECT_EQ(device.send_update(&update), kPlutoStatusDeviceLost);
+  EXPECT_EQ(device.wait_for_update_complete(update.update_marker, nullptr),
+            kPlutoStatusDeviceLost);
+  EXPECT_EQ(fake.send_count, 0);
+  EXPECT_EQ(fake.wait_count, 0);
 }
 
 TEST(MxcfbDevice, FailsClosedWhenModeInitializationChangesVariableTiming) {
@@ -292,6 +325,22 @@ TEST(MxcfbDevice, FailsClosedWhenKernelRejectsPinnedModeInitialization) {
   EXPECT_FALSE(device.is_open());
 }
 
+TEST(MxcfbDevice, FailsClosedWhenUnblankIsRejected) {
+  {
+    FakeMxcfbSyscalls fake;
+    MxcfbDevice device(&fake);
+    ASSERT_EQ(device.open(rm1_profile()), kPlutoStatusOk);
+    ASSERT_EQ(device.initialize(), kPlutoStatusOk);
+    fake.failing_request = uapi::kFramebufferBlank;
+    fake.ioctl_error = EIO;
+
+    EXPECT_EQ(device.unblank(), kPlutoStatusDeviceLost);
+    EXPECT_EQ(fake.munmap_count, 1);
+    EXPECT_EQ(fake.close_count, 1);
+    EXPECT_FALSE(device.is_open());
+  }
+}
+
 TEST(MxcfbDevice, RejectsAProfileForAnotherDisplayDriverBeforeOpen) {
   FakeMxcfbSyscalls fake;
   MxcfbDevice device(&fake);
@@ -299,6 +348,16 @@ TEST(MxcfbDevice, RejectsAProfileForAnotherDisplayDriverBeforeOpen) {
   ASSERT_NE(move, nullptr);
 
   EXPECT_EQ(device.open(*move), kPlutoStatusUnsupported);
+  EXPECT_EQ(fake.open_count, 0);
+  EXPECT_FALSE(device.is_open());
+}
+
+TEST(MxcfbDevice, RejectsKernelReleaseDriftBeforeOpeningFramebuffer) {
+  FakeMxcfbSyscalls fake;
+  fake.kernel_release_value = "5.4.70-v1.6.3-rm99x";
+  MxcfbDevice device(&fake);
+
+  EXPECT_EQ(device.open(rm1_profile()), kPlutoStatusUnsupported);
   EXPECT_EQ(fake.open_count, 0);
   EXPECT_FALSE(device.is_open());
 }

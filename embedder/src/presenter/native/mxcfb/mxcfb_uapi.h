@@ -108,8 +108,17 @@ inline constexpr std::uint32_t kFramebufferRotateClockwise = 1;
 
 inline constexpr std::uint32_t kUpdateModePartial = 0;
 inline constexpr std::uint32_t kUpdateModeFull = 1;
+// Exact mode numbers observed from stock Xochitl on the accepted RM1 panel
+// firmware. Their names below describe Pluto's controlled bring-up candidates;
+// camera fixtures must still accept that policy on real glass.
+inline constexpr std::uint32_t kWaveformModeDirect = 1;
+inline constexpr std::uint32_t kWaveformModeQuality = 3;
 inline constexpr std::uint32_t kWaveformModeAuto = 257;
+inline constexpr std::int32_t kTemperatureRemarkableDraw = 24;
 inline constexpr std::int32_t kTemperatureUseAmbient = 0x1000;
+
+inline constexpr unsigned long kFramebufferBlank = 0x4611UL;
+inline constexpr unsigned long kFramebufferUnblank = 0;
 
 // Linux framebuffer retained its original fixed-number GET ioctls rather
 // than encoding the pointed-to structure size in the request number.

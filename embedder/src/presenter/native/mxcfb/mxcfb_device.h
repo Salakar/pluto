@@ -22,6 +22,7 @@ class MxcfbSyscalls {
 public:
   virtual ~MxcfbSyscalls() = default;
 
+  virtual std::string kernel_release() = 0;
   virtual int open(const char *path, int flags) = 0;
   virtual int ioctl(int fd, unsigned long request, void *argument) = 0;
   virtual void *mmap(void *address, std::size_t length, int protection,
@@ -54,13 +55,18 @@ public:
 
   PlutoStatus open(const GeneratedDeviceProfile &profile);
   // Reasserts the already validated stock mode at the first write boundary,
-  // then proves the kernel kept the exact framebuffer contract. open() stays
-  // observational so NativeDisplayBackend::probe() performs no display write.
+  // proves the kernel kept the exact framebuffer contract and maps the complete
+  // allocation. open() stays observational so NativeDisplayBackend::probe()
+  // performs no display write.
   PlutoStatus initialize();
+  // Called only after the mapped allocation has been replaced with a known
+  // safe image. A successful call is required before any EPDC update ioctl.
+  PlutoStatus unblank();
   void close();
 
   bool is_open() const { return fd_ >= 0; }
   bool is_initialized() const { return initialized_; }
+  bool is_display_ready() const { return display_ready_; }
   const MxcfbFramebufferInfo &framebuffer_info() const { return info_; }
   std::span<std::byte> framebuffer();
   std::string_view last_error() const { return last_error_; }
@@ -79,6 +85,7 @@ private:
   uapi::FramebufferFixedInfoArm32 fixed_info_{};
   uapi::FramebufferVariableInfoArm32 variable_info_{};
   bool initialized_ = false;
+  bool display_ready_ = false;
   std::string last_error_;
 };
 
