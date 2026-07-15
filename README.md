@@ -21,6 +21,8 @@ Pluto runs real Flutter apps on supported reMarkable e-ink tablets. You write
 an ordinary Flutter app; Pluto renders it with e-ink-aware refresh,
 damage-aware drawing, low-latency pen input, and touch.
 
+> A large part of Pluto’s development, happened in [Campus](http://campus.flutterflow.io/). It’s a new, local-first macOS app where every tool becomes a tile on an infinite canvas. I use it to keep my agents, tasks, terminals, device screens, notes, and tracking together in one spatially-aware workspace - even the live rig cameras and DGX Spark nodes. It helped a huge amount with reducing the amount of context switching and mental overhead I needed to build Pluto and my other projects. I work on building [Campus](http://campus.flutterflow.io/) during the day. I’d really appreciate the support - give it a try, and please [upvote Campus on Product Hunt](https://www.producthunt.com/products/flutterflow?launch=campus-4) to support me.
+
 There is one Pluto workflow. `pluto devices` identifies the connected tablet,
 and device-facing commands select the matching display and lifecycle backend
 internally. App authors use the same `provision`, `install`, `run`, `logs`,
