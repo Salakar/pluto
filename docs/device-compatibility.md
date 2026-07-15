@@ -156,8 +156,7 @@ Only after those checks pass should the tested matrix gain the new firmware.
 Pluto never intentionally leaves a tablet without a working UI. The native
 runtime uses one transactional boot installer, owned fallback service, bounded
 recovery receipts, and a verified stock peer root. Provisioning failure rolls
-back to stock; full uninstall restores stock before deleting the runtime and
-hard-removes retired third-party display-service residue.
+back to stock; full uninstall restores stock before deleting the runtime.
 
 When developing a native panel implementation:
 

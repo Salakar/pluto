@@ -50,9 +50,6 @@ tools/legacy/host-jit-render-proof/bundle/
 tools/legacy/host-jit-render-proof/*.png
 tools/legacy/host-jit-render-proof/build/
 
-# Device diagnostic binaries are local build outputs.
-tools/device/diagnostics/qtfb/build/
-
 # Do not remove:
 .idea/
 *.iml

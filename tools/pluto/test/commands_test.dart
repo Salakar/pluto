@@ -514,19 +514,6 @@ void main() {
       ),
       isTrue,
     );
-    expect(
-      <String>[
-        ...transport.commands,
-        ...transport.uploads.map((FakeUpload upload) => upload.remotePath),
-      ].any(
-        (String value) =>
-            value.contains('/home/root/xovi') ||
-            value.contains('appload-control.sock') ||
-            value.contains('qtfb'),
-      ),
-      isFalse,
-      reason: 'the retired integration is not an install fallback',
-    );
   });
 
   test('install --profile explicitly installs a profile AOT package', () async {
@@ -1019,24 +1006,6 @@ void main() {
             command.contains(' install'),
       ),
       isTrue,
-    );
-    expect(
-      transport.uploads.any(
-        (FakeUpload upload) =>
-            upload.remotePath.contains('/home/root/xovi') ||
-            upload.remotePath.contains('/home/root/pluto-arm'),
-      ),
-      isFalse,
-      reason: 'the retired integration receives no provisioned artifacts',
-    );
-    expect(
-      transport.commands.any(
-        (String command) =>
-            command.contains('appload-control.sock') &&
-            command.contains('--request'),
-      ),
-      isFalse,
-      reason: 'the retired control protocol is not a lifecycle backend',
     );
   });
 

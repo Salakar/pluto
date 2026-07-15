@@ -112,10 +112,6 @@ grep -q 'release payload contains embedded authentication' "$ASSEMBLER" ||
 if grep -q 'PAPER_CODEX_FAKE\|codexAcceptanceMode' "$ASSEMBLER"; then
   fail "release assembler still contains fake Codex acceptance wiring"
 fi
-if grep -Eqi 'appload|xovi|qtfb|cooperative' "$ASSEMBLER"; then
-  fail "universal native assembler still contains the retired integration"
-fi
-
 git -C "$ROOT" check-ignore -q .pluto-cache/build/codex-armv7/output/codex ||
   fail "Codex release output is not ignored"
 git -C "$ROOT" check-ignore -q \

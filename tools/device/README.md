@@ -167,11 +167,6 @@ restores stock on the live slot but exits nonzero and preserves the runtime;
 this prevents a later A/B flip from booting an override whose supervisor was
 deleted.
 
-Provisioning and full uninstall also hard-remove the retired third-party
-display-integration roots, sockets, service drop-ins, staging directories, and
-receipts. Those paths are cleanup denylist entries only; they are never a
-runtime fallback.
-
 `PLUTO_ROOT=<staged-root> pluto-boot-install.sh validate` performs the
 release-AOT launcher/runtime gate without remounting the root filesystem or
 changing boot state. Provisioning runs the same requirements before installing

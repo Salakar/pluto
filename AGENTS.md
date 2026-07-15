@@ -145,7 +145,7 @@ install, run, logs, screenshot, restore, and uninstall dispatch internally.
   `tools/device/README.md`.
 - Never bypass the CLI's device-target check or manually install a different
   target's payload. The native runtime owns the display service; provisioning
-  removes retired third-party display hooks and refuses mixed-target content.
+  refuses mixed-target content and validates boot recovery before activation.
 
 ## Running tests
 

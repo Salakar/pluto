@@ -165,9 +165,6 @@ assert_contains "$ARM_PAYLOAD_DRY_RUN" \
   "Native-runtime handoff: pluto provision --payload-dir $ROOT/build/pluto-payload/linux-arm"
 [[ "$ARM_PAYLOAD_DRY_RUN" != *"engine/profile/libflutter_engine.so"* ]] ||
   fail "release-only linux-arm payload included the profile engine"
-[[ "$ARM_PAYLOAD_DRY_RUN" != *"cooperative"* ]] ||
-  fail "native linux-arm payload still names the cooperative backend"
-
 ARM_STANDARD_DRY_RUN="$(
   bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm --standard
 )"

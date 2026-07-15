@@ -94,8 +94,8 @@ and reinstall it before launching.
 The raw embedder's `--dart-entrypoint-args` path predates the common device-aware
 workflow. It is retained only for an isolated direct-backend maintainer
 diagnostic on a disposable test session; it is not a supported installation or
-compatibility procedure, does not apply to the managed stock-session backend,
-and must not replace `pluto build`, `install`, `run`, or `provision`.
+compatibility procedure, does not apply to normal native sessions, and must not
+replace `pluto build`, `install`, `run`, or `provision`.
 
 In that archived diagnostic, the same options were available at runtime without
 recompiling:

@@ -525,75 +525,6 @@ final class LiveDeviceOperations {
     );
   }
 
-  /// Removes every artifact from Pluto's retired stock-session integration.
-  /// This is intentionally a hard cut: a native provision never preserves or
-  /// reactivates the old display path.
-  Future<void> _removeLegacyDisplayResidue() async {
-    await _run(
-      'set -eu; '
-      'for proc in /proc/[0-9]*; do '
-      'env=\$proc/environ; cmd=\$proc/cmdline; '
-      '[ -r "\$env" ] && [ -r "\$cmd" ] || continue; '
-      'tr "\\000" "\\n" < "\$env" 2>/dev/null | '
-      'grep -Eq ${_q(r"^PLUTO_APP_ID=dev[.]pluto[.]")} || continue; '
-      'tr "\\000" " " < "\$cmd" 2>/dev/null | '
-      'grep -Fq -- ${_q('--presenter=qtfb')} || continue; '
-      'pid=\${proc#/proc/}; kill -TERM "\$pid" 2>/dev/null || true; done; '
-      'sleep 0.2; '
-      'for proc in /proc/[0-9]*; do '
-      'cmd=\$proc/cmdline; [ -r "\$cmd" ] || continue; '
-      'tr "\\000" " " < "\$cmd" 2>/dev/null | '
-      'grep -Fq -- ${_q('--presenter=qtfb')} || continue; '
-      'pid=\${proc#/proc/}; kill -KILL "\$pid" 2>/dev/null || true; done; '
-      'systemctl stop pluto-deadman.timer pluto-deadman.service '
-      '2>/dev/null || true; '
-      'systemctl reset-failed pluto-deadman.timer pluto-deadman.service '
-      '2>/dev/null || true; '
-      'if grep -Fq ${_q(' /etc/systemd/system/xochitl.service.d ')} '
-      '/proc/mounts 2>/dev/null; then '
-      'umount /etc/systemd/system/xochitl.service.d; fi; '
-      'for dir in /etc/systemd/system/xochitl.service.d '
-      '/run/systemd/system/xochitl.service.d '
-      '/usr/lib/systemd/system/xochitl.service.d; do '
-      '[ -d "\$dir" ] || continue; for file in "\$dir"/*; do '
-      '[ -f "\$file" ] || continue; '
-      'grep -Eiq ${_q('xovi|appload|qtfb')} "\$file" || continue; '
-      'rm -f "\$file"; done; rmdir "\$dir" 2>/dev/null || true; done; '
-      'rm -rf /home/root/xovi /home/root/pluto-arm '
-      '/home/root/.pluto-xovi-* /home/root/.pluto-integration-* '
-      '/home/root/.pluto-no-integration-stage '
-      '/home/root/.pluto-uninstall-* /home/root/.pluto-restart-* '
-      '/run/pluto/integration-provision.lock; '
-      'rm -f /home/root/.pluto-xochitl-restart-ledger* '
-      '/run/pluto/appload-control.sock /tmp/qtfb.sock* '
-      '${_q('$deviceRoot/bin/pluto-apploadctl')}; '
-      'if [ -d ${_q(deviceRoot)} ]; then '
-      'find ${_q(deviceRoot)} -type f -name ${_q('._*')} '
-      '-exec rm -f {} \\; 2>/dev/null || true; '
-      'find ${_q(deviceRoot)} -type f -name ${_q('.DS_Store')} '
-      '-exec rm -f {} \\; 2>/dev/null || true; '
-      'find ${_q(deviceRoot)} -type d -name ${_q('.AppleDouble')} '
-      '-prune -exec rm -rf {} \\; 2>/dev/null || true; '
-      'for pattern in ${_q('._*')} ${_q('.DS_Store')} '
-      '${_q('.AppleDouble')}; do '
-      'found=\$(find ${_q(deviceRoot)} -name "\$pattern" '
-      '-print -quit 2>/dev/null || true); '
-      '[ -z "\$found" ] || exit 1; done; fi; '
-      'systemctl daemon-reload 2>/dev/null || true; '
-      'for forbidden in /home/root/xovi /home/root/pluto-arm '
-      '/home/root/.pluto-xovi-* /home/root/.pluto-integration-* '
-      '/home/root/.pluto-no-integration-stage '
-      '/home/root/.pluto-uninstall-* /home/root/.pluto-restart-* '
-      '/home/root/.pluto-xochitl-restart-ledger* '
-      '/run/pluto/integration-provision.lock '
-      '/run/pluto/appload-control.sock /tmp/qtfb.sock* '
-      '${_q('$deviceRoot/bin/pluto-apploadctl')}; do '
-      '[ ! -e "\$forbidden" ] && [ ! -L "\$forbidden" ] || exit 1; '
-      'done',
-      failure: 'could not remove retired display and host metadata artifacts',
-    );
-  }
-
   /// Installs the target-selected native runtime and complete app layouts.
   Future<DeviceOperationResult> provision({
     required List<PayloadFile> runtime,
@@ -630,7 +561,6 @@ final class LiveDeviceOperations {
             'were changed.',
       );
     }
-    await _removeLegacyDisplayResidue();
     final List<String> layout = <String>[
       'bin',
       'engine',
@@ -746,7 +676,6 @@ final class LiveDeviceOperations {
       'exit 1; fi',
       failure: 'system uninstall failed',
     );
-    await _removeLegacyDisplayResidue();
     return const DeviceOperationResult(
       ok: true,
       message: 'Pluto removed; stock reMarkable UI restored as boot default.',

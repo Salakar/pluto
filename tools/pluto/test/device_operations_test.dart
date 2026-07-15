@@ -571,44 +571,6 @@ void main() {
         bootInstall,
         greaterThan(transport.events.indexOf('exec:$appSwap')),
       );
-      final String retiredCleanup = fake.commands.singleWhere(
-        (String command) =>
-            command.contains('rm -rf /home/root/xovi') &&
-            command.contains('/run/pluto/appload-control.sock') &&
-            command.contains('/tmp/qtfb.sock'),
-      );
-      expect(
-        retiredCleanup,
-        allOf(
-          contains("'$root/bin/pluto-apploadctl'; if"),
-          contains("'$root/bin/pluto-apploadctl'; do"),
-          contains("-name '._*'"),
-          contains("-name '.DS_Store'"),
-          contains("-name '.AppleDouble'"),
-        ),
-        reason:
-            'the unpublished control binary and host metadata are removed '
-            'and their absence is asserted',
-      );
-      final ProcessResult shellSyntax = await Process.run('sh', <String>[
-        '-n',
-        '-c',
-        retiredCleanup,
-      ]);
-      expect(
-        shellSyntax.exitCode,
-        0,
-        reason: 'cleanup command must parse: ${shellSyntax.stderr}',
-      );
-      expect(
-        transport.events.indexOf('exec:$retiredCleanup'),
-        lessThan(
-          transport.events.indexWhere(
-            (String event) => event.startsWith('upload-file:'),
-          ),
-        ),
-        reason: 'retired display artifacts are removed before runtime upload',
-      );
     },
   );
 
@@ -1408,15 +1370,6 @@ void main() {
       ),
       reason: 'missing authoritative scripts must fail without deleting ROOT',
     );
-    expect(
-      transport.commands.any(
-        (String command) =>
-            command.contains('rm -rf /home/root/xovi') &&
-            command.contains('/tmp/qtfb.sock'),
-      ),
-      isTrue,
-      reason: 'system uninstall also hard-removes retired display artifacts',
-    );
   });
 
   test('installPackage extracts and commits through the transaction', () async {
@@ -2073,7 +2026,6 @@ void main() {
     );
     expect(control, contains("client='$root/bin/pluto-controlctl'"));
     expect(control, contains("--socket '/run/pluto/embedder-control.sock'"));
-    expect(control, isNot(contains('/home/root/xovi/bin')));
     final String preflight = transport.commands.singleWhere(
       (String command) => command.contains('wc -c < "\$artifact"'),
     );
