@@ -11,7 +11,7 @@ import 'package:pluto_ui/pluto_ui.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('legacy runtime enum manifest remains a healthy launcher app', () async {
+  test('canonical runtime manifest remains a healthy launcher app', () async {
     const MethodChannel channel = MethodChannel('test/pluto/apps');
     final ChannelManifestRepository repository = ChannelManifestRepository(
       channel: channel,
@@ -26,8 +26,8 @@ void main() {
           expect(call.method, 'list');
           return <Object?>[
             <String, Object?>{
-              'id': 'dev.example.legacy',
-              'manifest': _legacyManifest,
+              'id': 'dev.example.notes',
+              'manifest': _canonicalManifest,
               'install': _releaseInstall,
               'sizeBytes': 2048,
             },
@@ -58,15 +58,15 @@ void main() {
           return <Object?>[
             <String, Object?>{
               'id': kLauncherAppId,
-              'manifest': _legacyManifest.replaceAll(
-                'dev.example.legacy',
+              'manifest': _canonicalManifest.replaceAll(
+                'dev.example.notes',
                 kLauncherAppId,
               ),
               'install': _releaseInstall,
             },
             <String, Object?>{
-              'id': 'dev.example.legacy',
-              'manifest': _legacyManifest,
+              'id': 'dev.example.notes',
+              'manifest': _canonicalManifest,
               'install': _releaseInstall,
             },
           ];
@@ -75,7 +75,7 @@ void main() {
     final List<LauncherApp> apps = await repository.watchApps().first;
 
     expect(apps.map((LauncherApp app) => app.id.value), <String>[
-      'dev.example.legacy',
+      'dev.example.notes',
     ]);
   });
 
@@ -99,9 +99,9 @@ void main() {
         .setMockMethodCallHandler(channel, (_) async {
           return <Object?>[
             <String, Object?>{
-              'id': 'dev.example.legacy',
+              'id': 'dev.example.notes',
               'path': appDir.path,
-              'manifest': _legacyManifest,
+              'manifest': _canonicalManifest,
               'install': _releaseInstall,
             },
           ];
@@ -460,14 +460,14 @@ void main() {
   );
 }
 
-const String _legacyManifest = '''
+const String _canonicalManifest = '''
 {
   "schema": 1,
-  "id": "dev.example.legacy",
-  "name": "Legacy",
+  "id": "dev.example.notes",
+  "name": "Notes",
   "version": "1.0.0",
   "runtime": {
-    "type": "flutterAot",
+    "type": "flutter-aot",
     "appElf": "lib/app.so",
     "assets": "flutter_assets"
   },

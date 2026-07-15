@@ -121,41 +121,7 @@ display:
     expect(result.valueOrNull!.runtime.kind, AppRuntimeKind.flutterKernel);
   });
 
-  test('legacy enum runtime names decode and re-encode canonically', () {
-    for (final (String, AppRuntimeKind, String) fixture
-        in <(String, AppRuntimeKind, String)>[
-          ('flutterAot', AppRuntimeKind.flutterAot, '"type":"flutter-aot"'),
-          (
-            'flutterKernel',
-            AppRuntimeKind.flutterKernel,
-            '"type":"flutter-kernel"',
-          ),
-        ]) {
-      final String runtimeFields = fixture.$2 == AppRuntimeKind.flutterAot
-          ? '"appElf":"lib/app.so","assets":"flutter_assets"'
-          : '"assets":"flutter_assets"';
-      final Result<AppManifest, ManifestError> result = AppManifest.decode('''
-{
-  "schema": 1,
-  "id": "dev.example.legacy",
-  "name": "Legacy",
-  "version": "1.0.0",
-  "runtime": {"type":"${fixture.$1}",$runtimeFields},
-  "engine": {
-    "flutterVersion": "3.44.4",
-    "engineCommit": "$engineCommit",
-    "plutoAbi": 1
-  }
-}
-''');
-
-      expect(result.isOk, isTrue, reason: fixture.$1);
-      expect(result.valueOrNull?.runtime.kind, fixture.$2);
-      expect(result.valueOrNull?.encode(), contains(fixture.$3));
-    }
-  });
-
-  test('runtime compatibility aliases do not weaken enum validation', () {
+  test('runtime type matching is exact', () {
     final Result<AppManifest, ManifestError> result = AppManifest.decode('''
 {
   "schema": 1,

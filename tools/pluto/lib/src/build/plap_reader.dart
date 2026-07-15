@@ -351,11 +351,6 @@ _ValidatedArchiveSlice _validateTargetSlice({
     );
   }
   final Set<String> paths = entries.keys.toSet();
-  if (paths.contains('bundle/app.so')) {
-    throw ArtifactVerificationException(
-      message: '$target slice must use bundle/lib/app.so.',
-    );
-  }
   final bool hasAotElf = paths.contains('bundle/lib/app.so');
   final bool hasKernel = paths.contains(
     'bundle/flutter_assets/kernel_blob.bin',

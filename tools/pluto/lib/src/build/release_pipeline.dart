@@ -305,9 +305,7 @@ final class BuildLayoutMetadata {
     final AppRuntimeKind? runtimeKind = runtimeType is String
         ? AppRuntimeKind.fromWireName(runtimeType)
         : null;
-    final bool hasAot =
-        File('$layoutDirectory/bundle/lib/app.so').existsSync() ||
-        File('$layoutDirectory/bundle/app.so').existsSync();
+    final bool hasAot = File('$layoutDirectory/bundle/lib/app.so').existsSync();
     final bool hasKernel = File(
       '$layoutDirectory/bundle/flutter_assets/kernel_blob.bin',
     ).existsSync();
@@ -324,11 +322,11 @@ final class BuildLayoutMetadata {
               'app.so, and contain no kernel_blob.bin.',
         );
       }
-      final String appSo =
-          File('$layoutDirectory/bundle/lib/app.so').existsSync()
-          ? '$layoutDirectory/bundle/lib/app.so'
-          : '$layoutDirectory/bundle/app.so';
-      verifyAotElfForMode(appSo, buildMode, targetPlatform: targetPlatform);
+      verifyAotElfForMode(
+        '$layoutDirectory/bundle/lib/app.so',
+        buildMode,
+        targetPlatform: targetPlatform,
+      );
     } else if (runtimeKind != AppRuntimeKind.flutterKernel ||
         !hasKernel ||
         hasAot) {

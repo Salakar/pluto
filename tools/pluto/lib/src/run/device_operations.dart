@@ -96,6 +96,8 @@ final class _PreparedLayoutFile {
   final Uint8List bytes;
 }
 
+const String _buildMetadataFileName = 'build-metadata.json';
+
 final class _PreparedPayloadApp {
   const _PreparedPayloadApp({
     required this.app,
@@ -342,8 +344,31 @@ final class LiveDeviceOperations {
         'Expected ${manifest.path} to contain a JSON object.',
       );
     }
+    final File buildMetadata = File(
+      '${manifest.parent.path}/$_buildMetadataFileName',
+    );
+    if (FileSystemEntity.typeSync(buildMetadata.path, followLinks: false) !=
+        FileSystemEntityType.file) {
+      throw DeviceOperationException(
+        'missing build metadata for ${app.appId}',
+        'Expected a regular layout file at ${buildMetadata.path}.',
+      );
+    }
     final List<_PreparedLayoutFile> layoutFiles = <_PreparedLayoutFile>[];
-    final Set<String> seen = <String>{};
+    try {
+      layoutFiles.add(
+        _PreparedLayoutFile(
+          relativePath: _buildMetadataFileName,
+          bytes: Uint8List.fromList(buildMetadata.readAsBytesSync()),
+        ),
+      );
+    } on FileSystemException catch (error) {
+      throw DeviceOperationException(
+        'could not read build metadata for ${app.appId}',
+        error.message,
+      );
+    }
+    final Set<String> seen = <String>{_buildMetadataFileName};
     for (final String field in const <String>['icon', 'iconMono']) {
       if (!decoded.containsKey(field)) {
         continue;
@@ -540,7 +565,7 @@ final class LiveDeviceOperations {
       "[[:space:]]*\"debug\"' \"\$d/install.json\" 2>/dev/null && "
       'is_debug=1; '
       "grep -Eq '\"type\"[[:space:]]*:[[:space:]]*"
-      "\"(flutter-kernel|flutterKernel)\"' \"\$d/manifest.json\" "
+      "\"flutter-kernel\"' \"\$d/manifest.json\" "
       '2>/dev/null && is_debug=1; '
       '[ ! -f "\$d/bundle/flutter_assets/kernel_blob.bin" ] || is_debug=1; '
       '[ "\$is_debug" = 1 ] || continue; app_id=\${d##*/}; '
@@ -1414,8 +1439,6 @@ final class LiveDeviceOperations {
 elif grep -q '"buildMode"[[:space:]]*:[[:space:]]*"profile"' "$d/install.json" 2>/dev/null; then echo profile;
 elif grep -q '"buildMode"[[:space:]]*:[[:space:]]*"release"' "$d/install.json" 2>/dev/null; then echo release;
 elif grep -q '"buildMode"[[:space:]]*:[[:space:]]*"debug"' "$d/install.json" 2>/dev/null; then echo debug;
-elif [ -f "$d/bundle/lib/app.so" ] || [ -f "$d/bundle/app.so" ]; then echo release;
-elif [ -f "$d/bundle/flutter_assets/kernel_blob.bin" ]; then echo debug;
 else echo unknown; fi''',
     );
     final String mode = result.stdout.trim();

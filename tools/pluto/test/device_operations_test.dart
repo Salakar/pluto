@@ -4,7 +4,6 @@ import 'dart:typed_data';
 
 import 'package:pluto_cli/src/build/package_builder.dart';
 import 'package:pluto_cli/src/build/plap_reader.dart';
-import 'package:pluto_cli/src/build/tar_writer.dart';
 import 'package:pluto_cli/src/artifacts/checksums.dart';
 import 'package:pluto_cli/src/errors.dart';
 import 'package:pluto_cli/src/process.dart';
@@ -267,42 +266,15 @@ Future<File> _writePlap(
   return plap;
 }
 
-File _writeRawPlap(Directory temp, String name, List<PackageEntry> payload) {
-  final Map<String, String> hashes = <String, String>{
-    for (final PackageEntry entry in payload)
-      entry.path: sha256Bytes(entry.bytes),
-  };
-  final Uint8List integrity = Uint8List.fromList(
-    utf8.encode(
-      jsonEncode(<String, Object?>{
-        'compression': 'none',
-        'createdBy': 'pluto legacy-fixture',
-        'files': hashes,
-        'treeSha256': sha256Tree(hashes),
-      }),
-    ),
-  );
-  final Uint8List bytes = const TarArchiveWriter().write(<TarFileEntry>[
-    for (final PackageEntry entry in payload)
-      TarFileEntry(path: entry.path, bytes: entry.bytes),
-    TarFileEntry(path: 'INTEGRITY.json', bytes: integrity),
-  ]);
-  return File('${temp.path}/$name.plap')..writeAsBytesSync(bytes);
-}
-
-Uint8List _legacyManifest(String runtimeType) => Uint8List.fromList(
-  utf8.encode(
-    '{"id":"dev.example.notes","runtime":{"type":"$runtimeType",'
-    '"appElf":"lib/app.so","assets":"flutter_assets"}}',
-  ),
-);
-
-Uint8List _releaseMetadata(String target) => Uint8List.fromList(
+Uint8List _buildMetadataBytes({
+  String target = 'linux-arm64',
+  String buildMode = 'release',
+}) => Uint8List.fromList(
   utf8.encode(
     jsonEncode(<String, Object?>{
       'schema': 1,
-      'buildMode': 'release',
-      'engineFlavor': 'release',
+      'buildMode': buildMode,
+      'engineFlavor': buildMode,
       'flutterVersion': '3.44.4',
       'engineCommit': 'abc',
       'target': target,
@@ -336,6 +308,14 @@ void main() {
         '"icon":"assets/pluto/icon.png","runtime":'
         '{"type":"flutter-kernel","assets":"flutter_assets"}}',
       );
+      final Uint8List launcherMetadata = _buildMetadataBytes();
+      final Uint8List appMetadata = _buildMetadataBytes(buildMode: 'debug');
+      File(
+        '${launcherBundle.parent.path}/build-metadata.json',
+      ).writeAsBytesSync(launcherMetadata);
+      File(
+        '${appBundle.parent.path}/build-metadata.json',
+      ).writeAsBytesSync(appMetadata);
       File('${launcherBundle.parent.path}/assets/pluto/icon.png')
         ..createSync(recursive: true)
         ..writeAsBytesSync(<int>[10, 11]);
@@ -448,10 +428,21 @@ void main() {
         fake.uploads.map((FakeUpload upload) => upload.remotePath),
         containsAll(<String>[
           '$launcherStage/manifest.json',
+          '$launcherStage/build-metadata.json',
           '$launcherStage/install.json',
           '$launcherStage/assets/pluto/icon.png',
           '$launcherStage/assets/pluto/icon-mono.png',
         ]),
+      );
+      expect(
+        fake.uploads
+            .singleWhere(
+              (FakeUpload upload) =>
+                  upload.remotePath == '$launcherStage/build-metadata.json',
+            )
+            .bytes,
+        orderedEquals(launcherMetadata),
+        reason: 'launcher build metadata is staged byte-for-byte',
       );
       final String launcherValidation = fake.commands.singleWhere(
         (String command) =>
@@ -526,6 +517,16 @@ void main() {
         ),
         isTrue,
         reason: 'the staged app is complete before it becomes live',
+      );
+      expect(
+        fake.uploads
+            .singleWhere(
+              (FakeUpload upload) =>
+                  upload.remotePath == '$appStage/build-metadata.json',
+            )
+            .bytes,
+        orderedEquals(appMetadata),
+        reason: 'app build metadata is staged byte-for-byte',
       );
       expect(
         fake.uploads
@@ -755,6 +756,9 @@ void main() {
       File(
         '${bundle.parent.path}/manifest.json',
       ).writeAsStringSync('{"id":"dev.example.icon","icon":"${fixture.icon}"}');
+      File(
+        '${bundle.parent.path}/build-metadata.json',
+      ).writeAsBytesSync(_buildMetadataBytes());
       if (fixture.create) {
         File('${bundle.parent.path}/${fixture.icon}')
           ..createSync(recursive: true)
@@ -793,6 +797,59 @@ void main() {
       expect(transport.commands, isEmpty, reason: fixture.name);
       expect(transport.uploads, isEmpty, reason: fixture.name);
       expect(transport.directoryUploads, isEmpty, reason: fixture.name);
+    }
+  });
+
+  test('provision requires regular build metadata before device I/O', () async {
+    for (final String fixture in <String>['missing', 'directory', 'symlink']) {
+      final Directory temp = Directory.systemTemp.createTempSync(
+        'pluto_build_metadata_$fixture',
+      );
+      addTearDown(() => temp.deleteSync(recursive: true));
+      final Directory bundle = Directory('${temp.path}/layout/bundle')
+        ..createSync(recursive: true);
+      File('${bundle.parent.path}/manifest.json').writeAsStringSync(
+        '{"id":"dev.example.notes","runtime":'
+        '{"type":"flutter-aot","appElf":"lib/app.so",'
+        '"assets":"flutter_assets"}}',
+      );
+      final String metadataPath = '${bundle.parent.path}/build-metadata.json';
+      if (fixture == 'directory') {
+        Directory(metadataPath).createSync();
+      } else if (fixture == 'symlink') {
+        final File target = File('${temp.path}/metadata-target.json')
+          ..writeAsBytesSync(_buildMetadataBytes());
+        Link(metadataPath).createSync(target.path);
+      }
+      final FakeTransport transport = _moveTransport('h');
+
+      await expectLater(
+        LiveDeviceOperations(transport).provision(
+          runtime: const <PayloadFile>[],
+          apps: <PayloadApp>[
+            PayloadApp(
+              appId: 'dev.example.notes',
+              bundleDir: bundle.path,
+              buildMode: 'release',
+              engineFlavor: 'release',
+              target: 'linux-arm64',
+            ),
+          ],
+          payloadTarget: 'linux-arm64',
+        ),
+        throwsA(
+          isA<DeviceOperationException>().having(
+            (DeviceOperationException error) => error.message,
+            'message',
+            contains('missing build metadata'),
+          ),
+        ),
+        reason: fixture,
+      );
+
+      expect(transport.commands, isEmpty, reason: fixture);
+      expect(transport.uploads, isEmpty, reason: fixture);
+      expect(transport.directoryUploads, isEmpty, reason: fixture);
     }
   });
 
@@ -1031,7 +1088,7 @@ void main() {
       );
 
       final String cleanup = transport.commands.singleWhere(
-        (String command) => command.contains('flutterKernel'),
+        (String command) => command.contains('flutter-kernel'),
       );
       expect(cleanup, contains("'$root/engine'/.*.pluto-new-*"));
       expect(cleanup, contains("'$root/engine'/.*.pluto-old-*"));
@@ -1045,7 +1102,7 @@ void main() {
       expect(cleanup, contains(r'case "$flavor" in release|profile'));
       expect(cleanup, contains(r'mv "$engine" "$stale"'));
       expect(cleanup, contains('"(buildMode|engineFlavor)"'));
-      expect(cleanup, contains('"(flutter-kernel|flutterKernel)"'));
+      expect(cleanup, contains('"flutter-kernel"'));
       expect(cleanup, contains(r'$d/bundle/flutter_assets/kernel_blob.bin'));
       expect(cleanup, contains(r'mv "$d" "$stale"'));
       expect(cleanup, contains('$root/state/default-app'));
@@ -1084,15 +1141,14 @@ void main() {
       }
 
       write('engine/debug/libflutter_engine.so', 'jit-engine');
-      write('engine/current/libflutter_engine.so', 'legacy-jit-engine');
       write('state/default-app', 'dev.example.debug-record\n');
       write(
         'apps/dev.example.debug-record/install.json',
         '{"buildMode":"debug","engineFlavor":"debug"}',
       );
       write(
-        'apps/dev.example.legacy/manifest.json',
-        '{"runtime":{"type":"flutterKernel"}}',
+        'apps/dev.example.debug-manifest/manifest.json',
+        '{"runtime":{"type":"flutter-kernel"}}',
       );
       write(
         'apps/dev.example.kernel/bundle/flutter_assets/kernel_blob.bin',
@@ -1110,7 +1166,7 @@ void main() {
       write('apps/dev.example.unrecorded-aot/bundle/lib/app.so', 'aot');
       for (final String appId in <String>[
         'dev.example.debug-record',
-        'dev.example.legacy',
+        'dev.example.debug-manifest',
         'dev.example.kernel',
         'dev.example.release',
         'dev.example.unrecorded-aot',
@@ -1125,7 +1181,7 @@ void main() {
         payloadTarget: 'linux-arm64',
       );
       final String cleanup = transport.commands.singleWhere(
-        (String command) => command.contains('flutterKernel'),
+        (String command) => command.contains('flutter-kernel'),
       );
 
       final ProcessResult result = await Process.run('sh', <String>[
@@ -1134,10 +1190,9 @@ void main() {
       ]);
       expect(result.exitCode, 0, reason: '${result.stderr}');
       expect(Directory('$deviceRoot/engine/debug').existsSync(), isFalse);
-      expect(Directory('$deviceRoot/engine/current').existsSync(), isFalse);
       for (final String appId in <String>[
         'dev.example.debug-record',
-        'dev.example.legacy',
+        'dev.example.debug-manifest',
         'dev.example.kernel',
       ]) {
         expect(
@@ -1234,7 +1289,7 @@ void main() {
         payloadTarget: 'linux-arm64',
       );
       final String cleanup = transport.commands.singleWhere(
-        (String command) => command.contains('flutterKernel'),
+        (String command) => command.contains('flutter-kernel'),
       );
 
       final ProcessResult result = await Process.run('sh', <String>[
@@ -1459,6 +1514,16 @@ void main() {
     expect(
       selectedEntries['assets/pluto/icon.png'],
       orderedEquals(_arm64IconBytes),
+    );
+    final Uint8List installedMetadata = selectedEntries['build-metadata.json']!;
+    expect(
+      sha256Bytes(installedMetadata),
+      selected.payloadHashes['build-metadata.json'],
+      reason: 'package install uploads the selected metadata byte-for-byte',
+    );
+    expect(
+      jsonDecode(utf8.decode(installedMetadata)),
+      containsPair('target', 'linux-arm64'),
     );
     final FakeUpload installUpload = transport.uploads.singleWhere(
       (FakeUpload upload) =>
@@ -1846,78 +1911,6 @@ void main() {
           (ArtifactVerificationException error) => error.message,
           'message',
           contains('Gzip .plap packages are not supported'),
-        ),
-      ),
-    );
-
-    expect(transport.commands, isEmpty);
-    expect(transport.uploads, isEmpty);
-  });
-
-  test('installPackage hard-rejects legacy runtime spelling', () async {
-    final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
-    addTearDown(() => temp.deleteSync(recursive: true));
-    const String prefix = 'targets/linux-arm64/';
-    final File plap = _writeRawPlap(temp, 'legacy-runtime', <PackageEntry>[
-      PackageEntry(path: 'manifest.json', bytes: _legacyManifest('flutterAot')),
-      PackageEntry(
-        path: '${prefix}build-metadata.json',
-        bytes: _releaseMetadata('linux-arm64'),
-      ),
-      PackageEntry(path: '${prefix}bundle/lib/app.so', bytes: releaseAotElf()),
-      PackageEntry(
-        path: '${prefix}bundle/flutter_assets/AssetManifest.bin',
-        bytes: Uint8List.fromList(<int>[1]),
-      ),
-    ]);
-    final FakeTransport transport = FakeTransport(
-      endpoint: const DeviceEndpoint(host: 'h'),
-    );
-
-    await expectLater(
-      LiveDeviceOperations(transport).installPackage(plap.path),
-      throwsA(
-        isA<ArtifactVerificationException>().having(
-          (ArtifactVerificationException error) => error.message,
-          'message',
-          contains('runtime flutterAot does not match'),
-        ),
-      ),
-    );
-
-    expect(transport.commands, isEmpty);
-    expect(transport.uploads, isEmpty);
-  });
-
-  test('installPackage hard-rejects the old flat archive layout', () async {
-    final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final File plap = _writeRawPlap(temp, 'legacy-flat', <PackageEntry>[
-      PackageEntry(
-        path: 'manifest.json',
-        bytes: _legacyManifest('flutter-aot'),
-      ),
-      PackageEntry(
-        path: 'build-metadata.json',
-        bytes: _releaseMetadata('linux-arm64'),
-      ),
-      PackageEntry(path: 'bundle/lib/app.so', bytes: releaseAotElf()),
-      PackageEntry(
-        path: 'bundle/flutter_assets/AssetManifest.bin',
-        bytes: Uint8List.fromList(<int>[1]),
-      ),
-    ]);
-    final FakeTransport transport = FakeTransport(
-      endpoint: const DeviceEndpoint(host: 'h'),
-    );
-
-    await expectLater(
-      LiveDeviceOperations(transport).installPackage(plap.path),
-      throwsA(
-        isA<ArtifactVerificationException>().having(
-          (ArtifactVerificationException error) => error.message,
-          'message',
-          contains('Non-canonical top-level package path'),
         ),
       ),
     );

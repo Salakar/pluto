@@ -201,23 +201,14 @@ enum AppRuntimeKind {
   /// Manifest wire string.
   final String wireName;
 
-  /// Parses the canonical schema-1 spelling plus the two enum-name spellings
-  /// emitted by early Pluto builders.
-  ///
-  /// Encoding always uses [wireName], so accepting a legacy input migrates it
-  /// to canonical kebab-case on the next write. No case folding or fuzzy
-  /// matching is used: unknown runtime kinds remain schema errors.
+  /// Parses the canonical runtime spelling.
   static AppRuntimeKind? fromWireName(String name) {
     for (final AppRuntimeKind kind in AppRuntimeKind.values) {
       if (kind.wireName == name) {
         return kind;
       }
     }
-    return switch (name) {
-      'flutterAot' => AppRuntimeKind.flutterAot,
-      'flutterKernel' => AppRuntimeKind.flutterKernel,
-      _ => null,
-    };
+    return null;
   }
 }
 
@@ -523,10 +514,7 @@ final class AppManifest {
   }
 
   static AppManifest _parse(Map<String, Object?> root) {
-    final String schemaKey = root.containsKey('schema')
-        ? 'schema'
-        : 'manifestVersion';
-    final int schema = _required<int>(root, schemaKey, schemaKey);
+    final int schema = _required<int>(root, 'schema', 'schema');
     if (schema > 1) {
       throw ManifestSchemaTooNew(schema);
     }
@@ -598,9 +586,6 @@ final class AppManifest {
   /// Manifest schema version.
   final int schema;
 
-  /// Compatibility alias for older docs that used `manifestVersion`.
-  int get manifestVersion => schema;
-
   /// Reverse-DNS application id.
   final AppId id;
 
@@ -636,9 +621,6 @@ final class AppManifest {
 
   /// Launch preferences.
   final LaunchPrefs launch;
-
-  /// Compatibility entrypoint view for authored manifests.
-  String get entrypoint => launch.args.isEmpty ? 'main' : launch.args.first;
 
   /// Canonical JSON encoding with stable key order.
   String encode() => jsonEncode(_toJson());

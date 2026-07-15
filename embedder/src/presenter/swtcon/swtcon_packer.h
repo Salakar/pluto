@@ -26,8 +26,8 @@ struct SourceFrame {
 // record-at-a-time packer survives solely as the equivalence-proof oracle
 // (engine+emitter output must be byte-identical to record playback for
 // uniform admissions) and for the word-exact encoding pins.
-// It is compiled into pluto_presenter_test and the swtcon_probe
-// experiment tool only — NOT into pluto_embedder_core.
+// It is compiled only into the native presenter tests, not into
+// pluto_embedder_core.
 class SwtconPacker final {
  public:
   // Packs the frame's per-pixel src->dst transitions into

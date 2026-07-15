@@ -416,7 +416,6 @@ _ValidatedPackageSlice _validatePackageLayout(
     (String path) => path.startsWith('bundle/flutter_assets/'),
   );
   final bool hasAotElf = paths.contains('bundle/lib/app.so');
-  final bool hasLegacyAotElf = paths.contains('bundle/app.so');
   final bool hasKernel = paths.contains(
     'bundle/flutter_assets/kernel_blob.bin',
   );
@@ -430,11 +429,6 @@ _ValidatedPackageSlice _validatePackageLayout(
     throw ArtifactVerificationException(
       message: 'Package layout is incomplete: missing ${missing.join(', ')}.',
       remediation: 'Build the requested Pluto layout before packaging.',
-    );
-  }
-  if (hasLegacyAotElf) {
-    throw const ArtifactVerificationException(
-      message: 'Package layout must use bundle/lib/app.so.',
     );
   }
   if ((metadata.buildMode == 'debug' && hasAotElf) ||

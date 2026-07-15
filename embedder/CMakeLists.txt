@@ -8,7 +8,6 @@ project(
 
 option(PLUTO_BUILD_TESTS "Build Pluto native tests" ON)
 option(PLUTO_FETCH_GTEST "Fetch GoogleTest when it is not installed" OFF)
-option(PLUTO_BUILD_SWTCON_PROBE "Build standalone SWTCON probe" OFF)
 
 find_package(Threads REQUIRED)
 
@@ -297,10 +296,6 @@ endif()
 add_executable(renderer_replay tools/renderer_replay.cc)
 target_link_libraries(renderer_replay PRIVATE pluto_embedder_core)
 target_compile_features(renderer_replay PRIVATE cxx_std_20)
-
-if(PLUTO_BUILD_SWTCON_PROBE)
-  add_subdirectory(src/presenter/swtcon/tools)
-endif()
 
 include(CTest)
 if(BUILD_TESTING)

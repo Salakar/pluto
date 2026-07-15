@@ -295,42 +295,6 @@ void main() {
     );
   });
 
-  test('reader hard-rejects legacy top-level bundle layout', () async {
-    final Uint8List legacy = _canonicalTar(<PackageEntry>[
-      PackageEntry(path: 'manifest.json', bytes: _manifest()),
-      PackageEntry(path: 'bundle/lib/app.so', bytes: releaseAotElf()),
-      PackageEntry(
-        path: 'bundle/flutter_assets/AssetManifest.bin',
-        bytes: Uint8List.fromList(<int>[1]),
-      ),
-      PackageEntry(
-        path: 'build-metadata.json',
-        bytes: _buildMetadata(
-          const PackageMetadata(
-            flutterVersion: '3.44.4',
-            engineCommit: _engine,
-            plutoVersion: '0.1.0',
-          ),
-        ),
-      ),
-      PackageEntry(
-        path: 'assets/pluto/icon.png',
-        bytes: Uint8List.fromList(<int>[2]),
-      ),
-    ]);
-    final File output = _writeBytes(legacy, 'legacy');
-    await expectLater(
-      PlapArchive.read(output.path),
-      throwsA(
-        isA<ArtifactVerificationException>().having(
-          (ArtifactVerificationException error) => error.message,
-          'message',
-          contains('Non-canonical top-level'),
-        ),
-      ),
-    );
-  });
-
   test(
     'reader rejects schema or version fields in package integrity',
     () async {
@@ -373,7 +337,7 @@ void main() {
     },
   );
 
-  test('reader hard-rejects gzip and legacy runtime spellings', () async {
+  test('reader hard-rejects gzip', () async {
     final PlapPackage package = await _buildRelease(
       target: PlutoTargetPlatform.linuxArm64,
     );
@@ -388,55 +352,6 @@ void main() {
           (ArtifactVerificationException error) => error.message,
           'message',
           contains('Gzip .plap packages are not supported'),
-        ),
-      ),
-    );
-
-    final Uint8List legacyRuntime = _canonicalTar(<PackageEntry>[
-      PackageEntry(
-        path: 'manifest.json',
-        bytes: Uint8List.fromList(
-          utf8.encode(
-            '{"id":"dev.example.notes","icon":"assets/pluto/icon.png",'
-            '"runtime":{"type":"flutterAot","appElf":"lib/app.so",'
-            '"assets":"flutter_assets"}}',
-          ),
-        ),
-      ),
-      PackageEntry(
-        path: 'targets/linux-arm64/build-metadata.json',
-        bytes: _buildMetadata(
-          const PackageMetadata(
-            flutterVersion: '3.44.4',
-            engineCommit: _engine,
-            plutoVersion: '0.1.0',
-          ),
-        ),
-      ),
-      PackageEntry(
-        path: 'targets/linux-arm64/bundle/lib/app.so',
-        bytes: releaseAotElf(),
-      ),
-      PackageEntry(
-        path: 'targets/linux-arm64/bundle/flutter_assets/AssetManifest.bin',
-        bytes: Uint8List.fromList(<int>[1]),
-      ),
-      PackageEntry(
-        path: 'targets/linux-arm64/assets/pluto/icon.png',
-        bytes: Uint8List.fromList(<int>[2]),
-      ),
-    ]);
-    final File legacyRuntimePackage = _writeBytes(
-      legacyRuntime,
-      'legacy-runtime',
-    );
-    await expectLater(
-      PlapArchive.read(legacyRuntimePackage.path),
-      throwsA(
-        isA<ArtifactVerificationException>().having(
-          (ArtifactVerificationException error) => error.message,
-          'message',
-          contains('runtime flutterAot does not match'),
         ),
       ),
     );
