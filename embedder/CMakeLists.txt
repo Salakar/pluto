@@ -213,6 +213,14 @@ add_executable(
 )
 target_compile_features(rm1_framebuffer_copy_bench PRIVATE cxx_std_20)
 
+# RM1 damage-policy area accounting. This target models the exact panel
+# geometry only and never opens /dev/fb0, so it can run beside stock Xochitl.
+add_executable(
+  rm1_damage_amplification_bench
+  bench/presenter/rm1_damage_amplification_bench.cc
+)
+target_compile_features(rm1_damage_amplification_bench PRIVATE cxx_std_20)
+
 # Full Paper Pro Move warm-handoff bundle benchmark. This intentionally uses
 # the production serializer (including checksums, fsync, and atomic rename)
 # and reports process RSS alongside save/load latency.
@@ -334,6 +342,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(rm1_handoff_lut_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(
     rm1_framebuffer_copy_bench PRIVATE -Wall -Wextra -Wpedantic
+  )
+  target_compile_options(
+    rm1_damage_amplification_bench PRIVATE -Wall -Wextra -Wpedantic
   )
   target_compile_options(xochitl_mapped_sweep_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(renderer_replay PRIVATE -Wall -Wextra -Wpedantic)

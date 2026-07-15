@@ -303,6 +303,61 @@ uapi::UpdateRegion bounding_region(const PlutoRect *damage,
   };
 }
 
+std::uint64_t requested_damage_pixels(const PlutoPresentRequest &request) {
+  std::array<std::int32_t, kMaximumDamageRects * 2> x_edges{};
+  std::size_t x_count = 0;
+  for (std::size_t index = 0; index < request.damage_count; ++index) {
+    const PlutoRect &rect = request.damage[index];
+    x_edges[x_count++] = rect.x;
+    x_edges[x_count++] = rect.x + rect.width;
+  }
+
+  std::sort(x_edges.begin(), x_edges.begin() + x_count);
+  const auto unique_end =
+      std::unique(x_edges.begin(), x_edges.begin() + x_count);
+  x_count = static_cast<std::size_t>(unique_end - x_edges.begin());
+
+  std::array<std::pair<std::int32_t, std::int32_t>, kMaximumDamageRects>
+      y_intervals{};
+  std::uint64_t pixels = 0;
+  for (std::size_t x_index = 1; x_index < x_count; ++x_index) {
+    const std::int32_t left = x_edges[x_index - 1];
+    const std::int32_t right = x_edges[x_index];
+    std::size_t y_count = 0;
+    for (std::size_t rect_index = 0; rect_index < request.damage_count;
+         ++rect_index) {
+      const PlutoRect &rect = request.damage[rect_index];
+      if (rect.x < right && rect.x + rect.width > left) {
+        y_intervals[y_count++] = {rect.y, rect.y + rect.height};
+      }
+    }
+    if (y_count == 0) {
+      continue;
+    }
+    std::sort(y_intervals.begin(), y_intervals.begin() + y_count);
+    std::int32_t run_top = y_intervals[0].first;
+    std::int32_t run_bottom = y_intervals[0].second;
+    std::uint64_t covered_y = 0;
+    for (std::size_t y_index = 1; y_index < y_count; ++y_index) {
+      const auto [top, bottom] = y_intervals[y_index];
+      if (top > run_bottom) {
+        covered_y += static_cast<std::uint64_t>(run_bottom - run_top);
+        run_top = top;
+        run_bottom = bottom;
+      } else {
+        run_bottom = std::max(run_bottom, bottom);
+      }
+    }
+    covered_y += static_cast<std::uint64_t>(run_bottom - run_top);
+    pixels += static_cast<std::uint64_t>(right - left) * covered_y;
+  }
+  return pixels;
+}
+
+std::uint64_t update_region_pixels(const uapi::UpdateRegion &region) {
+  return static_cast<std::uint64_t>(region.width) * region.height;
+}
+
 void apply_stock_update_policy(PlutoRefreshClass refresh_class,
                                uapi::UpdateData *update) {
   update->update_mode = uapi::kUpdateModePartial;
@@ -581,15 +636,6 @@ public:
         bounding_region(request->damage, request->damage_count);
     update.update_marker = marker;
     apply_stock_update_policy(request->refresh_class, &update);
-    if (request->refresh_class == kPlutoRefreshFull &&
-        (request->flags & kPlutoPresentFlagPenTruth) == 0) {
-      update.update_region = {
-          .top = 0,
-          .left = 0,
-          .width = static_cast<std::uint32_t>(profile_.panel.width),
-          .height = static_cast<std::uint32_t>(profile_.panel.height),
-      };
-    }
 
     PlutoStatus send_status = kPlutoStatusInternal;
     {
@@ -618,6 +664,7 @@ public:
       finish_failed_admission(send_status);
       return send_status;
     }
+    record_damage_telemetry(*request, update.update_region);
 
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -918,6 +965,11 @@ public:
     };
   }
 
+  MxcfbDamageTelemetry damage_telemetry() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return damage_telemetry_;
+  }
+
   void stop() {
     {
       std::lock_guard<std::mutex> admission_lock(admission_mutex_);
@@ -929,6 +981,7 @@ public:
     if (worker_.joinable()) {
       worker_.join();
     }
+    log_damage_telemetry_once();
     device_->close();
     {
       std::lock_guard<std::mutex> admission_lock(admission_mutex_);
@@ -1347,6 +1400,68 @@ private:
     std::atomic_thread_fence(std::memory_order_release);
   }
 
+  void record_damage_telemetry(const PlutoPresentRequest &request,
+                               const uapi::UpdateRegion &region) {
+    const std::uint64_t requested = requested_damage_pixels(request);
+    const std::uint64_t driven = update_region_pixels(region);
+    const std::uint64_t panel_pixels =
+        static_cast<std::uint64_t>(profile_.panel.width) *
+        static_cast<std::uint64_t>(profile_.panel.height);
+    const bool full_quality = request.refresh_class == kPlutoRefreshFull;
+    const bool regional_full = full_quality && driven < panel_pixels;
+    const bool newly_regional_full =
+        regional_full && (request.flags & kPlutoPresentFlagPenTruth) == 0;
+    const std::uint64_t amplification_milli =
+        requested == 0 ? 0 : driven * 1000u / requested;
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    ++damage_telemetry_.accepted_updates;
+    damage_telemetry_.requested_pixels += requested;
+    damage_telemetry_.driven_pixels += driven;
+    if (driven > requested) {
+      ++damage_telemetry_.amplified_updates;
+    }
+    if (full_quality) {
+      ++damage_telemetry_.full_quality_updates;
+    }
+    if (regional_full) {
+      ++damage_telemetry_.regional_full_quality_updates;
+    }
+    if (newly_regional_full) {
+      damage_telemetry_.legacy_full_screen_pixels_avoided +=
+          panel_pixels - driven;
+    }
+    damage_telemetry_.max_amplification_milli = std::max(
+        damage_telemetry_.max_amplification_milli, amplification_milli);
+  }
+
+  void log_damage_telemetry_once() {
+    MxcfbDamageTelemetry telemetry;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (damage_telemetry_logged_ || damage_telemetry_.accepted_updates == 0) {
+        return;
+      }
+      damage_telemetry_logged_ = true;
+      telemetry = damage_telemetry_;
+    }
+    std::fprintf(
+        stderr,
+        "mxcfb: damage telemetry updates=%llu requested_px=%llu "
+        "driven_px=%llu amplified=%llu full=%llu regional_full=%llu "
+        "legacy_full_px_avoided=%llu max_amp_milli=%llu\n",
+        static_cast<unsigned long long>(telemetry.accepted_updates),
+        static_cast<unsigned long long>(telemetry.requested_pixels),
+        static_cast<unsigned long long>(telemetry.driven_pixels),
+        static_cast<unsigned long long>(telemetry.amplified_updates),
+        static_cast<unsigned long long>(telemetry.full_quality_updates),
+        static_cast<unsigned long long>(
+            telemetry.regional_full_quality_updates),
+        static_cast<unsigned long long>(
+            telemetry.legacy_full_screen_pixels_avoided),
+        static_cast<unsigned long long>(telemetry.max_amplification_milli));
+  }
+
   std::uint32_t allocate_marker_locked() {
     const std::uint32_t marker = next_marker_;
     ++next_marker_;
@@ -1457,6 +1572,7 @@ private:
   std::uint32_t handoff_chain_next_ = 0;
   std::uint64_t completed_jobs_ = 0;
   std::uint64_t hardware_faults_ = 0;
+  MxcfbDamageTelemetry damage_telemetry_{};
   HandoffDecision handoff_decision_ = HandoffDecision::kNone;
   bool handoff_route_enabled_ = false;
   bool handoff_unlinked_ = true;
@@ -1469,6 +1585,7 @@ private:
   bool suspended_ = false;
   bool lost_ = false;
   bool outstanding_ = false;
+  bool damage_telemetry_logged_ = false;
 };
 
 MxcfbDisplayBackend::MxcfbDisplayBackend(const GeneratedDeviceProfile &profile,
@@ -1538,6 +1655,10 @@ PlutoStatus MxcfbDisplayBackend::resume() { return impl_->resume(); }
 
 NativeBackendHealth MxcfbDisplayBackend::health() const {
   return impl_->health();
+}
+
+MxcfbDamageTelemetry MxcfbDisplayBackend::damage_telemetry() const {
+  return impl_->damage_telemetry();
 }
 
 void MxcfbDisplayBackend::stop() { impl_->stop(); }

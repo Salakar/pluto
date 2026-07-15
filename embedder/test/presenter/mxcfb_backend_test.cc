@@ -675,13 +675,23 @@ TEST(MxcfbBackend, CopiesOnlyExactDamageRowsAndPreservesBothStrides) {
   EXPECT_EQ(output[3U * output_stride + 6U], kSafeInitialPixel);
   EXPECT_EQ(output[kTightStride], 0xcc);
 
+  const auto telemetry = backend.damage_telemetry();
+  EXPECT_EQ(telemetry.accepted_updates, 1U);
+  EXPECT_EQ(telemetry.requested_pixels, 8U);
+  EXPECT_EQ(telemetry.driven_pixels, 32U);
+  EXPECT_EQ(telemetry.amplified_updates, 1U);
+  EXPECT_EQ(telemetry.full_quality_updates, 0U);
+  EXPECT_EQ(telemetry.regional_full_quality_updates, 0U);
+  EXPECT_EQ(telemetry.legacy_full_screen_pixels_avoided, 0U);
+  EXPECT_EQ(telemetry.max_amplification_milli, 4000U);
+
   syscalls.complete_one();
   ASSERT_TRUE(callbacks.wait_for_count(1));
   EXPECT_EQ(callbacks.frame_ids()[0], owned.request.frame_id);
   EXPECT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
 }
 
-TEST(MxcfbBackend, MapsFullClassToObservedQualityFullScreenUpdate) {
+TEST(MxcfbBackend, FullClassUsesQualityWaveformOnExactRequestedRegion) {
   BlockingMxcfbSyscalls syscalls;
   MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
   ASSERT_TRUE(probe_and_start(&backend, &syscalls));
@@ -693,12 +703,52 @@ TEST(MxcfbBackend, MapsFullClassToObservedQualityFullScreenUpdate) {
   const auto sent = syscalls.sent_updates();
   ASSERT_EQ(sent.size(), 1U);
   EXPECT_EQ(sent[0].update_mode, uapi::kUpdateModePartial);
-  EXPECT_EQ(sent[0].update_region.left, 0U);
-  EXPECT_EQ(sent[0].update_region.top, 0U);
-  EXPECT_EQ(sent[0].update_region.width, kWidth);
-  EXPECT_EQ(sent[0].update_region.height, kHeight);
+  EXPECT_EQ(sent[0].update_region.left, 100U);
+  EXPECT_EQ(sent[0].update_region.top, 200U);
+  EXPECT_EQ(sent[0].update_region.width, 4U);
+  EXPECT_EQ(sent[0].update_region.height, 5U);
   EXPECT_EQ(sent[0].waveform_mode, uapi::kWaveformModeQuality);
   EXPECT_EQ(sent[0].temperature, uapi::kTemperatureUseAmbient);
+  const auto telemetry = backend.damage_telemetry();
+  EXPECT_EQ(telemetry.accepted_updates, 1U);
+  EXPECT_EQ(telemetry.requested_pixels, 20U);
+  EXPECT_EQ(telemetry.driven_pixels, 20U);
+  EXPECT_EQ(telemetry.amplified_updates, 0U);
+  EXPECT_EQ(telemetry.full_quality_updates, 1U);
+  EXPECT_EQ(telemetry.regional_full_quality_updates, 1U);
+  EXPECT_EQ(telemetry.legacy_full_screen_pixels_avoided,
+            static_cast<std::uint64_t>(kWidth) * kHeight - 20U);
+  EXPECT_EQ(telemetry.max_amplification_milli, 1000U);
+  syscalls.complete_one();
+  EXPECT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
+}
+
+TEST(MxcfbBackend, DamageTelemetryUsesUnionForOverlapAndDuplicates) {
+  BlockingMxcfbSyscalls syscalls;
+  MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls));
+  ASSERT_TRUE(probe_and_start(&backend, &syscalls));
+  OwnedRequest owned(
+      {
+          {.x = 4, .y = 5, .width = 12, .height = 11},
+          {.x = 9, .y = 9, .width = 15, .height = 13},
+          {.x = 4, .y = 5, .width = 12, .height = 11},
+      },
+      kPlutoRefreshUi, 24);
+  ASSERT_EQ(backend.submit(&owned.request), kPlutoStatusOk);
+
+  const auto sent = syscalls.sent_updates();
+  ASSERT_EQ(sent.size(), 1U);
+  EXPECT_EQ(sent[0].update_region.left, 4U);
+  EXPECT_EQ(sent[0].update_region.top, 5U);
+  EXPECT_EQ(sent[0].update_region.width, 20U);
+  EXPECT_EQ(sent[0].update_region.height, 17U);
+  const auto telemetry = backend.damage_telemetry();
+  EXPECT_EQ(telemetry.accepted_updates, 1U);
+  EXPECT_EQ(telemetry.requested_pixels, 278U);
+  EXPECT_EQ(telemetry.driven_pixels, 340U);
+  EXPECT_EQ(telemetry.amplified_updates, 1U);
+  EXPECT_EQ(telemetry.max_amplification_milli, 1223U);
+
   syscalls.complete_one();
   EXPECT_EQ(backend.wait_idle(1000), kPlutoStatusOk);
 }
@@ -868,6 +918,7 @@ TEST(MxcfbBackend, SendBackpressureDoesNotPublishSnapshotOrCompletion) {
   EXPECT_TRUE(backend.ready(kPlutoRefreshUi));
   EXPECT_EQ(backend.wait_idle(0), kPlutoStatusOk);
   EXPECT_EQ(syscalls.mapped_storage[kStride + 2U], kSafeInitialPixel);
+  EXPECT_EQ(backend.damage_telemetry().accepted_updates, 0U);
 
   std::vector<std::uint8_t> output(kTightStride * kHeight, 0);
   PlutoSurface snapshot{
@@ -885,6 +936,7 @@ TEST(MxcfbBackend, SendBackpressureDoesNotPublishSnapshotOrCompletion) {
   EXPECT_EQ(static_cast<int>(backend.health().state),
             static_cast<int>(NativeBackendHealthState::kDeviceLost));
   EXPECT_EQ(backend.health().hardware_faults, 1U);
+  EXPECT_EQ(backend.damage_telemetry().accepted_updates, 0U);
 }
 
 TEST(MxcfbBackend,

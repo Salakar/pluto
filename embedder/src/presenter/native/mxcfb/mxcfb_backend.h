@@ -27,6 +27,21 @@ struct MxcfbHandoffOptions {
 bool build_mxcfb_handoff_identity_for_testing(
     const GeneratedDeviceProfile &profile, GlassHandoffIdentity *out);
 
+// Driver-specific diagnostics for accepted kernel updates. Requested pixels
+// are the exact geometric union of submitted damage (including defensively
+// accepted overlap/duplicates); driven pixels are the rectangular MXCFB update
+// regions. Ratios use 1000 == 1.0x.
+struct MxcfbDamageTelemetry {
+  std::uint64_t accepted_updates = 0;
+  std::uint64_t requested_pixels = 0;
+  std::uint64_t driven_pixels = 0;
+  std::uint64_t amplified_updates = 0;
+  std::uint64_t full_quality_updates = 0;
+  std::uint64_t regional_full_quality_updates = 0;
+  std::uint64_t legacy_full_screen_pixels_avoided = 0;
+  std::uint64_t max_amplification_milli = 0;
+};
+
 // Conservative first native backend for the reMarkable 1 kernel EPDC path.
 // It deliberately admits one request at a time: the mapped framebuffer is the
 // kernel update source, so overlapping writers would otherwise be able to
@@ -60,6 +75,7 @@ public:
   PlutoStatus suspend(std::uint32_t timeout_ms) override;
   PlutoStatus resume() override;
   NativeBackendHealth health() const override;
+  MxcfbDamageTelemetry damage_telemetry() const;
   void stop() override;
 
 private:
