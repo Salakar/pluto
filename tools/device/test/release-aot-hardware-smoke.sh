@@ -211,6 +211,13 @@ verify_app dev.pluto.launcher /home/root/pluto/launcher
 remote 'set -eu
 [ ! -d /home/root/pluto/engine/debug ]
 [ "$(find /home/root/pluto -type f -name kernel_blob.bin | wc -l)" -eq 0 ]
-[ "$(find /home/root/pluto/engine -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2 ]
+. /home/root/pluto/share/device-profiles.sh
+pluto_profile_probe
+expected_engine_flavors=1
+case ",$PLUTO_PROFILE_BUILD_MODES," in
+  *,profile,*) expected_engine_flavors=$((expected_engine_flavors + 1)) ;;
+esac
+[ "$(find /home/root/pluto/engine -mindepth 1 -maxdepth 1 -type d | wc -l)" \
+  -eq "$expected_engine_flavors" ]
 systemctl is-active --quiet xochitl.service
 echo "release AOT smoke: all standard apps, switcher, and Ink stroke passed; debug/JIT state absent"'
