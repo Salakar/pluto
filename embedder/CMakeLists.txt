@@ -99,6 +99,10 @@ add_library(
     src/presenter/native/mxcfb/mxcfb_backend.cc
     src/presenter/native/mxcfb/mxcfb_device.cc
     src/presenter/native/native_presenter.cc
+    src/presenter/native/rm2/lcdif_tcon_backend.cc
+    src/presenter/native/rm2/mxs_lcdif_device.cc
+    src/presenter/native/rm2/rm2_scan_encoder.cc
+    src/presenter/native/rm2/rm2_waveform_program.cc
     src/presenter/native/rm2/wbf_decoder.cc
     src/presenter/png_encoder.cc
     src/presenter/qtfb/qtfb_client.cc
@@ -185,6 +189,13 @@ add_executable(pluto_presenter_bench bench/presenter/engine_bench.cc)
 target_link_libraries(pluto_presenter_bench PRIVATE pluto_embedder_core)
 target_include_directories(pluto_presenter_bench PRIVATE test/presenter)
 target_compile_features(pluto_presenter_bench PRIVATE cxx_std_20)
+
+# RM2 preparation A/B: exhaustive RGB565 gray4 codegen and pre-expanded
+# WBF transition lookup. Host numbers are relative; ARMv7 is the release gate.
+add_executable(rm2_encoder_bench bench/presenter/rm2_encoder_bench.cc)
+target_link_libraries(rm2_encoder_bench PRIVATE pluto_embedder_core)
+target_include_directories(rm2_encoder_bench PRIVATE test/presenter)
+target_compile_features(rm2_encoder_bench PRIVATE cxx_std_20)
 
 # Full Paper Pro Move warm-handoff bundle benchmark. This intentionally uses
 # the production serializer (including checksums, fsync, and atomic rename)
@@ -303,6 +314,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(pluto-embedder PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_renderer_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_presenter_bench PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(rm2_encoder_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(xochitl_mapped_sweep_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(renderer_replay PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -525,6 +537,46 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(
       pluto_wbf_decoder_test PRIVATE -Wall -Wextra -Wpedantic
+    )
+  endif()
+
+  if(DEFINED PLUTO_RENDERER_GTEST_MAIN)
+    add_executable(
+      pluto_rm2_native_test
+      test/presenter/lcdif_tcon_backend_test.cc
+      test/presenter/mxs_lcdif_device_test.cc
+      test/presenter/rm2_scan_encoder_test.cc
+      test/presenter/rm2_waveform_program_test.cc
+    )
+    target_link_libraries(
+      pluto_rm2_native_test
+      PRIVATE
+        pluto_embedder_core
+        ${PLUTO_RENDERER_GTEST_MAIN}
+    )
+    gtest_discover_tests(pluto_rm2_native_test)
+  else()
+    add_executable(
+      pluto_rm2_native_test
+      test/presenter/lcdif_tcon_backend_test.cc
+      test/presenter/mxs_lcdif_device_test.cc
+      test/presenter/rm2_scan_encoder_test.cc
+      test/presenter/rm2_waveform_program_test.cc
+      test/renderer/gtest_main.cc
+    )
+    target_include_directories(pluto_rm2_native_test PRIVATE test/renderer)
+    target_link_libraries(pluto_rm2_native_test PRIVATE pluto_embedder_core)
+    add_test(NAME pluto_rm2_native_test COMMAND pluto_rm2_native_test)
+  endif()
+  target_compile_features(pluto_rm2_native_test PRIVATE cxx_std_20)
+  target_compile_definitions(
+    pluto_rm2_native_test
+    PRIVATE
+      PLUTO_RM2_WBF_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../analysis/native-cutover/rm2/vendor/active.wbf"
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+      pluto_rm2_native_test PRIVATE -Wall -Wextra -Wpedantic
     )
   endif()
 
