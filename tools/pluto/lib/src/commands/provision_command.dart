@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import '../artifacts/checksums.dart';
 import '../build/release_pipeline.dart';
 import '../config/pins.dart';
-import '../device/remarkable_device.dart';
 import '../run/device_operations.dart';
 import '../ssh/device_transport.dart';
 import 'base_command.dart';
@@ -13,30 +12,24 @@ import 'base_command.dart';
 /// `pluto provision` command — detects the connected reMarkable and installs
 /// the target-correct Pluto runtime, launcher, and application set.
 ///
-/// The public workflow is identical across supported devices. Backend-specific
-/// display ownership and lifecycle integration are selected only after the
-/// device identity has been verified.
+/// The public workflow is identical across supported devices. The native
+/// presenter selects its hardware implementation after device identity has
+/// been verified.
 final class ProvisionCommand extends PlutoCommand {
   /// Creates the command.
   ProvisionCommand(super.environment) {
     addDeviceOption();
     argParser
       ..addOption(
-        'display-backend',
-        allowed: <String>['auto', 'swtcon'],
-        defaultsTo: 'auto',
-        help: 'Presenter backend (auto selects the connected hardware).',
-      )
-      ..addOption(
         'payload-dir',
         help:
             'Directory with the runtime payload (pluto-embedder, '
-            'bin/pluto-controlctl, bin/codex, COOPERATIVE-PAYLOAD.json, '
-            'share/device-profiles.sh, '
+            'bin/pluto-controlctl, optional bin/codex, '
+            'share/device-profiles.sh, device scripts, '
             'engine/{release,profile}/libflutter_engine.so, '
             'apps/<id>/{build-metadata.json,manifest.json,bundle/}). '
             'Defaults to '
-            '<repo>/build/pluto-payload.',
+            '<repo>/build/pluto-payload/<detected-target>.',
       )
       ..addFlag(
         'debug',
@@ -73,7 +66,7 @@ final class ProvisionCommand extends PlutoCommand {
       );
   }
 
-  /// Device scripts used by the direct-display backend.
+  /// Common device scripts staged for every supported tablet.
   static const List<String> deviceScripts = <String>[
     'pluto-session.sh',
     'pluto-boot-confirm.sh',
@@ -82,11 +75,6 @@ final class ProvisionCommand extends PlutoCommand {
     'pluto-app-control.sh',
     'pluto-install-transaction.sh',
     'pluto-uninstall.sh',
-  ];
-
-  /// Device scripts staged when present (used by fallback/restore paths).
-  static const List<String> optionalDeviceScripts = <String>[
-    'pluto-xochitl-guard.sh',
   ];
 
   @override
@@ -126,15 +114,12 @@ final class ProvisionCommand extends PlutoCommand {
 
       final String repoRoot = environment.paths.repositoryRoot;
       final String? explicitPayloadDir = argResults!['payload-dir'] as String?;
-      PlutoRuntimeBackend? selectedBackend;
+      String? detectedTarget;
       if (explicitPayloadDir == null) {
-        selectedBackend = await ops.runtimeBackend();
+        detectedTarget = await ops.runtimeTarget();
       }
       final String payloadDir =
-          explicitPayloadDir ??
-          (selectedBackend == PlutoRuntimeBackend.cooperative
-              ? '$repoRoot/build/pluto-appload-arm/home/root/pluto-arm'
-              : '$repoRoot/build/pluto-payload');
+          explicitPayloadDir ?? '$repoRoot/build/pluto-payload/$detectedTarget';
       final PlutoPins pins = environment.pinsRepository.readPins();
       if (File('$payloadDir/libflutter_engine.so').existsSync()) {
         usageException(
@@ -171,10 +156,12 @@ final class ProvisionCommand extends PlutoCommand {
       if (targetPlatform == null) {
         usageException('Unsupported payload target: $payloadTarget.');
       }
-      final bool cooperativePayload =
-          targetPlatform == PlutoTargetPlatform.linuxArm;
-      final PayloadFile? cooperativeCodex = cooperativePayload
-          ? _resolveCooperativeCodex(payloadDir, pins)
+      final bool armPayload = targetPlatform == PlutoTargetPlatform.linuxArm;
+      final bool includesCodex = apps.any(
+        (PayloadApp app) => app.appId == 'dev.pluto.codex',
+      );
+      final PayloadFile? armCodex = armPayload && includesCodex
+          ? _resolveArmCodex(payloadDir)
           : null;
 
       final String releaseEngine = _resolvePinnedAotEngine(
@@ -184,29 +171,28 @@ final class ProvisionCommand extends PlutoCommand {
         mode: PlutoBuildMode.release,
         target: targetPlatform,
       );
-      final String? scriptsDir = cooperativePayload
-          ? null
-          : _resolveScriptsDir(payloadDir, repoRoot);
-      if (!cooperativePayload && scriptsDir == null) {
+      final String? scriptsDir = _resolveScriptsDir(payloadDir, repoRoot);
+      if (scriptsDir == null) {
         usageException(
           'Device scripts not found. Expected pluto-session.sh in '
           '$payloadDir or tools/device.',
         );
       }
-      final String? profileEngine = cooperativePayload
+      final String? profileEngine = armPayload
           ? null
           : _resolvePinnedAotEngine(
               payloadDir: payloadDir,
               repoRoot: repoRoot,
               pins: pins,
               mode: PlutoBuildMode.profile,
+              target: targetPlatform,
             );
       final String debugPath = '$payloadDir/engine/debug/libflutter_engine.so';
       final String? debugEngine = File(debugPath).existsSync()
           ? debugPath
           : null;
       final bool allowDebug = argResults!['debug'] as bool;
-      if (cooperativePayload && allowDebug) {
+      if (armPayload && allowDebug) {
         usageException(
           'The installed runtime on this device supports release AOT only. '
           'Provision without --debug.',
@@ -230,21 +216,12 @@ final class ProvisionCommand extends PlutoCommand {
           ]),
           remoteRelative: 'share/device-profiles.sh',
         ),
-        if (!cooperativePayload) ...<PayloadFile>[
-          for (final String s in deviceScripts)
-            PayloadFile(
-              localPath: '$scriptsDir/$s',
-              remoteRelative: 'bin/$s',
-              executable: true,
-            ),
-          for (final String s in optionalDeviceScripts)
-            if (File('$scriptsDir/$s').existsSync())
-              PayloadFile(
-                localPath: '$scriptsDir/$s',
-                remoteRelative: 'bin/$s',
-                executable: true,
-              ),
-        ],
+        for (final String s in deviceScripts)
+          PayloadFile(
+            localPath: '$scriptsDir/$s',
+            remoteRelative: 'bin/$s',
+            executable: true,
+          ),
         PayloadFile(
           localPath: selectPayloadFile(<String>[
             '$payloadDir/pluto-embedder',
@@ -253,15 +230,16 @@ final class ProvisionCommand extends PlutoCommand {
           remoteRelative: 'bin/pluto-embedder',
           executable: true,
         ),
-        if (!cooperativePayload)
-          PayloadFile(
-            localPath: selectPayloadFile(<String>[
-              '$payloadDir/bin/pluto-controlctl',
-              '$repoRoot/embedder/build/device-arm64/pluto-controlctl',
-            ]),
-            remoteRelative: 'bin/pluto-controlctl',
-            executable: true,
-          ),
+        PayloadFile(
+          localPath: selectPayloadFile(<String>[
+            '$payloadDir/bin/pluto-controlctl',
+            '$repoRoot/embedder/build/'
+                '${armPayload ? 'device-arm' : 'device-arm64'}/'
+                'pluto-controlctl',
+          ]),
+          remoteRelative: 'bin/pluto-controlctl',
+          executable: true,
+        ),
         PayloadFile(
           localPath: releaseEngine,
           remoteRelative: 'engine/release/libflutter_engine.so',
@@ -271,45 +249,13 @@ final class ProvisionCommand extends PlutoCommand {
             localPath: profileEngine,
             remoteRelative: 'engine/profile/libflutter_engine.so',
           ),
-        if (cooperativePayload) ...<PayloadFile>[
-          PayloadFile(
-            localPath: selectPayloadFile(<String>[
-              '$payloadDir/bin/pluto-controlctl',
-              '$repoRoot/embedder/build/device-arm/pluto-controlctl',
-            ]),
-            remoteRelative: 'bin/pluto-controlctl',
-            executable: true,
-          ),
-          PayloadFile(
-            localPath: selectPayloadFile(<String>[
-              '$payloadDir/engine/release/icudtl.dat',
-              '$repoRoot/third_party/engine/${pins.engineVersion}/'
-                  'linux-arm-release/icudtl.dat',
-            ]),
-            remoteRelative: 'engine/release/icudtl.dat',
-          ),
-          cooperativeCodex!,
-        ],
+        ?armCodex,
         if (allowDebug && debugEngine != null)
           PayloadFile(
             localPath: debugEngine,
             remoteRelative: 'engine/debug/libflutter_engine.so',
           ),
       ];
-      final CooperativeIntegrationPayload? cooperativeIntegration =
-          cooperativePayload
-          ? CooperativeIntegrationPayload(
-              rootDirectory: '$payloadDir/integration',
-            )
-          : null;
-      if (cooperativeIntegration != null &&
-          !Directory(cooperativeIntegration.rootDirectory).existsSync()) {
-        usageException(
-          'Missing target integration payload: '
-          '${cooperativeIntegration.rootDirectory}. Rebuild the release '
-          'payload before provisioning.',
-        );
-      }
       for (final PayloadFile file in runtime) {
         if (!File(file.localPath).existsSync()) {
           usageException(
@@ -347,18 +293,7 @@ final class ProvisionCommand extends PlutoCommand {
           'payload.',
         );
       }
-      final PlutoRuntimeBackend backend =
-          selectedBackend ?? await ops.runtimeBackend();
-      if (backend == PlutoRuntimeBackend.cooperative &&
-          argResults!['display-backend'] == 'swtcon') {
-        usageException(
-          'The explicitly requested display backend does not match this '
-          'device. Omit --display-backend to select it automatically.',
-        );
-      }
-      final String expectedTarget = backend == PlutoRuntimeBackend.cooperative
-          ? PlutoTargetPlatform.linuxArm.cliName
-          : PlutoTargetPlatform.linuxArm64.cliName;
+      final String expectedTarget = detectedTarget ?? await ops.runtimeTarget();
       if (payloadTarget != expectedTarget) {
         usageException(
           'Payload target $payloadTarget does not match the connected device '
@@ -373,7 +308,6 @@ final class ProvisionCommand extends PlutoCommand {
         runtime: runtime,
         apps: apps,
         payloadTarget: payloadTarget,
-        cooperativeIntegration: cooperativeIntegration,
         bootDefault: bootDefault,
       );
       environment.out.writeln(result.message);
@@ -498,17 +432,14 @@ final class ProvisionCommand extends PlutoCommand {
   FileSystemEntityType _entityType(String path) =>
       FileSystemEntity.typeSync(path, followLinks: false);
 
-  PayloadFile _resolveCooperativeCodex(String payloadDir, PlutoPins pins) {
+  PayloadFile _resolveArmCodex(String payloadDir) {
     final File pinFile = File(
       '${environment.paths.pinsDirectory}/codex-armv7.json',
     );
-    final File payloadMetadata = File('$payloadDir/COOPERATIVE-PAYLOAD.json');
     final File binary = File('$payloadDir/bin/codex');
-    for (final File file in <File>[pinFile, payloadMetadata, binary]) {
+    for (final File file in <File>[pinFile, binary]) {
       if (_entityType(file.path) != FileSystemEntityType.file) {
-        usageException(
-          'Missing regular cooperative payload file: ${file.path}.',
-        );
+        usageException('Missing regular ARMv7 payload file: ${file.path}.');
       }
     }
 
@@ -536,26 +467,6 @@ final class ProvisionCommand extends PlutoCommand {
         pinDigest is! String ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(pinDigest)) {
       usageException('Invalid Codex ARMv7 pin: ${pinFile.path}.');
-    }
-
-    final Map<String, Object?> metadata = readJson(payloadMetadata);
-    final Object? rawCodex = metadata['codex'];
-    if (metadata['schema'] != 1 ||
-        metadata['target'] != PlutoTargetPlatform.linuxArm.cliName ||
-        metadata['mode'] != PlutoBuildMode.release.cliName ||
-        metadata['flutterVersion'] != pins.flutterVersion ||
-        metadata['engineCommit'] != pins.engineVersion ||
-        metadata['runtimeRoot'] != LiveDeviceOperations.defaultDeviceRoot ||
-        rawCodex is! Map<String, Object?> ||
-        rawCodex['version'] != pinVersion ||
-        rawCodex['sha256'] != pinDigest ||
-        rawCodex['path'] !=
-            '${LiveDeviceOperations.defaultDeviceRoot}/bin/codex' ||
-        rawCodex['authentication'] != 'user-managed') {
-      usageException(
-        'Cooperative Codex metadata does not match the release pin: '
-        '${payloadMetadata.path}.',
-      );
     }
 
     final Uint8List bytes = binary.readAsBytesSync();

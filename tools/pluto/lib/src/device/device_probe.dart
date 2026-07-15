@@ -48,10 +48,6 @@ final class DeviceProbe {
     ]);
     final String? firmwareVersion = await _readFirmwareVersion();
     final bool provisioned = await _testPath('/home/root/pluto/VERSION');
-    final bool xoviAvailable = await _testPath('/home/root/xovi');
-    final bool appLoadAvailable = await _testPath(
-      '/home/root/xovi/exthome/appload',
-    );
     return RemarkableDevice(
       id: id,
       name: name,
@@ -61,8 +57,6 @@ final class DeviceProbe {
       firmwareBuild: firmware?.trim(),
       firmwareVersion: firmwareVersion,
       provisioned: provisioned,
-      xoviAvailable: xoviAvailable,
-      appLoadAvailable: appLoadAvailable,
     );
   }
 

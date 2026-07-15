@@ -119,7 +119,7 @@ final class FakeSessionManager implements SessionManager {
     engineVersion: 'a10d8ac38de835021c8d2f920dbf50a920ccc030',
     flutterVersion: '3.44.4',
     dartVersion: '3.12.2',
-    returnInstructions: 're-open Pluto from the AppLoad launcher entry.',
+    returnInstructions: 'restart the native Pluto session over SSH.',
   );
 
   final SessionInfo _info;

@@ -26,8 +26,6 @@ FakeTransport _deviceTransport(
   String? compatible,
   String firmwareBuild = '20260629074044',
   String firmwareVersion = '3.28.0.162',
-  String xochitlDigest =
-      'e0fef1de8e4644b6ef6d829436deaa8d8e8a083c14a806f6300b2de248199b18',
   Future<CommandResult> Function(String command)? execHandler,
   FakeDownloadHandler? downloadHandler,
 }) => FakeTransport(
@@ -62,9 +60,6 @@ FakeTransport _deviceTransport(
         stdout: 'REMARKABLE_RELEASE_VERSION=$firmwareVersion\n',
       );
     }
-    if (command == "sha256sum /usr/bin/xochitl | awk '{print \$1}'") {
-      return CommandResult(exitCode: 0, stdout: xochitlDigest);
-    }
     return execHandler?.call(command) ?? const CommandResult(exitCode: 0);
   },
 );
@@ -79,116 +74,6 @@ FakeTransport _moveTransport(
   downloadHandler: downloadHandler,
 );
 
-FakeTransport _cooperativeTransport(
-  String host, {
-  String? machine,
-  String firmwareVersion = '3.28.0.162',
-  String? firmwareBuild,
-  String? xochitlDigest,
-  bool activationLockAvailable = true,
-  bool freshActivation = true,
-  CommandResult activationPreflightResult = const CommandResult(
-    exitCode: 0,
-    stdout: 'PLUTO-ACTIVATION-PREFLIGHT|123|absent|absent\n',
-  ),
-  String? existingDefaultApp,
-  CommandResult? defaultInspectionResult,
-  Future<CommandResult> Function(String command)? execHandler,
-  FakeDownloadHandler? downloadHandler,
-  Map<String, Map<String, Object?>> controlResults =
-      const <String, Map<String, Object?>>{},
-  Set<String> controlErrors = const <String>{},
-}) => _deviceTransport(
-  host,
-  machine:
-      machine ??
-      (firmwareVersion == '3.27.3.0' ? 'reMarkable 1.0' : 'reMarkable 2.0'),
-  architecture: 'armv7l',
-  firmwareBuild:
-      firmwareBuild ??
-      (firmwareVersion == '3.27.3.0'
-          ? '20260612085811'
-          : firmwareVersion == '3.28.0.162'
-          ? '20260629074044'
-          : 'unknown-build'),
-  firmwareVersion: firmwareVersion,
-  xochitlDigest:
-      xochitlDigest ??
-      (firmwareVersion == '3.27.3.0'
-          ? '28268d44e710738622e576ca9256d14045fd8a18464252f3fb266c7f28d00b1f'
-          : 'e0fef1de8e4644b6ef6d829436deaa8d8e8a083c14a806f6300b2de248199b18'),
-  downloadHandler: downloadHandler,
-  execHandler: (String command) async {
-    if (!activationLockAvailable &&
-        command.contains('integration-provision.lock') &&
-        command.contains('if mkdir')) {
-      return const CommandResult(
-        exitCode: 75,
-        stderr: 'another Pluto integration activation is active',
-      );
-    }
-    if (command.contains('PLUTO-ACTIVATION-PREFLIGHT')) {
-      return activationPreflightResult;
-    }
-    if (!freshActivation && command.contains('old_pid=')) {
-      return const CommandResult(
-        exitCode: 69,
-        stderr: 'stale process and socket generations',
-      );
-    }
-    if (command.contains('PLUTO-DEFAULT-STATE|')) {
-      return defaultInspectionResult ??
-          CommandResult(
-            exitCode: 0,
-            stdout: existingDefaultApp == null
-                ? 'PLUTO-DEFAULT-STATE|absent\n'
-                : 'PLUTO-DEFAULT-STATE|$existingDefaultApp\n',
-          );
-    }
-    if (command.contains('pluto-controlctl') && command.contains('--request')) {
-      final RegExpMatch? match = RegExp(
-        r"--request '([^']+)'",
-      ).firstMatch(command);
-      if (match == null) {
-        return const CommandResult(exitCode: 64, stderr: 'missing request');
-      }
-      final Map<String, Object?> request =
-          jsonDecode(match.group(1)!) as Map<String, Object?>;
-      final String action = request['action']! as String;
-      if (controlErrors.contains(action)) {
-        return CommandResult(
-          exitCode: 0,
-          stdout: jsonEncode(<String, Object?>{
-            'schema': 1,
-            'requestId': request['requestId'],
-            'ok': false,
-            'error': const <String, Object?>{
-              'code': 'fixture-error',
-              'message': 'injected control failure',
-            },
-          }),
-        );
-      }
-      return CommandResult(
-        exitCode: 0,
-        stdout: jsonEncode(<String, Object?>{
-          'schema': 1,
-          'requestId': request['requestId'],
-          'ok': true,
-          'result':
-              controlResults[action] ??
-              <String, Object?>{
-                if (action == 'ping') 'protocol': 1,
-                if (action == 'stop') 'stopped': false,
-                if (action == 'reload') 'entryCount': 1,
-              },
-        }),
-      );
-    }
-    return execHandler?.call(command) ?? const CommandResult(exitCode: 0);
-  },
-);
-
 Uint8List _pngHeaderFixture(int width, int height) {
   final Uint8List bytes = Uint8List(24);
   bytes.setRange(0, 8, const <int>[137, 80, 78, 71, 13, 10, 26, 10]);
@@ -200,7 +85,7 @@ Uint8List _pngHeaderFixture(int width, int height) {
   return bytes;
 }
 
-FakeTransport _directScreenshotTransport({
+FakeTransport _screenshotTransport({
   required Uint8List png,
   int pid = 4242,
   String appId = 'dev.example.notes',
@@ -286,8 +171,6 @@ const Set<String> _provisionProbeCommands = <String>{
   'cat /etc/os-release',
   'uname -m',
   'test -e "/home/root/pluto/VERSION"',
-  'test -e "/home/root/xovi"',
-  'test -e "/home/root/xovi/exthome/appload"',
 };
 
 Future<File> _writePlap(
@@ -406,88 +289,6 @@ Uint8List _releaseMetadata(String target) => Uint8List.fromList(
     }),
   ),
 );
-
-PayloadApp _writeCooperativeLauncher(Directory temp) {
-  final Directory bundle = Directory('${temp.path}/launcher/bundle')
-    ..createSync(recursive: true);
-  File('${bundle.path}/lib/app.so')
-    ..createSync(recursive: true)
-    ..writeAsBytesSync(releaseArmAotElf());
-  File('${bundle.parent.path}/manifest.json').writeAsStringSync(
-    '{"id":"dev.pluto.launcher","name":"Home","runtime":'
-    '{"type":"flutter-aot","appElf":"lib/app.so",'
-    '"assets":"flutter_assets"}}',
-  );
-  return PayloadApp(
-    appId: LiveDeviceOperations.launcherAppId,
-    bundleDir: bundle.path,
-    buildMode: 'release',
-    engineFlavor: 'release',
-    target: 'linux-arm',
-  );
-}
-
-CooperativeIntegrationPayload _writeCooperativeIntegration(Directory temp) {
-  final String root = '${temp.path}/integration';
-  const List<String> files = <String>[
-    'xovi.so',
-    'start',
-    'stock',
-    'debug',
-    'rebuild_hashtable',
-    'extensions.d/qt-resource-rebuilder.so',
-    'services/xochitl.service/qt-resource-rebuilder.conf',
-    'scripts/debug/qt-resource-rebuilder.sh',
-    'bin/pluto-controlctl',
-    'exthome/appload/shims/qtfb-shim-32bit.so',
-    'exthome/appload/shims/qtfb-shim.so',
-  ];
-  final StringBuffer checksums = StringBuffer()
-    ..writeln('schema=1')
-    ..writeln('target=linux-arm')
-    ..writeln('xovi=0.3.3')
-    ..writeln('qrr=v19')
-    ..writeln('apploadControlProtocol=1')
-    ..writeln('hashtab=profile-matched')
-    ..writeln('firmwareProfiles=3.27.3.0,3.28.0.162')
-    ..writeln();
-  var value = 20;
-  for (final String relative in files) {
-    final List<int> bytes = <int>[value++];
-    File('$root/xovi/$relative')
-      ..createSync(recursive: true)
-      ..writeAsBytesSync(bytes);
-    checksums.writeln('${sha256Bytes(bytes)}  $relative');
-  }
-  for (final String firmware in <String>['3.27.3.0', '3.28.0.162']) {
-    final String relative = 'profiles/$firmware/appload.so';
-    final List<int> bytes = <int>[value++];
-    File('$root/$relative')
-      ..createSync(recursive: true)
-      ..writeAsBytesSync(bytes);
-    checksums.writeln('${sha256Bytes(bytes)}  $relative');
-    final String hashtabRelative = 'profiles/$firmware/hashtab';
-    final List<int> hashtabBytes = <int>[value++];
-    File('$root/$hashtabRelative')
-      ..createSync(recursive: true)
-      ..writeAsBytesSync(hashtabBytes);
-    checksums.writeln('${sha256Bytes(hashtabBytes)}  $hashtabRelative');
-  }
-  Link(
-    '$root/xovi/services/xochitl.service/extensions.d',
-  ).createSync('/home/root/xovi/extensions.d', recursive: true);
-  Link(
-    '$root/xovi/services/xochitl.service/exthome',
-  ).createSync('/home/root/xovi/exthome', recursive: true);
-  checksums
-    ..writeln(
-      'link services/xochitl.service/extensions.d '
-      '/home/root/xovi/extensions.d',
-    )
-    ..writeln('link services/xochitl.service/exthome /home/root/xovi/exthome');
-  File('$root/CHECKSUMS.txt').writeAsStringSync(checksums.toString());
-  return CooperativeIntegrationPayload(rootDirectory: root);
-}
 
 void main() {
   test(
@@ -749,6 +550,21 @@ void main() {
       expect(
         bootInstall,
         greaterThan(transport.events.indexOf('exec:$appSwap')),
+      );
+      final String retiredCleanup = fake.commands.singleWhere(
+        (String command) =>
+            command.contains('rm -rf /home/root/xovi') &&
+            command.contains('/run/pluto/appload-control.sock') &&
+            command.contains('/tmp/qtfb.sock'),
+      );
+      expect(
+        transport.events.indexOf('exec:$retiredCleanup'),
+        lessThan(
+          transport.events.indexWhere(
+            (String event) => event.startsWith('upload-file:'),
+          ),
+        ),
+        reason: 'retired display artifacts are removed before runtime upload',
       );
     },
   );
@@ -1024,630 +840,6 @@ void main() {
       expect(transport.directoryUploads, isEmpty);
     },
   );
-
-  test('provision dispatches linux-arm to the cooperative backend', () async {
-    final Directory temp = Directory.systemTemp.createTempSync(
-      'pluto_cooperative_provision',
-    );
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final FakeTransport transport = _cooperativeTransport('device');
-
-    final DeviceOperationResult result = await LiveDeviceOperations(transport)
-        .provision(
-          runtime: const <PayloadFile>[],
-          apps: const <PayloadApp>[],
-          payloadTarget: 'linux-arm',
-          cooperativeIntegration: _writeCooperativeIntegration(temp),
-        );
-
-    expect(result.ok, isTrue);
-    expect(
-      transport.commands.any((String command) => command.contains('ping')),
-      isTrue,
-    );
-    expect(
-      transport.commands.any(
-        (String command) => command.contains('pluto-boot-install.sh'),
-      ),
-      isFalse,
-    );
-    expect(
-      transport.uploads.any(
-        (upload) =>
-            upload.remotePath.endsWith('/extensions.d/appload.so') &&
-            upload.bytes.length == 1 &&
-            upload.bytes.single == 33,
-      ),
-      isTrue,
-      reason: 'firmware 3.28 receives only its matched AppLoad hook',
-    );
-    expect(transport.directoryUploads, isEmpty);
-  });
-
-  test(
-    'cooperative provision suppresses startup default and launches Home once last',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_cooperative_ordering',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final File embedder = File('${temp.path}/pluto-embedder')
-        ..writeAsBytesSync(<int>[1, 2, 3]);
-      final FakeTransport fake = _cooperativeTransport(
-        'device',
-        existingDefaultApp: LiveDeviceOperations.launcherAppId,
-      );
-      final _RecordingTransport transport = _RecordingTransport(fake);
-
-      final DeviceOperationResult result = await LiveDeviceOperations(transport)
-          .provision(
-            runtime: <PayloadFile>[
-              PayloadFile(
-                localPath: embedder.path,
-                remoteRelative: 'bin/pluto-embedder',
-                executable: true,
-              ),
-            ],
-            apps: <PayloadApp>[_writeCooperativeLauncher(temp)],
-            payloadTarget: 'linux-arm',
-            cooperativeIntegration: _writeCooperativeIntegration(temp),
-          );
-
-      expect(result.ok, isTrue);
-      final int suppress = transport.events.indexWhere(
-        (String event) =>
-            event.startsWith('exec:') &&
-            event.contains('mv "\$live" "\$backup"') &&
-            event.contains('external.manifest.json'),
-      );
-      final int activate = transport.events.indexWhere(
-        (String event) => event.contains('cd /home/root && bash xovi/start'),
-      );
-      final int runtimeUpload = transport.events.indexWhere(
-        (String event) => event.startsWith(
-          'upload-file:$root/bin/.pluto-embedder.pluto-new-',
-        ),
-      );
-      final int launcherUpload = transport.events.indexWhere(
-        (String event) =>
-            event.startsWith('upload-dir:$root/.launcher.pluto-new-') &&
-            event.endsWith('/bundle'),
-      );
-      final int finalReload = transport.events.lastIndexWhere(
-        (String event) => event.contains('"action":"reload"'),
-      );
-      final int setDefault = transport.events.indexWhere(
-        (String event) =>
-            event.contains('"action":"setDefault"') &&
-            event.contains('"appId":"dev.pluto.launcher"'),
-      );
-      final List<int> launches = <int>[
-        for (var i = 0; i < transport.events.length; i++)
-          if (transport.events[i].contains('"action":"launch"')) i,
-      ];
-
-      expect(suppress, greaterThanOrEqualTo(0));
-      expect(activate, greaterThan(suppress));
-      expect(runtimeUpload, greaterThan(activate));
-      expect(launcherUpload, greaterThan(runtimeUpload));
-      expect(finalReload, greaterThan(launcherUpload));
-      expect(setDefault, greaterThan(finalReload));
-      expect(launches, hasLength(1));
-      expect(launches.single, greaterThan(setDefault));
-      expect(
-        fake.commands
-            .where(
-              (String command) =>
-                  command.contains('cd /home/root && bash xovi/start'),
-            )
-            .length,
-        1,
-        reason: 'provision performs one integration restart',
-      );
-    },
-  );
-
-  test('cooperative provision restores the old default on failure', () async {
-    final Directory temp = Directory.systemTemp.createTempSync(
-      'pluto_cooperative_default_restore',
-    );
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final FakeTransport transport = _cooperativeTransport(
-      'device',
-      existingDefaultApp: 'dev.pluto.ink',
-      controlErrors: const <String>{'launch'},
-    );
-
-    await expectLater(
-      LiveDeviceOperations(transport).provision(
-        runtime: const <PayloadFile>[],
-        apps: <PayloadApp>[_writeCooperativeLauncher(temp)],
-        payloadTarget: 'linux-arm',
-        cooperativeIntegration: _writeCooperativeIntegration(temp),
-      ),
-      throwsA(isA<DeviceOperationException>()),
-    );
-
-    final int suppress = transport.commands.indexWhere(
-      (String command) =>
-          command.contains('expected=\'dev.pluto.ink\'') &&
-          command.contains('mv "\$live" "\$backup"'),
-    );
-    final int setDefault = transport.commands.indexWhere(
-      (String command) =>
-          command.contains('"action":"setDefault"') &&
-          command.contains('"appId":"dev.pluto.launcher"'),
-    );
-    final int failedLaunch = transport.commands.indexWhere(
-      (String command) => command.contains('"action":"launch"'),
-    );
-    final int failedGenerationCleanup = transport.commands.indexWhere(
-      (String command) => command.contains('"action":"stopAll"'),
-    );
-    final int restore = transport.commands.indexWhere(
-      (String command) =>
-          command.contains('expected=\'dev.pluto.ink\'') &&
-          command.contains('mv "\$backup" "\$live"') &&
-          command.contains('chmod 0600'),
-    );
-    expect(suppress, greaterThanOrEqualTo(0));
-    expect(setDefault, greaterThan(suppress));
-    expect(failedLaunch, greaterThan(setDefault));
-    expect(failedGenerationCleanup, greaterThan(failedLaunch));
-    expect(restore, greaterThan(failedGenerationCleanup));
-    expect(
-      transport.commands.where(
-        (String command) => command.contains('"action":"launch"'),
-      ),
-      hasLength(1),
-    );
-  });
-
-  test('cooperative no-boot-default never launches an app', () async {
-    final Directory temp = Directory.systemTemp.createTempSync(
-      'pluto_cooperative_no_boot_default',
-    );
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final FakeTransport transport = _cooperativeTransport(
-      'device',
-      existingDefaultApp: LiveDeviceOperations.launcherAppId,
-    );
-
-    final DeviceOperationResult result = await LiveDeviceOperations(transport)
-        .provision(
-          runtime: const <PayloadFile>[],
-          apps: const <PayloadApp>[],
-          payloadTarget: 'linux-arm',
-          cooperativeIntegration: _writeCooperativeIntegration(temp),
-          bootDefault: false,
-        );
-
-    expect(result.ok, isTrue);
-    final List<String> defaults = transport.commands
-        .where((String command) => command.contains('"action":"setDefault"'))
-        .toList();
-    expect(defaults, hasLength(1));
-    expect(defaults.single, contains('"appId":null'));
-    expect(
-      transport.commands.any(
-        (String command) => command.contains('"action":"launch"'),
-      ),
-      isFalse,
-    );
-  });
-
-  test(
-    'cooperative provision rejects an unsafe default before restart',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_cooperative_unsafe_default',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final FakeTransport transport = _cooperativeTransport(
-        'device',
-        defaultInspectionResult: const CommandResult(
-          exitCode: 78,
-          stderr: 'unsafe Pluto default app file',
-        ),
-      );
-
-      await expectLater(
-        LiveDeviceOperations(transport).provision(
-          runtime: const <PayloadFile>[],
-          apps: const <PayloadApp>[],
-          payloadTarget: 'linux-arm',
-          cooperativeIntegration: _writeCooperativeIntegration(temp),
-        ),
-        throwsA(
-          isA<DeviceOperationException>().having(
-            (DeviceOperationException error) => error.message,
-            'message',
-            contains('validate the existing Pluto boot default'),
-          ),
-        ),
-      );
-
-      expect(transport.uploads, isEmpty);
-      final String inspection = transport.commands.singleWhere(
-        (String command) => command.contains('PLUTO-DEFAULT-STATE|'),
-      );
-      expect(inspection, contains('[ ! -L "\$root" ]'));
-      expect(inspection, contains('[ ! -L "\$state" ]'));
-      expect(inspection, contains('[ ! -L "\$live" ]'));
-      expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains('cd /home/root && bash xovi/start'),
-        ),
-        isFalse,
-      );
-    },
-  );
-
-  test('provision selects the exact 3.27 cooperative hook', () async {
-    final Directory temp = Directory.systemTemp.createTempSync(
-      'pluto_cooperative_327',
-    );
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final FakeTransport transport = _cooperativeTransport(
-      'device',
-      firmwareVersion: '3.27.3.0',
-    );
-
-    await LiveDeviceOperations(transport).provision(
-      runtime: const <PayloadFile>[],
-      apps: const <PayloadApp>[],
-      payloadTarget: 'linux-arm',
-      cooperativeIntegration: _writeCooperativeIntegration(temp),
-    );
-
-    expect(
-      transport.uploads.any(
-        (upload) =>
-            upload.remotePath.endsWith('/extensions.d/appload.so') &&
-            upload.bytes.length == 1 &&
-            upload.bytes.single == 31,
-      ),
-      isTrue,
-      reason: 'firmware 3.27 must never receive the 3.28 QML diff',
-    );
-  });
-
-  test(
-    'provision rejects firmware without a validated hook before writes',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_cooperative_unknown_firmware',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final FakeTransport transport = _cooperativeTransport(
-        'device',
-        firmwareVersion: '3.29.0.1',
-      );
-
-      await expectLater(
-        LiveDeviceOperations(transport).provision(
-          runtime: const <PayloadFile>[],
-          apps: const <PayloadApp>[],
-          payloadTarget: 'linux-arm',
-          cooperativeIntegration: _writeCooperativeIntegration(temp),
-        ),
-        throwsA(
-          isA<DeviceOperationException>().having(
-            (error) => error.message,
-            'message',
-            contains('no validated cooperative integration'),
-          ),
-        ),
-      );
-      expect(transport.uploads, isEmpty);
-      expect(transport.directoryUploads, isEmpty);
-    },
-  );
-
-  test('provision rejects mismatched build and xochitl identities', () async {
-    for (final ({String name, FakeTransport transport, String message}) fixture
-        in <({String name, FakeTransport transport, String message})>[
-          (
-            name: 'build',
-            transport: _cooperativeTransport(
-              'device',
-              firmwareBuild: '20260629074045',
-            ),
-            message: 'no validated cooperative integration',
-          ),
-          (
-            name: 'xochitl',
-            transport: _cooperativeTransport(
-              'device',
-              xochitlDigest:
-                  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-            ),
-            message: 'xochitl does not match',
-          ),
-        ]) {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_cooperative_${fixture.name}_mismatch',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-
-      await expectLater(
-        LiveDeviceOperations(fixture.transport).provision(
-          runtime: const <PayloadFile>[],
-          apps: const <PayloadApp>[],
-          payloadTarget: 'linux-arm',
-          cooperativeIntegration: _writeCooperativeIntegration(temp),
-        ),
-        throwsA(
-          isA<DeviceOperationException>().having(
-            (error) => error.message,
-            'message',
-            contains(fixture.message),
-          ),
-        ),
-        reason: fixture.name,
-      );
-      expect(fixture.transport.uploads, isEmpty, reason: fixture.name);
-      expect(
-        fixture.transport.commands.any(
-          (String command) =>
-              command.contains('rm -rf') ||
-              command.contains('mkdir -p') ||
-              command.contains('xovi/start'),
-        ),
-        isFalse,
-        reason: '${fixture.name} refusal must precede every remote mutation',
-      );
-    }
-  });
-
-  test(
-    'provision rejects firmware profiles paired with the wrong model',
-    () async {
-      for (final FakeTransport transport in <FakeTransport>[
-        _cooperativeTransport(
-          'device',
-          machine: 'reMarkable 2.0',
-          firmwareVersion: '3.27.3.0',
-        ),
-        _cooperativeTransport(
-          'device',
-          machine: 'reMarkable 1.0',
-          firmwareVersion: '3.28.0.162',
-        ),
-      ]) {
-        final Directory temp = Directory.systemTemp.createTempSync(
-          'pluto_cooperative_cross_pair',
-        );
-        addTearDown(() => temp.deleteSync(recursive: true));
-
-        await expectLater(
-          LiveDeviceOperations(transport).provision(
-            runtime: const <PayloadFile>[],
-            apps: const <PayloadApp>[],
-            payloadTarget: 'linux-arm',
-            cooperativeIntegration: _writeCooperativeIntegration(temp),
-          ),
-          throwsA(
-            isA<DeviceOperationException>().having(
-              (error) => error.message,
-              'message',
-              contains('no validated cooperative integration'),
-            ),
-          ),
-        );
-        expect(transport.uploads, isEmpty);
-        expect(
-          transport.commands.any(
-            (String command) =>
-                command.contains('rm -rf') || command.contains('xovi/start'),
-          ),
-          isFalse,
-        );
-      }
-    },
-  );
-
-  test(
-    'provision installs integration when managed markers are initially absent',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_cooperative_clean_provision',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final FakeTransport transport = _cooperativeTransport(
-        'device',
-        execHandler: (String command) async {
-          if (command.startsWith('test -e ')) {
-            return const CommandResult(exitCode: 1);
-          }
-          return const CommandResult(exitCode: 0);
-        },
-      );
-
-      final DeviceOperationResult result = await LiveDeviceOperations(transport)
-          .provision(
-            runtime: const <PayloadFile>[],
-            apps: const <PayloadApp>[],
-            payloadTarget: 'linux-arm',
-            cooperativeIntegration: _writeCooperativeIntegration(temp),
-          );
-
-      expect(result.ok, isTrue);
-      expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains('cd /home/root && bash xovi/start'),
-        ),
-        isTrue,
-      );
-    },
-  );
-
-  test(
-    'provision rejects a tampered profile table before device writes',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_cooperative_tampered_table',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final CooperativeIntegrationPayload integration =
-          _writeCooperativeIntegration(temp);
-      File(
-        '${integration.rootDirectory}/profiles/3.28.0.162/hashtab',
-      ).writeAsBytesSync(<int>[99]);
-      final FakeTransport transport = _cooperativeTransport('device');
-
-      await expectLater(
-        LiveDeviceOperations(transport).provision(
-          runtime: const <PayloadFile>[],
-          apps: const <PayloadApp>[],
-          payloadTarget: 'linux-arm',
-          cooperativeIntegration: integration,
-        ),
-        throwsA(
-          isA<DeviceOperationException>().having(
-            (error) => error.message,
-            'message',
-            contains('QRR table checksum mismatch'),
-          ),
-        ),
-      );
-      expect(transport.uploads, isEmpty);
-      expect(
-        transport.commands.any(
-          (String command) => command.contains('Pluto ARMv7 Probe'),
-        ),
-        isFalse,
-        reason: 'the exact known probe is untouched until all preflights pass',
-      );
-    },
-  );
-
-  test('provision lock and restart gate fail before payload writes', () async {
-    for (final ({String name, FakeTransport transport}) fixture
-        in <({String name, FakeTransport transport})>[
-          (
-            name: 'lock',
-            transport: _cooperativeTransport(
-              'device',
-              activationLockAvailable: false,
-            ),
-          ),
-          (
-            name: 'gate',
-            transport: _cooperativeTransport(
-              'device',
-              activationPreflightResult: const CommandResult(
-                exitCode: 75,
-                stderr:
-                    'xochitl restart gate requires at least 3 minutes between attempts',
-              ),
-            ),
-          ),
-        ]) {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_cooperative_${fixture.name}',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-
-      await expectLater(
-        LiveDeviceOperations(fixture.transport).provision(
-          runtime: const <PayloadFile>[],
-          apps: const <PayloadApp>[],
-          payloadTarget: 'linux-arm',
-          cooperativeIntegration: _writeCooperativeIntegration(temp),
-        ),
-        throwsA(isA<DeviceOperationException>()),
-        reason: fixture.name,
-      );
-
-      expect(fixture.transport.uploads, isEmpty, reason: fixture.name);
-      expect(
-        fixture.transport.commands.any(
-          (String command) => command.contains('Pluto ARMv7 Probe'),
-        ),
-        isFalse,
-        reason: fixture.name,
-      );
-    }
-  });
-
-  test('activation requires fresh pid and socket generations', () async {
-    final Directory temp = Directory.systemTemp.createTempSync(
-      'pluto_cooperative_stale_activation',
-    );
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final FakeTransport transport = _cooperativeTransport(
-      'device',
-      freshActivation: false,
-    );
-
-    await expectLater(
-      LiveDeviceOperations(transport).provision(
-        runtime: const <PayloadFile>[],
-        apps: const <PayloadApp>[],
-        payloadTarget: 'linux-arm',
-        cooperativeIntegration: _writeCooperativeIntegration(temp),
-      ),
-      throwsA(isA<DeviceOperationException>()),
-    );
-
-    final int ledger = transport.commands.indexWhere(
-      (String command) =>
-          command.contains('.pluto-xochitl-restart-ledger') &&
-          command.contains('date +%s') &&
-          command.contains('sync'),
-    );
-    final int activation = transport.commands.indexWhere(
-      (String command) => command.contains('old_pid='),
-    );
-    expect(ledger, greaterThanOrEqualTo(0));
-    expect(activation, greaterThan(ledger));
-    expect(
-      transport.commands.any(
-        (String command) =>
-            command.contains('recovery-required') &&
-            command.contains('umount -q'),
-      ),
-      isTrue,
-    );
-  });
-
-  test('failed integration ping restores the stock display session', () async {
-    final Directory temp = Directory.systemTemp.createTempSync(
-      'pluto_cooperative_ping_recovery',
-    );
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final FakeTransport transport = _cooperativeTransport(
-      'device',
-      controlErrors: const <String>{'ping'},
-    );
-
-    await expectLater(
-      LiveDeviceOperations(transport).provision(
-        runtime: const <PayloadFile>[],
-        apps: const <PayloadApp>[],
-        payloadTarget: 'linux-arm',
-        cooperativeIntegration: _writeCooperativeIntegration(temp),
-      ),
-      throwsA(isA<DeviceOperationException>()),
-    );
-    expect(
-      transport.commands.any(
-        (String command) =>
-            command.contains(
-              'umount -q /etc/systemd/system/xochitl.service.d',
-            ) &&
-            command.contains('recovery-required') &&
-            command.contains('99-pluto-validation-guard.conf') &&
-            !command.contains('bash xovi/stock'),
-      ),
-      isTrue,
-      reason:
-          'activation failure restores stock files without burning an immediate second restart',
-    );
-  });
 
   test('provision never trusts a hostname that impersonates a Move', () async {
     final FakeTransport transport = FakeTransport(
@@ -2024,6 +1216,31 @@ void main() {
     );
   });
 
+  test(
+    'restoreStockBoot remains available after known-device firmware drift',
+    () async {
+      final FakeTransport transport = _deviceTransport(
+        'h',
+        firmwareBuild: 'future-build',
+        firmwareVersion: '9.99.0',
+      );
+      final DeviceOperationResult result = await LiveDeviceOperations(
+        transport,
+      ).restoreStockBoot();
+
+      expect(result.ok, isTrue);
+      expect(
+        transport.commands.any(
+          (String command) =>
+              command.contains('pluto-boot-install.sh') &&
+              command.contains(' uninstall'),
+        ),
+        isTrue,
+        reason: 'recovery must not be disabled by a closed provision gate',
+      );
+    },
+  );
+
   test('uninstallSystem runs the full device uninstaller', () async {
     final FakeTransport transport = _moveTransport('h');
     final LiveDeviceOperations ops = LiveDeviceOperations(transport);
@@ -2063,6 +1280,15 @@ void main() {
         'runtime preserved because a peer-slot boot override may remain',
       ),
       reason: 'missing authoritative scripts must fail without deleting ROOT',
+    );
+    expect(
+      transport.commands.any(
+        (String command) =>
+            command.contains('rm -rf /home/root/xovi') &&
+            command.contains('/tmp/qtfb.sock'),
+      ),
+      isTrue,
+      reason: 'system uninstall also hard-removes retired display artifacts',
     );
   });
 
@@ -2258,7 +1484,7 @@ void main() {
   });
 
   test(
-    'installPackage dispatches linux-arm to the cooperative backend',
+    'installPackage selects the linux-arm slice through the native flow',
     () async {
       final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
       addTearDown(() => temp.deleteSync(recursive: true));
@@ -2266,7 +1492,11 @@ void main() {
       final PlapTargetSlice selected = (await PlapArchive.read(
         plap.path,
       )).sliceForTarget('linux-arm');
-      final FakeTransport transport = _cooperativeTransport('device');
+      final FakeTransport transport = _deviceTransport(
+        'device',
+        machine: 'reMarkable 2.0',
+        architecture: 'armv7l',
+      );
 
       final DeviceOperationResult result = await LiveDeviceOperations(
         transport,
@@ -2276,22 +1506,8 @@ void main() {
       expect(
         transport.uploads.any(
           (FakeUpload upload) =>
-              upload.remotePath.endsWith('/external.manifest.json') &&
-              utf8.decode(upload.bytes).contains('"managed": true'),
+              upload.remotePath.endsWith('/external.manifest.json'),
         ),
-        isTrue,
-      );
-      final FakeUpload manifest = transport.uploads.singleWhere(
-        (FakeUpload upload) =>
-            upload.remotePath.endsWith('/external.manifest.json'),
-      );
-      final Map<String, Object?> decoded =
-          jsonDecode(utf8.decode(manifest.bytes)) as Map<String, Object?>;
-      final List<Object?> args = decoded['args']! as List<Object?>;
-      expect(decoded['aspectRatio'], 'auto');
-      expect(args, contains('--presenter-options=profile=legacy'));
-      expect(
-        args.whereType<String>().any((String arg) => arg.startsWith('--dpr=')),
         isFalse,
       );
       expect(transport.uploads, isNotEmpty);
@@ -2313,102 +1529,14 @@ void main() {
         selectedEntries.keys.any((String path) => path.startsWith('targets/')),
         isFalse,
       );
-      final FakeUpload icon = transport.uploads.singleWhere(
-        (FakeUpload upload) => upload.remotePath.endsWith('/icon.png'),
-      );
-      expect(icon.bytes, orderedEquals(_armIconBytes));
       final FakeUpload installUpload = transport.uploads.singleWhere(
-        (FakeUpload upload) => upload.remotePath.endsWith('/install.json'),
+        (FakeUpload upload) =>
+            upload.remotePath.endsWith('/install.json.pending'),
       );
       final Map<String, Object?> install =
           jsonDecode(utf8.decode(installUpload.bytes)) as Map<String, Object?>;
       expect(install['sizeBytes'], selected.installTarBytes.length);
       expect(install['payload'], selected.payloadHashes);
-    },
-  );
-
-  test('cooperative Codex manifest selects the packaged real binary', () async {
-    final Directory temp = Directory.systemTemp.createTempSync('pluto_codex');
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final File plap = await _writePlap(
-      temp,
-      appId: 'dev.pluto.codex',
-      target: 'linux-arm',
-    );
-    final FakeTransport transport = _cooperativeTransport('device');
-
-    await LiveDeviceOperations(transport).installPackage(plap.path);
-
-    final FakeUpload manifest = transport.uploads.singleWhere(
-      (FakeUpload upload) =>
-          upload.remotePath.endsWith('/external.manifest.json'),
-    );
-    final Map<String, Object?> decoded =
-        jsonDecode(utf8.decode(manifest.bytes)) as Map<String, Object?>;
-    final Map<String, Object?> environment =
-        decoded['environment']! as Map<String, Object?>;
-    final List<Object?> args = decoded['args']! as List<Object?>;
-    expect(environment['PAPER_CODEX_BIN'], '$root/bin/codex');
-    expect(environment, isNot(contains('PAPER_CODEX_FAKE')));
-    expect(
-      args.whereType<String>().any((String arg) => arg.startsWith('--dpr=')),
-      isFalse,
-    );
-    expect(decoded['aspectRatio'], 'auto');
-    expect(args, contains('--presenter-options=profile=legacy'));
-  });
-
-  test('cooperative replacement relaunches an app that was running', () async {
-    final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
-    addTearDown(() => temp.deleteSync(recursive: true));
-    final File plap = await _writePlap(temp, target: 'linux-arm');
-    final FakeTransport transport = _cooperativeTransport(
-      'device',
-      controlResults: const <String, Map<String, Object?>>{
-        'stop': <String, Object?>{'stopped': true},
-      },
-    );
-
-    await LiveDeviceOperations(
-      transport,
-    ).installPackage(plap.path, force: true);
-
-    final int reload = transport.commands.indexWhere(
-      (String command) => command.contains('"action":"reload"'),
-    );
-    final int relaunch = transport.commands.indexWhere(
-      (String command) => command.contains('"action":"launch"'),
-    );
-    expect(reload, greaterThanOrEqualTo(0));
-    expect(relaunch, greaterThan(reload));
-  });
-
-  test(
-    'cooperative install rolls back both registries when reload fails',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync('pluto_pkg');
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final File plap = await _writePlap(temp, target: 'linux-arm');
-      final FakeTransport transport = _cooperativeTransport(
-        'device',
-        controlErrors: const <String>{'reload'},
-      );
-
-      await expectLater(
-        LiveDeviceOperations(transport).installPackage(plap.path),
-        throwsA(isA<DeviceOperationException>()),
-      );
-
-      expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains("rm -rf '$root/apps/dev.example.notes'") &&
-              command.contains('pluto-dev.example.notes.pluto-old-') &&
-              command.contains("'$root/apps/dev.example.notes'"),
-        ),
-        isTrue,
-        reason: 'app and AppLoad entry are restored as one failed transaction',
-      );
     },
   );
 
@@ -2766,58 +1894,6 @@ void main() {
     );
   });
 
-  test('cooperative launch uses the AppLoad control channel', () async {
-    final FakeTransport transport = _cooperativeTransport('device');
-
-    await LiveDeviceOperations(
-      transport,
-    ).launchAotApp(appId: 'dev.example.notes');
-
-    final String request = transport.commands.singleWhere(
-      (String command) =>
-          command.contains('pluto-controlctl') &&
-          command.contains('"action":"launch"'),
-    );
-    expect(request, contains('"appId":"dev.example.notes"'));
-    expect(request, contains('"entryId":"external::pluto-dev.example.notes"'));
-    expect(request, contains('"replace":true'));
-  });
-
-  test(
-    'cooperative uninstall removes both registries transactionally',
-    () async {
-      final FakeTransport transport = _cooperativeTransport(
-        'device',
-        controlResults: const <String, Map<String, Object?>>{
-          'stop': <String, Object?>{'stopped': true},
-        },
-      );
-
-      final DeviceOperationResult result = await LiveDeviceOperations(
-        transport,
-      ).uninstallApp('dev.example.notes');
-
-      expect(result.ok, isTrue);
-      expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains('$root/apps/dev.example.notes.pluto-remove-') &&
-              command.contains(
-                '/home/root/xovi/exthome/appload/'
-                'pluto-dev.example.notes.pluto-remove-',
-              ),
-        ),
-        isTrue,
-      );
-      expect(
-        transport.commands.any(
-          (String command) => command.contains('"action":"reload"'),
-        ),
-        isTrue,
-      );
-    },
-  );
-
   test('uninstall rejects unsafe and launcher ids before device I/O', () async {
     for (final String appId in <String>[
       '../dev.pluto.ink',
@@ -2825,7 +1901,7 @@ void main() {
       'dev.pluto.ink;reboot',
       LiveDeviceOperations.launcherAppId,
     ]) {
-      final FakeTransport transport = _cooperativeTransport('device');
+      final FakeTransport transport = _moveTransport('device');
 
       await expectLater(
         LiveDeviceOperations(transport).uninstallApp(appId),
@@ -2839,135 +1915,10 @@ void main() {
     }
   });
 
-  test('cooperative logs retain the normal public operation', () async {
-    final FakeTransport transport = _cooperativeTransport(
-      'device',
-      execHandler: (String command) async => CommandResult(
-        exitCode: 0,
-        stdout: command.contains('journalctl') ? 'APPLOAD LOG\n' : '',
-      ),
-    );
-
-    expect(
-      await LiveDeviceOperations(transport).logs(),
-      contains('APPLOAD LOG'),
-    );
-    expect(
-      transport.commands.any(
-        (String command) => command.contains('journalctl -u xochitl.service'),
-      ),
-      isTrue,
-    );
-  });
-
-  test(
-    'cooperative screenshot uses portable binary transfer and verifies it',
-    () async {
-      final Uint8List png = Uint8List.fromList(<int>[137, 80, 78, 71, 1, 2, 3]);
-      final String digest = sha256Bytes(png);
-      final FakeTransport transport = _cooperativeTransport(
-        'device',
-        controlResults: <String, Map<String, Object?>>{
-          'screenshot': <String, Object?>{
-            'path': '/run/pluto/screenshots/fixture.png',
-            'bytes': png.length,
-            'sha256': digest,
-          },
-        },
-        execHandler: (String command) async {
-          if (command.contains('base64')) {
-            return const CommandResult(
-              exitCode: 127,
-              stderr: 'sh: base64: command not found',
-            );
-          }
-          return const CommandResult(exitCode: 0);
-        },
-        downloadHandler: (String remotePath) async {
-          expect(remotePath, '/run/pluto/screenshots/fixture.png');
-          return png;
-        },
-      );
-
-      expect(
-        await LiveDeviceOperations(transport).screenshot(),
-        orderedEquals(png),
-      );
-      expect(transport.downloads, <String>[
-        '/run/pluto/screenshots/fixture.png',
-      ]);
-      expect(
-        transport.commands.any((String command) => command.contains('base64')),
-        isFalse,
-      );
-      expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains(
-                "[ ! -L '/run/pluto/screenshots/fixture.png' ]",
-              ) &&
-              command.contains('wc -c'),
-        ),
-        isTrue,
-      );
-      expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains("rm -f '/run/pluto/screenshots/fixture.png'") &&
-              command.contains('2>/dev/null || true'),
-        ),
-        isTrue,
-      );
-    },
-  );
-
-  test(
-    'cooperative screenshot cleans up after binary transfer failure',
-    () async {
-      final Uint8List png = Uint8List.fromList(<int>[137, 80, 78, 71, 1, 2, 3]);
-      const String path = '/run/pluto/screenshots/fixture.png';
-      final FakeTransport transport = _cooperativeTransport(
-        'device',
-        controlResults: <String, Map<String, Object?>>{
-          'screenshot': <String, Object?>{
-            'path': path,
-            'bytes': png.length,
-            'sha256': sha256Bytes(png),
-          },
-        },
-        downloadHandler: (String remotePath) async {
-          expect(remotePath, path);
-          return Uint8List.sublistView(png, 0, png.length - 1);
-        },
-      );
-
-      await expectLater(
-        LiveDeviceOperations(transport).screenshot(),
-        throwsA(
-          isA<DeviceOperationException>().having(
-            (DeviceOperationException error) => error.message,
-            'message',
-            contains('screenshot transfer failed'),
-          ),
-        ),
-      );
-
-      expect(transport.downloads, <String>[path]);
-      expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains("rm -f '$path'") &&
-              command.contains('2>/dev/null || true'),
-        ),
-        isTrue,
-      );
-    },
-  );
-
-  test('direct screenshot uses correlated embedder control metadata', () async {
+  test('native screenshot uses correlated embedder control metadata', () async {
     final Uint8List png = _pngHeaderFixture(73, 41);
     late Map<String, Object?> request;
-    final FakeTransport transport = _directScreenshotTransport(
+    final FakeTransport transport = _screenshotTransport(
       png: png,
       appId: 'dev.example.notes',
       surface: 'logical',
@@ -3032,7 +1983,7 @@ void main() {
   });
 
   test(
-    'direct screenshot accepts dynamic surface formats and strides',
+    'native screenshot accepts dynamic surface formats and strides',
     () async {
       for (final ({String format, int bytesPerPixel}) fixture
           in <({String format, int bytesPerPixel})>[
@@ -3041,7 +1992,7 @@ void main() {
             (format: 'xrgb8888', bytesPerPixel: 4),
           ]) {
         final Uint8List png = _pngHeaderFixture(19, 23);
-        final FakeTransport transport = _directScreenshotTransport(
+        final FakeTransport transport = _screenshotTransport(
           png: png,
           surface: 'post-dither',
           width: 19,
@@ -3078,9 +2029,9 @@ void main() {
     expect(transport.commands, isEmpty);
   });
 
-  test('direct screenshot rejects uncorrelated control responses', () async {
+  test('native screenshot rejects uncorrelated control responses', () async {
     final Uint8List png = _pngHeaderFixture(37, 29);
-    final FakeTransport transport = _directScreenshotTransport(
+    final FakeTransport transport = _screenshotTransport(
       png: png,
       responseRequestId: 'wrong-request',
     );
@@ -3105,10 +2056,10 @@ void main() {
     expect(transport.downloads, isEmpty);
   });
 
-  test('direct screenshot never removes an unsafe artifact path', () async {
+  test('native screenshot never removes an unsafe artifact path', () async {
     final Uint8List png = _pngHeaderFixture(37, 29);
     const String unsafe = '/run/pluto/screenshots/../state/boot-ready.png';
-    final FakeTransport transport = _directScreenshotTransport(
+    final FakeTransport transport = _screenshotTransport(
       png: png,
       path: unsafe,
     );
@@ -3133,7 +2084,7 @@ void main() {
   });
 
   test(
-    'direct screenshot rejects inconsistent metadata and cleans up',
+    'native screenshot rejects inconsistent metadata and cleans up',
     () async {
       final Uint8List png = _pngHeaderFixture(37, 29);
       final List<Map<String, Object?>> invalid = <Map<String, Object?>>[
@@ -3149,7 +2100,7 @@ void main() {
       ];
 
       for (final Map<String, Object?> override in invalid) {
-        final FakeTransport transport = _directScreenshotTransport(
+        final FakeTransport transport = _screenshotTransport(
           png: png,
           metadataOverrides: override,
         );
@@ -3175,10 +2126,10 @@ void main() {
   );
 
   test(
-    'direct screenshot validates PNG signature and IHDR dimensions',
+    'native screenshot validates PNG signature and IHDR dimensions',
     () async {
       final Uint8List badSignature = _pngHeaderFixture(37, 29)..[0] = 0;
-      final FakeTransport signatureTransport = _directScreenshotTransport(
+      final FakeTransport signatureTransport = _screenshotTransport(
         png: badSignature,
       );
       await expectLater(
@@ -3193,7 +2144,7 @@ void main() {
       );
 
       final Uint8List png = _pngHeaderFixture(37, 29);
-      final FakeTransport dimensionsTransport = _directScreenshotTransport(
+      final FakeTransport dimensionsTransport = _screenshotTransport(
         png: png,
         metadataOverrides: const <String, Object?>{'width': 38},
       );
@@ -3223,9 +2174,9 @@ void main() {
     },
   );
 
-  test('direct screenshot cleans up when foreground recheck fails', () async {
+  test('native screenshot cleans up when foreground recheck fails', () async {
     final Uint8List png = _pngHeaderFixture(37, 29);
-    final FakeTransport transport = _directScreenshotTransport(
+    final FakeTransport transport = _screenshotTransport(
       png: png,
       postflightResult: const CommandResult(
         exitCode: 67,

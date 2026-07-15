@@ -60,8 +60,7 @@ final class DevicesCommand extends PlutoCommand {
                     'buildModes': device.buildModes,
                     'capabilities': device.capabilities,
                     'provisioned': device.provisioned,
-                    'xoviAvailable': device.xoviAvailable,
-                    'appLoadAvailable': device.appLoadAvailable,
+                    'nativeRuntimeEnabled': device.nativeRuntimeEnabled,
                   },
                 )
                 .toList(growable: false),

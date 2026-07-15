@@ -12,7 +12,7 @@ void main() {
   });
 
   test(
-    'discovery probes model, firmware, runtime, xovi, and AppLoad',
+    'discovery probes model, firmware, and the native runtime marker',
     () async {
       late FakeTransport fake;
       final RemarkableDeviceDiscovery discovery = RemarkableDeviceDiscovery(
@@ -63,7 +63,7 @@ void main() {
 
       expect(devices, hasLength(1));
       expect(devices.single.model, 'chiappa');
-      expect(devices.single.runtimeBackend, PlutoRuntimeBackend.direct);
+      expect(devices.single.nativeRuntimeEnabled, isTrue);
       expect(devices.single.buildTarget, 'linux-arm64');
       expect(devices.single.buildModes, <String>[
         'release',
@@ -76,8 +76,6 @@ void main() {
       expect(devices.single.firmwareBuild, '20260629074044');
       expect(devices.single.firmwareVersion, '3.28.0.162');
       expect(devices.single.provisioned, isTrue);
-      expect(devices.single.xoviAvailable, isTrue);
-      expect(devices.single.appLoadAvailable, isTrue);
       expect(fake.commands, contains('cat /etc/version'));
       expect(fake.commands, contains('cat /usr/share/remarkable/update.conf'));
       expect(devices.single.formatSummary(), contains('linux-arm64'));
@@ -159,11 +157,6 @@ void main() {
       ).probe(id: 'usb', name: 'USB');
 
       expect(device.model, fixture.model, reason: fixture.machine);
-      expect(
-        device.runtimeBackend,
-        PlutoRuntimeBackend.cooperative,
-        reason: fixture.machine,
-      );
       expect(device.buildTarget, 'linux-arm', reason: fixture.machine);
       expect(device.buildModes, <String>['release'], reason: fixture.machine);
       expect(device.capabilities, isNot(contains('hot-reload')));
@@ -269,7 +262,7 @@ void main() {
       ).probe(id: 'usb', name: 'USB');
 
       expect(device.model, isNull);
-      expect(device.runtimeBackend, isNull);
+      expect(device.nativeRuntimeEnabled, isFalse);
       expect(
         transport.commands,
         containsAll(<String>[

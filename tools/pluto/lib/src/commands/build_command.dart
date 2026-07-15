@@ -3,7 +3,6 @@ import 'dart:io';
 import '../build/package_builder.dart';
 import '../build/release_pipeline.dart';
 import '../config/pins.dart';
-import '../device/remarkable_device.dart';
 import '../exit_codes.dart';
 import '../run/device_operations.dart';
 import 'base_command.dart';
@@ -24,13 +23,15 @@ mixin _DeviceAwareBuildTarget on PlutoCommand {
     if (endpoint == null) {
       usageException('Invalid --device value: $requestedDevice.');
     }
-    final PlutoRuntimeBackend backend = await LiveDeviceOperations(
+    final String target = await LiveDeviceOperations(
       environment.transportFactory(endpoint),
-    ).runtimeBackend();
-    final PlutoTargetPlatform detected =
-        backend == PlutoRuntimeBackend.cooperative
-        ? PlutoTargetPlatform.linuxArm
-        : PlutoTargetPlatform.linuxArm64;
+    ).runtimeTarget();
+    final PlutoTargetPlatform? detected = PlutoTargetPlatform.fromCliName(
+      target,
+    );
+    if (detected == null) {
+      usageException('Connected device selected unsupported target $target.');
+    }
     if (explicit != null && explicit != detected) {
       usageException(
         '--target-platform ${explicit.cliName} does not match the connected '

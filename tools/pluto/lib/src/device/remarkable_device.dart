@@ -1,15 +1,6 @@
 import '../ssh/device_transport.dart';
 import 'device_profile.dart';
 
-/// Runtime backend selected from trusted reMarkable hardware identity.
-enum PlutoRuntimeBackend {
-  /// Pluto owns the display and boot session directly.
-  direct,
-
-  /// Pluto runs inside the stock display session through the cooperative path.
-  cooperative,
-}
-
 /// A discovered reMarkable device.
 final class RemarkableDevice {
   /// Creates a device model.
@@ -22,8 +13,6 @@ final class RemarkableDevice {
     this.firmwareBuild,
     this.firmwareVersion,
     this.provisioned = false,
-    this.xoviAvailable = false,
-    this.appLoadAvailable = false,
   });
 
   /// CLI-visible id.
@@ -56,23 +45,9 @@ final class RemarkableDevice {
   /// Whether Pluto runtime markers were found.
   final bool provisioned;
 
-  /// Whether the xovi runtime path was found.
-  final bool xoviAvailable;
-
-  /// Whether the AppLoad extension path was found.
-  final bool appLoadAvailable;
-
-  /// Backend required by the normalized hardware model, or `null` when the
-  /// model is not recognized.
-  ///
-  /// A write-authorizing caller must obtain [model] from a strict device probe
-  /// that disables hostname fallback before using this value.
-  PlutoRuntimeBackend? get runtimeBackend => switch (profile?.displayDriver) {
-    NativeDisplayDriverKind.gallery3Drm => PlutoRuntimeBackend.direct,
-    NativeDisplayDriverKind.mxcfbEpdc ||
-    NativeDisplayDriverKind.lcdifTcon => PlutoRuntimeBackend.cooperative,
-    _ => null,
-  };
+  /// Whether the matched profile has passed its native-session gate.
+  bool get nativeRuntimeEnabled =>
+      profile?.runtime.nativeSessionEnabled ?? false;
 
   /// Build target selected automatically by device-aware commands.
   String? get buildTarget => profile?.targetSlice.wireName;
@@ -81,7 +56,7 @@ final class RemarkableDevice {
   List<String> get buildModes => profile?.buildModes ?? const <String>[];
 
   /// User-visible operations supported through the common Pluto CLI.
-  List<String> get capabilities => runtimeBackend == null
+  List<String> get capabilities => !nativeRuntimeEnabled
       ? const <String>[]
       : <String>[
           'build',

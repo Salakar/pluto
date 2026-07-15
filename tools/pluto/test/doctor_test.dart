@@ -44,7 +44,7 @@ void main() {
   });
 
   test(
-    'doctor probes fake device firmware and overlay markers on request',
+    'doctor probes fake device firmware and native runtime on request',
     () async {
       final _DoctorHarness harness = _DoctorHarness();
       addTearDown(harness.dispose);
@@ -62,7 +62,9 @@ void main() {
       );
       expect(
         report.checks
-            .singleWhere((DoctorCheck check) => check.id == 'device.xovi')
+            .singleWhere(
+              (DoctorCheck check) => check.id == 'device.nativeRuntime',
+            )
             .severity,
         DoctorSeverity.ok,
       );

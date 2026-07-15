@@ -27,6 +27,15 @@ Future<CommandResult> _moveExecHandler(String command) async {
   if (command == 'cat /proc/device-tree/compatible') {
     return const CommandResult(exitCode: 0, stdout: 'fsl,imx93');
   }
+  if (command == 'cat /etc/version') {
+    return const CommandResult(exitCode: 0, stdout: '20260629074044');
+  }
+  if (command == 'cat /usr/share/remarkable/update.conf') {
+    return const CommandResult(
+      exitCode: 0,
+      stdout: 'REMARKABLE_RELEASE_VERSION=3.28.0.162\n',
+    );
+  }
   return const CommandResult(exitCode: 0);
 }
 
@@ -63,67 +72,13 @@ FakeExecHandler _moveExecWith(FakeExecHandler fallback) =>
     (String command) async {
       if (command == 'cat /sys/devices/soc0/machine' ||
           command == 'cat /proc/device-tree/compatible' ||
-          command == 'uname -m') {
+          command == 'uname -m' ||
+          command == 'cat /etc/version' ||
+          command == 'cat /usr/share/remarkable/update.conf') {
         return _moveExecHandler(command);
       }
       return fallback(command);
     };
-
-Future<CommandResult> _rm2ControlExecHandler(String command) async {
-  if (command == 'cat /sys/devices/soc0/machine' ||
-      command == 'cat /proc/device-tree/compatible' ||
-      command == 'uname -m' ||
-      command == 'cat /etc/version' ||
-      command == 'cat /usr/share/remarkable/update.conf' ||
-      command == "sha256sum /usr/bin/xochitl | awk '{print \$1}'") {
-    return _rm2ExecHandler(command);
-  }
-  if (command.contains('qt-resource-rebuilder/hashtab') &&
-      command.contains('sha256sum')) {
-    return const CommandResult(
-      exitCode: 0,
-      stdout:
-          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    );
-  }
-  if (command.contains('PLUTO-ACTIVATION-PREFLIGHT')) {
-    return const CommandResult(
-      exitCode: 0,
-      stdout: 'PLUTO-ACTIVATION-PREFLIGHT|123|absent|absent\n',
-    );
-  }
-  if (command.contains('PLUTO-DEFAULT-STATE|')) {
-    return const CommandResult(
-      exitCode: 0,
-      stdout: 'PLUTO-DEFAULT-STATE|absent\n',
-    );
-  }
-  if (command.contains('pluto-controlctl') && command.contains('--request')) {
-    final RegExpMatch? match = RegExp(
-      r"--request '([^']+)'",
-    ).firstMatch(command);
-    if (match == null) {
-      return const CommandResult(exitCode: 64, stderr: 'missing request');
-    }
-    final Map<String, Object?> request =
-        jsonDecode(match.group(1)!) as Map<String, Object?>;
-    final String action = request['action']! as String;
-    return CommandResult(
-      exitCode: 0,
-      stdout: jsonEncode(<String, Object?>{
-        'schema': 1,
-        'requestId': request['requestId'],
-        'ok': true,
-        'result': <String, Object?>{
-          if (action == 'ping') 'protocol': 1,
-          if (action == 'stop') 'stopped': false,
-          if (action == 'reload') 'entryCount': 1,
-        },
-      }),
-    );
-  }
-  return const CommandResult(exitCode: 0);
-}
 
 void main() {
   test('runner exposes required top-level commands', () {
@@ -509,10 +464,10 @@ void main() {
     },
   );
 
-  test('install routes a linux-arm package through AppLoad', () async {
+  test('install routes a linux-arm package through the native flow', () async {
     final _CommandHarness harness = _CommandHarness(
       reachable: true,
-      execHandler: _rm2ControlExecHandler,
+      execHandler: _rm2ExecHandler,
     );
     addTearDown(harness.dispose);
     final File package = await _writePackageForMode(
@@ -533,30 +488,33 @@ void main() {
       transport.uploads.any(
         (FakeUpload upload) =>
             upload.remotePath.startsWith(
-              '/home/root/xovi/exthome/appload/'
-              '.pluto-dev.example.arm.pluto-new-',
+              '/home/root/pluto/apps/.dev.example.arm.pluto-new-',
             ) &&
-            upload.remotePath.endsWith('/external.manifest.json'),
+            upload.remotePath.endsWith('/install.json'),
       ),
       isTrue,
-      reason: 'the package is registered with the cooperative AppLoad backend',
+      reason: 'all targets use the canonical native app transaction',
     );
     expect(
       transport.commands.any(
         (String command) =>
-            command.contains('pluto-controlctl') &&
-            command.contains('"action":"reload"'),
+            command.contains('pluto-install-transaction.sh') &&
+            command.contains("commit 'dev.example.arm'"),
       ),
       isTrue,
     );
     expect(
-      transport.commands.any(
-        (String command) =>
-            command.contains('/run/pluto/launch') ||
-            command.contains('pluto-boot-install.sh'),
+      <String>[
+        ...transport.commands,
+        ...transport.uploads.map((FakeUpload upload) => upload.remotePath),
+      ].any(
+        (String value) =>
+            value.contains('/home/root/xovi') ||
+            value.contains('appload-control.sock') ||
+            value.contains('qtfb'),
       ),
       isFalse,
-      reason: 'ARMv7 install must not enter the direct-runtime control path',
+      reason: 'the retired integration is not an install fallback',
     );
   });
 
@@ -984,17 +942,23 @@ void main() {
     );
   });
 
-  test('provision routes a linux-arm layout through AppLoad', () async {
+  test('provision routes a linux-arm layout through the native flow', () async {
     final _CommandHarness harness = _CommandHarness(
       reachable: true,
-      execHandler: _rm2ControlExecHandler,
+      execHandler: _rm2ExecHandler,
     );
     addTearDown(harness.dispose);
     final String payload = '${harness.temp.path}/payload';
-    _writeCooperativeProvisionRuntime(payload);
+    _writeArmProvisionRuntime(payload);
     _writeLayout(
       '$payload/launcher',
       appId: 'dev.pluto.launcher',
+      mode: PlutoBuildMode.release,
+      target: PlutoTargetPlatform.linuxArm,
+    );
+    _writeLayout(
+      '$payload/apps/dev.pluto.codex',
+      appId: 'dev.pluto.codex',
       mode: PlutoBuildMode.release,
       target: PlutoTargetPlatform.linuxArm,
     );
@@ -1010,13 +974,12 @@ void main() {
       transport.uploads.any(
         (FakeUpload upload) =>
             upload.remotePath.startsWith(
-              '/home/root/xovi/exthome/appload/'
-              '.pluto-dev.pluto.launcher.pluto-new-',
+              '/home/root/pluto/.launcher.pluto-new-',
             ) &&
-            upload.remotePath.endsWith('/external.manifest.json'),
+            upload.remotePath.endsWith('/install.json'),
       ),
       isTrue,
-      reason: 'the launcher is registered in the cooperative app registry',
+      reason: 'the launcher uses the common native transaction',
     );
     expect(
       transport.uploads.any(
@@ -1041,17 +1004,28 @@ void main() {
     expect(
       transport.commands.any(
         (String command) =>
-            command.contains('pluto-controlctl') &&
-            command.contains('"action":"setDefault"'),
+            command.contains('pluto-boot-install.sh') &&
+            command.contains(' install'),
       ),
       isTrue,
     );
     expect(
-      transport.commands.any(
-        (String command) => command.contains('pluto-boot-install.sh'),
+      transport.uploads.any(
+        (FakeUpload upload) =>
+            upload.remotePath.contains('/home/root/xovi') ||
+            upload.remotePath.contains('/home/root/pluto-arm'),
       ),
       isFalse,
-      reason: 'cooperative devices never receive the direct boot override',
+      reason: 'the retired integration receives no provisioned artifacts',
+    );
+    expect(
+      transport.commands.any(
+        (String command) =>
+            command.contains('appload-control.sock') &&
+            command.contains('--request'),
+      ),
+      isFalse,
+      reason: 'the retired control protocol is not a lifecycle backend',
     );
   });
 
@@ -1061,14 +1035,20 @@ void main() {
       for (final String failure in <String>['missing', 'tampered']) {
         final _CommandHarness harness = _CommandHarness(
           reachable: true,
-          execHandler: _rm2ControlExecHandler,
+          execHandler: _rm2ExecHandler,
         );
         addTearDown(harness.dispose);
         final String payload = '${harness.temp.path}/payload';
-        _writeCooperativeProvisionRuntime(payload);
+        _writeArmProvisionRuntime(payload);
         _writeLayout(
           '$payload/launcher',
           appId: 'dev.pluto.launcher',
+          mode: PlutoBuildMode.release,
+          target: PlutoTargetPlatform.linuxArm,
+        );
+        _writeLayout(
+          '$payload/apps/dev.pluto.codex',
+          appId: 'dev.pluto.codex',
           mode: PlutoBuildMode.release,
           target: PlutoTargetPlatform.linuxArm,
         );
@@ -1425,97 +1405,10 @@ void _writeProvisionRuntime(
   }
 }
 
-void _writeCooperativeProvisionRuntime(String payload) {
-  File('$payload/bin/pluto-embedder')
-    ..createSync(recursive: true)
-    ..writeAsBytesSync(<int>[6]);
-  File('$payload/bin/pluto-controlctl').writeAsBytesSync(<int>[8]);
-  File('$payload/share/device-profiles.sh')
-    ..createSync(recursive: true)
-    ..writeAsStringSync('# generated device profiles\n');
+void _writeArmProvisionRuntime(String payload) {
+  _writeProvisionRuntime(payload, releaseBytes: const <int>[6]);
   final Uint8List codex = _testCodexBinary();
   File('$payload/bin/codex').writeAsBytesSync(codex);
-  File('$payload/engine/release/libflutter_engine.so')
-    ..createSync(recursive: true)
-    ..writeAsBytesSync(<int>[6]);
-  File('$payload/engine/release/icudtl.dat').writeAsBytesSync(<int>[7]);
-  File('$payload/COOPERATIVE-PAYLOAD.json').writeAsStringSync(
-    jsonEncode(<String, Object?>{
-      'schema': 1,
-      'target': 'linux-arm',
-      'mode': 'release',
-      'flutterVersion': '3.44.4',
-      'engineCommit': _engineHash,
-      'runtimeRoot': '/home/root/pluto',
-      'codex': <String, Object?>{
-        'version': _codexVersion,
-        'sha256': sha256Bytes(codex),
-        'path': '/home/root/pluto/bin/codex',
-        'authentication': 'user-managed',
-      },
-    }),
-  );
-  _writeCooperativeIntegration('$payload/integration');
-}
-
-void _writeCooperativeIntegration(String root) {
-  const Map<String, bool> files = <String, bool>{
-    'xovi.so': false,
-    'start': true,
-    'stock': true,
-    'debug': true,
-    'rebuild_hashtable': true,
-    'extensions.d/qt-resource-rebuilder.so': false,
-    'services/xochitl.service/qt-resource-rebuilder.conf': false,
-    'scripts/debug/qt-resource-rebuilder.sh': true,
-    'bin/pluto-controlctl': true,
-    'exthome/appload/shims/qtfb-shim-32bit.so': false,
-    'exthome/appload/shims/qtfb-shim.so': false,
-  };
-  final StringBuffer checksums = StringBuffer()
-    ..writeln('schema=1')
-    ..writeln('target=linux-arm')
-    ..writeln('xovi=0.3.3')
-    ..writeln('qrr=v19')
-    ..writeln('apploadControlProtocol=1')
-    ..writeln('hashtab=profile-matched')
-    ..writeln('firmwareProfiles=3.27.3.0,3.28.0.162')
-    ..writeln();
-  var value = 10;
-  for (final String relative in files.keys) {
-    final List<int> bytes = <int>[value++];
-    File('$root/xovi/$relative')
-      ..createSync(recursive: true)
-      ..writeAsBytesSync(bytes);
-    checksums.writeln('${sha256Bytes(bytes)}  $relative');
-  }
-  for (final String firmware in <String>['3.27.3.0', '3.28.0.162']) {
-    final String relative = 'profiles/$firmware/appload.so';
-    final List<int> bytes = <int>[value++];
-    File('$root/$relative')
-      ..createSync(recursive: true)
-      ..writeAsBytesSync(bytes);
-    checksums.writeln('${sha256Bytes(bytes)}  $relative');
-    final String hashtabRelative = 'profiles/$firmware/hashtab';
-    final List<int> hashtabBytes = <int>[value++];
-    File('$root/$hashtabRelative')
-      ..createSync(recursive: true)
-      ..writeAsBytesSync(hashtabBytes);
-    checksums.writeln('${sha256Bytes(hashtabBytes)}  $hashtabRelative');
-  }
-  Link(
-    '$root/xovi/services/xochitl.service/extensions.d',
-  ).createSync('/home/root/xovi/extensions.d', recursive: true);
-  Link(
-    '$root/xovi/services/xochitl.service/exthome',
-  ).createSync('/home/root/xovi/exthome', recursive: true);
-  checksums
-    ..writeln(
-      'link services/xochitl.service/extensions.d '
-      '/home/root/xovi/extensions.d',
-    )
-    ..writeln('link services/xochitl.service/exthome /home/root/xovi/exthome');
-  File('$root/CHECKSUMS.txt').writeAsStringSync(checksums.toString());
 }
 
 void _writePinnedEngineArtifact({

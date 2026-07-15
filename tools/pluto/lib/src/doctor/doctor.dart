@@ -405,17 +405,18 @@ final class DoctorService {
     );
     checks.add(
       DoctorCheck(
-        id: 'device.xovi',
+        id: 'device.nativeRuntime',
         section: 'Device',
-        severity: device.xoviAvailable && device.appLoadAvailable
+        severity: device.nativeRuntimeEnabled
             ? DoctorSeverity.ok
-            : DoctorSeverity.warning,
-        message: device.xoviAvailable && device.appLoadAvailable
-            ? 'xovi and AppLoad markers found.'
-            : 'xovi/AppLoad markers not found.',
-        remediation: device.xoviAvailable && device.appLoadAvailable
+            : DoctorSeverity.error,
+        message: device.nativeRuntimeEnabled
+            ? 'Native session is enabled for ${device.name}.'
+            : 'Native session is not enabled for the detected hardware.',
+        remediation: device.nativeRuntimeEnabled
             ? null
-            : 'Provisioning will install the pinned overlay when enabled.',
+            : 'Use a Pluto revision whose exact device profile has passed '
+                  'native display acceptance.',
       ),
     );
     return checks;
