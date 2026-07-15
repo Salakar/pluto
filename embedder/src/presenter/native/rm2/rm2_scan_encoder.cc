@@ -16,7 +16,7 @@ bool rect_valid(const Rm2PanelRect &rect) {
          (rect.row_min & 7U) == 0 && (rect.row_max & 7U) == 7U;
 }
 
-std::uint32_t read_u32(std::span<std::byte> bytes, std::size_t offset) {
+std::uint32_t read_u32(std::span<const std::byte> bytes, std::size_t offset) {
   std::uint32_t value = 0;
   std::memcpy(&value, bytes.data() + offset, sizeof(value));
   return value;
@@ -27,21 +27,38 @@ void write_u32(std::span<std::byte> bytes, std::size_t offset,
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
 
+std::uint32_t preamble_cell(std::size_t cell) {
+  std::uint32_t value = 0x00430000U;
+  if (cell >= 20 && cell < 143) {
+    value |= 0x00040000U;
+  }
+  if (cell >= 40 && cell < 103) {
+    value &= ~0x00020000U;
+  }
+  return value;
+}
+
+std::uint32_t regular_cell(std::size_t cell, bool content,
+                           std::uint16_t drive_pattern) {
+  std::uint32_t value = 0x00410000U;
+  if (cell >= 8 && cell < 19) {
+    value |= 0x00200000U;
+  }
+  if (cell >= 55 && cell < 255) {
+    value |= 0x00020000U;
+  }
+  if (content && cell >= 26) {
+    value |= 0x00100000U | drive_pattern;
+  }
+  return value;
+}
+
 void fill_regular_line(std::span<std::byte> slot, std::size_t row, bool content,
                        std::uint16_t drive_pattern) {
   const std::size_t base = row * kRm2ScanoutStrideBytes;
   for (std::size_t cell = 0; cell < kCellsPerLine; ++cell) {
-    std::uint32_t value = 0x00410000U;
-    if (cell >= 8 && cell < 19) {
-      value |= 0x00200000U;
-    }
-    if (cell >= 55 && cell < 255) {
-      value |= 0x00020000U;
-    }
-    if (content && cell >= 26) {
-      value |= 0x00100000U | drive_pattern;
-    }
-    write_u32(slot, base + cell * sizeof(std::uint32_t), value);
+    write_u32(slot, base + cell * sizeof(std::uint32_t),
+              regular_cell(cell, content, drive_pattern));
   }
 }
 
@@ -54,19 +71,31 @@ bool fill_rm2_scan_slot(std::span<std::byte> slot,
   }
 
   for (std::size_t cell = 0; cell < kCellsPerLine; ++cell) {
-    std::uint32_t value = 0x00430000U;
-    if (cell >= 20 && cell < 143) {
-      value |= 0x00040000U;
-    }
-    if (cell >= 40 && cell < 103) {
-      value &= ~0x00020000U;
-    }
-    write_u32(slot, cell * sizeof(std::uint32_t), value);
+    write_u32(slot, cell * sizeof(std::uint32_t), preamble_cell(cell));
   }
   fill_regular_line(slot, 1, false, 0);
   fill_regular_line(slot, 2, false, 0);
   for (std::size_t row = 3; row < kRm2ScanoutHeight; ++row) {
     fill_regular_line(slot, row, true, drive_pattern);
+  }
+  return true;
+}
+
+bool rm2_scan_slot_is_safe_hold(std::span<const std::byte> slot) {
+  if (slot.size() != kRm2SlotBytes) {
+    return false;
+  }
+  for (std::size_t row = 0; row < kRm2ScanoutHeight; ++row) {
+    const bool preamble = row == 0;
+    const bool content = row >= 3;
+    const std::size_t base = row * kRm2ScanoutStrideBytes;
+    for (std::size_t cell = 0; cell < kCellsPerLine; ++cell) {
+      const std::uint32_t expected =
+          preamble ? preamble_cell(cell) : regular_cell(cell, content, 0);
+      if (read_u32(slot, base + cell * sizeof(std::uint32_t)) != expected) {
+        return false;
+      }
+    }
   }
   return true;
 }

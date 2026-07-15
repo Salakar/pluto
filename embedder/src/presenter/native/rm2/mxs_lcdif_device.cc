@@ -388,4 +388,31 @@ PlutoStatus MxsLcdifDevice::blank_powerdown() {
   return kPlutoStatusOk;
 }
 
+PlutoStatus MxsLcdifDevice::validate_safe_idle_scan() {
+  if (!initialized_ || mapping_ == nullptr) {
+    return fail(kPlutoStatusDeviceLost,
+                "RM2 safe-idle validation requires mapped scanout");
+  }
+  uapi::FramebufferFixedInfoArm32 fixed{};
+  uapi::FramebufferVariableInfoArm32 variable{};
+  if (syscalls_->ioctl(fd_, uapi::kGetFixedScreenInfo, &fixed) < 0 ||
+      syscalls_->ioctl(fd_, uapi::kGetVariableScreenInfo, &variable) < 0) {
+    const int error = errno;
+    return fail(kPlutoStatusDeviceLost,
+                errno_message("validate RM2 safe-idle scan", error));
+  }
+  const std::span<const std::byte> idle_slot = slot(kRm2IdleSlot);
+  if (!fixed_mode_valid(fixed, display_) ||
+      !variable_mode_valid(variable, display_, true) ||
+      fixed.smem_start != observed_fixed_.smem_start ||
+      !rm2_scan_slot_is_safe_hold(idle_slot)) {
+    return fail(kPlutoStatusDeviceLost,
+                "live RM2 scanout is not the canonical safe-idle page");
+  }
+  observed_fixed_ = fixed;
+  observed_variable_ = variable;
+  last_error_.clear();
+  return kPlutoStatusOk;
+}
+
 } // namespace pluto::native::rm2

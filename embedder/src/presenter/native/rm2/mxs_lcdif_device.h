@@ -55,6 +55,11 @@ public:
   PlutoStatus unblank(std::uint32_t index);
   PlutoStatus blank_powerdown();
 
+  // Re-reads the live fbdev mode and verifies that LCDIF is latched to the
+  // dedicated final slot whose mapped bytes are the exact canonical HOLD
+  // template. This is the hardware continuity gate for a warm glass handoff.
+  PlutoStatus validate_safe_idle_scan();
+
 private:
   PlutoStatus fail(PlutoStatus status, std::string message);
   PlutoStatus set_offset(std::uint32_t index);

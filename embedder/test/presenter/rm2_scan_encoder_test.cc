@@ -55,6 +55,13 @@ TEST(Rm2ScanEncoder, BuildsExactControlRowsAndUniformDriveTemplate) {
   EXPECT_EQ(read_cell(slot, 3, 26), 0x0051aaaaU);
   EXPECT_EQ(read_cell(slot, 3, 55), 0x0053aaaaU);
   EXPECT_EQ(read_cell(slot, 1407, 259), 0x0051aaaaU);
+
+  EXPECT_FALSE(rm2_scan_slot_is_safe_hold(slot));
+  ASSERT_TRUE(fill_rm2_scan_slot(slot, 0));
+  EXPECT_TRUE(rm2_scan_slot_is_safe_hold(slot));
+  slot[4U * kRm2ScanoutStrideBytes + 26U * sizeof(std::uint32_t)] ^=
+      std::byte{1};
+  EXPECT_FALSE(rm2_scan_slot_is_safe_hold(slot));
 }
 
 TEST(Rm2ScanEncoder, PacksEightPixelCommandsAndPreservesControlHalf) {

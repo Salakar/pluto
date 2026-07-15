@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "generated/device_profiles.h"
+#include "pluto/glass_handoff.h"
 #include "presenter/native/native_display_backend.h"
 #include "presenter/native/rm2/mxs_lcdif_device.h"
 
@@ -17,12 +18,21 @@ using Rm2TemperatureReader =
     std::function<std::optional<int>(std::string *error)>;
 using Rm2PowerReadyReader = std::function<bool(std::string *error)>;
 
+// Production is fixed to the shared private tmpfs bundle. Tests may provide
+// an isolated path and clock, but the native presenter factory cannot.
+struct Rm2HandoffOptions {
+  std::string path = kGlassHandoffDefaultPath;
+  bool allow_insecure_path_for_testing = false;
+  GlassHandoffClock (*now_for_testing)() = nullptr;
+};
+
 class LcdifTconDisplayBackend final : public NativeDisplayBackend {
 public:
   LcdifTconDisplayBackend(const GeneratedDeviceProfile &profile,
                           std::unique_ptr<MxsLcdifDevice> device = nullptr,
                           Rm2TemperatureReader temperature_reader = {},
-                          Rm2PowerReadyReader power_ready_reader = {});
+                          Rm2PowerReadyReader power_ready_reader = {},
+                          Rm2HandoffOptions handoff = {});
   ~LcdifTconDisplayBackend() override;
 
   LcdifTconDisplayBackend(const LcdifTconDisplayBackend &) = delete;

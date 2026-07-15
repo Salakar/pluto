@@ -1,19 +1,28 @@
 #include "presenter/native/rm2/lcdif_tcon_backend.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
 #include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/vfs.h>
+#endif
+#include <unistd.h>
 
 #include "presenter/native/rm2/rm2_scan_encoder.h"
 #include "presenter/native/rm2/rm2_waveform_program.h"
@@ -24,6 +33,12 @@ namespace {
 constexpr std::string_view kDriverName = "lcdif_tcon";
 constexpr std::size_t kBytesPerPixel = 2;
 constexpr std::size_t kMaximumDamageRects = 64;
+constexpr std::uint32_t kHandoffTilePixels = 32;
+constexpr std::uint32_t kHandoffEngineStride =
+    (kRm2PanelWidth + 7u) & ~std::uint32_t{7};
+constexpr std::size_t kMaximumRendererHandoffBytes = 32u << 20;
+constexpr std::string_view kHandoffPipelineTag =
+    "pluto-rm2-lcdif-warm-handoff-v1";
 constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagInkPriority | kPlutoPresentFlagPreDithered |
     kPlutoPresentFlagSettle | kPlutoPresentFlagSparkle |
@@ -31,6 +46,194 @@ constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagPixelResetWhite | kPlutoPresentFlagPixelResetRestore |
     kPlutoPresentFlagRequiredSettle | kPlutoPresentFlagPenTruth |
     kPlutoPresentSparklePhaseMask;
+
+static_assert(kHandoffEngineStride == 1408u);
+
+enum class HandoffDecision : std::uint8_t {
+  kNone,
+  kPending,
+  kAccepted,
+  kRejected,
+};
+
+class HandoffFingerprint final {
+public:
+  void add_u32(std::uint32_t value) {
+    std::array<std::uint8_t, 4> bytes{};
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+      bytes[shift / 8] = static_cast<std::uint8_t>(value >> shift);
+    }
+    add(bytes);
+  }
+
+  void add_u64(std::uint64_t value) {
+    std::array<std::uint8_t, 8> bytes{};
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+      bytes[shift / 8] = static_cast<std::uint8_t>(value >> shift);
+    }
+    add(bytes);
+  }
+
+  void add_bool(bool value) { add_u32(value ? 1u : 0u); }
+
+  void add_string(std::string_view value) {
+    add_u64(value.size());
+    add(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t *>(value.data()), value.size()));
+  }
+
+  template <typename T> void add_optional(const std::optional<T> &value) {
+    add_bool(value.has_value());
+    if (value.has_value()) {
+      add_u64(static_cast<std::uint64_t>(*value));
+    }
+  }
+
+  std::uint64_t value() const { return value_; }
+
+private:
+  void add(std::span<const std::uint8_t> bytes) {
+    value_ = glass_handoff_crc64(bytes, value_);
+  }
+
+  std::uint64_t value_ = 0;
+};
+
+bool production_handoff_path_is_secure(const std::string &path) {
+  if (path != kGlassHandoffDefaultPath) {
+    return false;
+  }
+#if defined(__linux__)
+  constexpr const char *kDirectory = "/run/pluto";
+  constexpr long kTmpfsMagic = 0x01021994;
+  struct stat directory_stat {};
+  struct statfs filesystem_stat {};
+  return ::lstat(kDirectory, &directory_stat) == 0 &&
+         S_ISDIR(directory_stat.st_mode) &&
+         directory_stat.st_uid == ::geteuid() &&
+         (directory_stat.st_mode & 0022) == 0 &&
+         ::statfs(kDirectory, &filesystem_stat) == 0 &&
+         static_cast<long>(filesystem_stat.f_type) == kTmpfsMagic;
+#else
+  return false;
+#endif
+}
+
+std::uint64_t
+waveform_descriptor_bytes(const GeneratedWaveformProfile &waveform) {
+  std::uint64_t bytes = 0;
+  for (const GeneratedWaveformSourceProfile &source :
+       waveform.accepted_sources) {
+    const std::array<std::string_view, 3> fields{source.path, source.sha256,
+                                                 source.panel_signature};
+    for (const std::string_view field : fields) {
+      if (field.size() > std::numeric_limits<std::uint64_t>::max() - bytes) {
+        return 0;
+      }
+      bytes += field.size();
+    }
+  }
+  return bytes;
+}
+
+bool build_handoff_identity(const GeneratedDeviceProfile &profile,
+                            GlassHandoffIdentity *out) {
+  const GeneratedDisplayContract &display = profile.runtime.display;
+  if (out == nullptr || profile.id != "rm2" ||
+      profile.display_driver != NativeDisplayDriverKind::kLcdifTcon ||
+      profile.target_slice != DeviceTargetSlice::kLinuxArm ||
+      profile.panel.width != static_cast<int>(kRm2PanelWidth) ||
+      profile.panel.height != static_cast<int>(kRm2PanelHeight) ||
+      profile.panel.source_pixel_format != "rgb565" || profile.panel.color ||
+      profile.runtime.firmware_build.empty() ||
+      profile.runtime.kernel_release.empty() ||
+      profile.runtime.waveform.accepted_sources.size() != 1 ||
+      display.scanout_width != kRm2ScanoutWidth ||
+      display.scanout_height != kRm2ScanoutHeight ||
+      display.virtual_width != kRm2ScanoutWidth ||
+      display.virtual_height != kRm2ScanoutHeight * kRm2MappedSlots ||
+      display.stride_bytes != kRm2ScanoutStrideBytes ||
+      display.buffer_slots != kRm2MappedSlots ||
+      display.slot_bytes != kRm2SlotBytes ||
+      !display.phase_interval_nanoseconds.has_value()) {
+    return false;
+  }
+
+  HandoffFingerprint waveform;
+  waveform.add_string("rm2-wbf-exact-profile-v1");
+  for (const GeneratedWaveformSourceProfile &source :
+       profile.runtime.waveform.accepted_sources) {
+    waveform.add_string(source.path);
+    waveform.add_string(source.sha256);
+    waveform.add_string(source.panel_signature);
+  }
+
+  HandoffFingerprint pipeline;
+  pipeline.add_string(kHandoffPipelineTag);
+  pipeline.add_string("physical-panel-row-major-u4-padded-v1");
+  pipeline.add_string("logical-tight-rgb565le-v1");
+  pipeline.add_string("canonical-idle-hold-v1");
+  pipeline.add_string(profile.id);
+  pipeline.add_string(profile.wire_model);
+  pipeline.add_string(profile.codename);
+  pipeline.add_string(profile.tested_os);
+  pipeline.add_string(profile.panel.signature);
+  pipeline.add_string(profile.panel.source_pixel_format);
+  pipeline.add_u32(static_cast<std::uint32_t>(profile.panel.width));
+  pipeline.add_u32(static_cast<std::uint32_t>(profile.panel.height));
+  pipeline.add_u32(static_cast<std::uint32_t>(profile.panel.dpi));
+  pipeline.add_bool(profile.panel.color);
+  pipeline.add_string(profile.runtime.firmware_build);
+  pipeline.add_string(profile.runtime.kernel_release);
+  pipeline.add_string(profile.runtime.display_device);
+  pipeline.add_u32(display.scanout_width);
+  pipeline.add_u32(display.scanout_height);
+  pipeline.add_optional(display.virtual_width);
+  pipeline.add_optional(display.virtual_height);
+  pipeline.add_optional(display.stride_bytes);
+  pipeline.add_optional(display.mapping_bytes);
+  pipeline.add_u32(display.bits_per_pixel);
+  pipeline.add_optional(display.rotation);
+  pipeline.add_optional(display.buffer_slots);
+  pipeline.add_optional(display.slot_bytes);
+  pipeline.add_u32(display.damage_alignment_pixels);
+  pipeline.add_optional(display.phase_interval_nanoseconds);
+  pipeline.add_u32(kHandoffEngineStride);
+  pipeline.add_u32(kHandoffTilePixels);
+  for (const std::string_view value : profile.architectures) {
+    pipeline.add_string(value);
+  }
+  for (const std::string_view value : profile.board_tokens) {
+    pipeline.add_string(value);
+  }
+  for (const std::string_view value : profile.compatible_tokens) {
+    pipeline.add_string(value);
+  }
+
+  const std::uint64_t waveform_bytes =
+      waveform_descriptor_bytes(profile.runtime.waveform);
+  if (waveform.value() == 0 || waveform_bytes == 0 || pipeline.value() == 0) {
+    return false;
+  }
+  *out = {
+      .flags = kGlassHandoffFlagNone,
+      .profile = GlassHandoffProfile::kMonochrome,
+      .width = static_cast<std::uint32_t>(kRm2PanelWidth),
+      .height = static_cast<std::uint32_t>(kRm2PanelHeight),
+      .pixel_format = static_cast<std::uint32_t>(kPlutoPixelFormatRgb565),
+      .engine_stride = kHandoffEngineStride,
+      .tile_px = kHandoffTilePixels,
+      .history_stride = 0,
+      .history_rows = 0,
+      .history_pixel_bytes = 0,
+      .waveform_hash = waveform.value(),
+      .waveform_bytes = waveform_bytes,
+      .ct33_hash = 0,
+      .ct33_bytes = 0,
+      .pipeline_hash = pipeline.value(),
+  };
+  return true;
+}
 
 bool refresh_class_valid(PlutoRefreshClass refresh_class) {
   switch (refresh_class) {
@@ -105,18 +308,35 @@ public:
   Impl(const GeneratedDeviceProfile &profile,
        std::unique_ptr<MxsLcdifDevice> device,
        Rm2TemperatureReader temperature_reader,
-       Rm2PowerReadyReader power_ready_reader)
+       Rm2PowerReadyReader power_ready_reader, Rm2HandoffOptions handoff)
       : profile_(profile),
         device_(device == nullptr ? std::make_unique<MxsLcdifDevice>()
                                   : std::move(device)),
         temperature_reader_(temperature_reader
                                 ? std::move(temperature_reader)
                                 : read_rm2_panel_temperature_millidegrees),
-        power_ready_reader_(power_ready_reader
-                                ? std::move(power_ready_reader)
-                                : [](std::string *error) {
-                                    return read_rm2_panel_power_ready(error);
-                                  }) {}
+        power_ready_reader_(
+            power_ready_reader
+                ? std::move(power_ready_reader)
+                : [](std::string
+                         *error) { return read_rm2_panel_power_ready(error); }),
+        handoff_path_(std::move(handoff.path)),
+        handoff_now_(handoff.now_for_testing == nullptr
+                         ? glass_handoff_now
+                         : handoff.now_for_testing) {
+    const bool production_route =
+        production_handoff_path_is_secure(handoff_path_);
+    handoff_route_enabled_ =
+        !handoff_path_.empty() &&
+        (handoff.allow_insecure_path_for_testing || production_route) &&
+        build_handoff_identity(profile_, &handoff_identity_);
+    if (!handoff_path_.empty() && !handoff_route_enabled_) {
+      std::fprintf(stderr, "lcdif_tcon: warm handoff disabled for insecure or "
+                           "incompatible route\n");
+      handoff_path_.clear();
+    }
+    handoff_unlinked_ = !handoff_route_enabled_;
+  }
 
   ~Impl() { stop(); }
 
@@ -133,14 +353,20 @@ public:
         return kPlutoStatusOk;
       }
     }
+    if (handoff_route_enabled_ && !handoff_lease_.valid() &&
+        !glass_handoff_acquire_lease(handoff_path_, &handoff_lease_)) {
+      return kPlutoStatusAgain;
+    }
     const PlutoStatus status = device_->open(profile);
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (status == kPlutoStatusOk) {
       probed_ = true;
-    } else if (status == kPlutoStatusDeviceLost ||
-               status == kPlutoStatusInternal) {
-      lost_ = true;
-      ++hardware_faults_;
+    } else {
+      handoff_lease_ = GlassHandoffLease{};
+      if (status == kPlutoStatusDeviceLost || status == kPlutoStatusInternal) {
+        lost_ = true;
+        ++hardware_faults_;
+      }
     }
     return status;
   }
@@ -171,15 +397,6 @@ public:
     if (!waveforms_.open(profile_, waveform_path, &error)) {
       return kPlutoStatusUnsupported;
     }
-    try {
-      settled_levels_.assign(kRm2PanelWidth * kRm2PanelHeight, 15);
-      mirror_.assign(kRm2PanelWidth * kRm2PanelHeight, 0xffffU);
-    } catch (const std::bad_alloc &) {
-      settled_levels_.clear();
-      mirror_.clear();
-      waveforms_.clear();
-      return kPlutoStatusInternal;
-    }
 
     PlutoStatus status = device_->initialize();
     if (status != kPlutoStatusOk) {
@@ -192,31 +409,34 @@ public:
         return fail_powered_start(kPlutoStatusInternal);
       }
     }
-    const std::optional<int> temperature = read_powered_temperature(&error);
-    std::vector<std::uint8_t> init_codes;
-    Rm2WaveformSelection selection;
-    if (!temperature.has_value() ||
-        !waveforms_.select(kPlutoRefreshFast, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshUi, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshText, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshFull, *temperature, &selection) ||
-        !waveforms_.init_pan_codes(*temperature, &init_codes)) {
+    if (device_->validate_safe_idle_scan() != kPlutoStatusOk) {
       return fail_powered_start(kPlutoStatusDeviceLost);
     }
-    if (!run_init_clear(init_codes)) {
+    bool handoff_pending = false;
+    const PlutoStatus handoff_status =
+        prepare_incoming_handoff(&handoff_pending);
+    if (handoff_status != kPlutoStatusOk) {
+      return fail_powered_start(kPlutoStatusDeviceLost);
+    }
+    if (!handoff_pending && cold_initialize() != kPlutoStatusOk) {
       return fail_powered_start(kPlutoStatusDeviceLost);
     }
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       callback_ = config.on_complete;
       callback_user_data_ = config.user_data;
-      accepting_ = true;
+      accepting_ = !handoff_pending;
       started_ = true;
       stopping_ = false;
     }
     try {
       worker_ = std::thread([this] { worker_main(); });
     } catch (...) {
+      if (handoff_route_enabled_ && handoff_lease_.valid()) {
+        (void)discard_handoff_locked();
+      }
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      handoff_lease_ = GlassHandoffLease{};
       mark_lost();
       device_->close();
       waveforms_.clear();
@@ -275,6 +495,15 @@ public:
         if (!started_ || !accepting_ || outstanding_) {
           return kPlutoStatusAgain;
         }
+      }
+      if (consume_handoff_before_admission_locked() != kPlutoStatusOk) {
+        return kPlutoStatusDeviceLost;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (lost_ || !started_ || !accepting_ || outstanding_) {
+          return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
+        }
         callback = callback_;
         callback_user_data = callback_user_data_;
         ++completed_jobs_;
@@ -293,6 +522,15 @@ public:
       }
       if (!started_ || !accepting_ || outstanding_) {
         return kPlutoStatusAgain;
+      }
+    }
+    if (consume_handoff_before_admission_locked() != kPlutoStatusOk) {
+      return kPlutoStatusDeviceLost;
+    }
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (lost_ || !started_ || !accepting_ || outstanding_) {
+        return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
       }
       outstanding_ = true;
     }
@@ -381,6 +619,204 @@ public:
     return kPlutoStatusOk;
   }
 
+  PlutoStatus stage_handoff(const PlutoHandoffPayload *payload,
+                            std::uint32_t timeout_ms) {
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusUnsupported;
+    }
+    if (payload == nullptr ||
+        payload->struct_size < sizeof(PlutoHandoffPayload) ||
+        payload->bytes == nullptr || payload->byte_count == 0 ||
+        payload->byte_count > kMaximumRendererHandoffBytes ||
+        payload->width != profile_.panel.width ||
+        payload->height != profile_.panel.height ||
+        payload->pixel_format != kPlutoPixelFormatRgb565 ||
+        payload->configuration_hash == 0 ||
+        (payload->rotation != 0 && payload->rotation != 90 &&
+         payload->rotation != 180 && payload->rotation != 270)) {
+      return kPlutoStatusInvalidArgument;
+    }
+
+    std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (lost_) {
+        return kPlutoStatusDeviceLost;
+      }
+      if (!started_ || stopping_ || handoff_saved_) {
+        return kPlutoStatusAgain;
+      }
+      accepting_ = false;
+    }
+    const PlutoStatus idle_status = wait_idle(timeout_ms);
+    if (idle_status != kPlutoStatusOk) {
+      return idle_status == kPlutoStatusDeviceLost ? idle_status
+                                                   : kPlutoStatusAgain;
+    }
+    if (device_->validate_safe_idle_scan() != kPlutoStatusOk) {
+      (void)discard_handoff_locked();
+      (void)device_->blank_powerdown();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+    if (handoff_chain_next_ >= kGlassHandoffMaxChain) {
+      if (discard_handoff_locked()) {
+        return kPlutoStatusAgain;
+      }
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+
+    GlassHandoffBundle bundle;
+    bundle.identity = handoff_identity_;
+    bundle.renderer = {
+        .width = static_cast<std::uint32_t>(payload->width),
+        .height = static_cast<std::uint32_t>(payload->height),
+        .rotation = payload->rotation,
+        .pixel_format = static_cast<std::uint32_t>(payload->pixel_format),
+        .configuration_hash = payload->configuration_hash,
+    };
+    bundle.written = handoff_now_();
+    bundle.chain = handoff_chain_next_;
+    try {
+      bundle.renderer_payload.assign(payload->bytes,
+                                     payload->bytes + payload->byte_count);
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      if (!pack_handoff_state_locked(&bundle)) {
+        (void)discard_handoff_locked();
+        (void)device_->blank_powerdown();
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+    } catch (const std::bad_alloc &) {
+      if (discard_handoff_locked()) {
+        return kPlutoStatusAgain;
+      }
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+
+    if (!glass_handoff_save(handoff_lease_, handoff_path_, bundle)) {
+      if (discard_handoff_locked()) {
+        return kPlutoStatusAgain;
+      }
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+    handoff_saved_ = true;
+    handoff_unlinked_ = false;
+    incoming_handoff_claim_ = {};
+    incoming_renderer_payload_.clear();
+    incoming_renderer_info_ = {};
+    handoff_decision_ = HandoffDecision::kNone;
+    std::fprintf(stderr,
+                 "lcdif_tcon: warm handoff saved chain=%u renderer_bytes=%zu "
+                 "presenter_bytes=%zu\n",
+                 bundle.chain, bundle.renderer_payload.size(),
+                 bundle.presenter_payload.size());
+    return kPlutoStatusOk;
+  }
+
+  PlutoStatus get_handoff(PlutoHandoffPayload *out_payload) {
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusUnsupported;
+    }
+    if (out_payload == nullptr ||
+        out_payload->struct_size < sizeof(PlutoHandoffPayload)) {
+      return kPlutoStatusInvalidArgument;
+    }
+    std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (lost_) {
+      return kPlutoStatusDeviceLost;
+    }
+    if (!started_ || stopping_ ||
+        handoff_decision_ != HandoffDecision::kPending ||
+        incoming_renderer_payload_.empty()) {
+      return kPlutoStatusAgain;
+    }
+    *out_payload = {
+        .struct_size = sizeof(PlutoHandoffPayload),
+        .bytes = incoming_renderer_payload_.data(),
+        .byte_count = incoming_renderer_payload_.size(),
+        .width = static_cast<std::int32_t>(incoming_renderer_info_.width),
+        .height = static_cast<std::int32_t>(incoming_renderer_info_.height),
+        .rotation = incoming_renderer_info_.rotation,
+        .pixel_format =
+            static_cast<PlutoPixelFormat>(incoming_renderer_info_.pixel_format),
+        .configuration_hash = incoming_renderer_info_.configuration_hash,
+    };
+    return kPlutoStatusOk;
+  }
+
+  PlutoStatus confirm_handoff(bool accepted) {
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusUnsupported;
+    }
+    std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (lost_) {
+        return kPlutoStatusDeviceLost;
+      }
+      if (!started_ || stopping_ ||
+          handoff_decision_ != HandoffDecision::kPending) {
+        return kPlutoStatusAgain;
+      }
+    }
+
+    if (!accepted) {
+      if (!discard_handoff_locked()) {
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      if (cold_initialize() != kPlutoStatusOk) {
+        device_->close();
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        accepting_ = true;
+      }
+      return kPlutoStatusOk;
+    }
+
+    if (device_->validate_safe_idle_scan() != kPlutoStatusOk) {
+      (void)discard_handoff_locked();
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      (void)device_->blank_powerdown();
+      device_->close();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+    {
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      if (incoming_settled_levels_.size() != kRm2PanelWidth * kRm2PanelHeight ||
+          incoming_mirror_.size() != kRm2PanelWidth * kRm2PanelHeight) {
+        (void)discard_handoff_locked();
+        clear_incoming_handoff_locked(HandoffDecision::kRejected);
+        (void)device_->blank_powerdown();
+        device_->close();
+        mark_lost();
+        return kPlutoStatusDeviceLost;
+      }
+      settled_levels_ = std::move(incoming_settled_levels_);
+      mirror_ = std::move(incoming_mirror_);
+    }
+    incoming_renderer_payload_.clear();
+    incoming_renderer_info_ = {};
+    handoff_decision_ = HandoffDecision::kAccepted;
+    warm_handoff_accepted_ = true;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      accepting_ = true;
+    }
+    std::fprintf(stderr, "lcdif_tcon: warm handoff accepted; INIT skipped\n");
+    return kPlutoStatusOk;
+  }
+
   PlutoStatus suspend(std::uint32_t timeout_ms) {
     {
       std::lock_guard<std::mutex> admission_lock(admission_mutex_);
@@ -402,10 +838,11 @@ public:
 
   NativeBackendHealth health() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    const bool busy = outstanding_ || (started_ && !accepting_);
     return {
         .state = lost_ ? NativeBackendHealthState::kDeviceLost
-                       : (outstanding_ ? NativeBackendHealthState::kBusy
-                                       : NativeBackendHealthState::kReady),
+                       : (busy ? NativeBackendHealthState::kBusy
+                               : NativeBackendHealthState::kReady),
         .queue_depth = outstanding_ ? 1U : 0U,
         .completed_jobs = completed_jobs_,
         .hardware_faults = hardware_faults_,
@@ -426,6 +863,17 @@ public:
     device_->close();
     waveforms_.clear();
     {
+      std::lock_guard<std::mutex> admission_lock(admission_mutex_);
+      if (handoff_route_enabled_ && handoff_lease_.valid() && !handoff_saved_ &&
+          !discard_handoff_locked()) {
+        std::fprintf(stderr,
+                     "lcdif_tcon: unsafe close could not invalidate warm "
+                     "handoff\n");
+      }
+      handoff_lease_ = GlassHandoffLease{};
+      clear_incoming_handoff_locked(HandoffDecision::kNone);
+      warm_handoff_accepted_ = false;
+      handoff_saved_ = false;
       std::lock_guard<std::mutex> lock(state_mutex_);
       pending_job_.reset();
       outstanding_ = false;
@@ -460,6 +908,273 @@ private:
       return std::nullopt;
     }
     return temperature;
+  }
+
+  PlutoStatus cold_initialize() {
+    std::vector<std::uint8_t> cold_levels;
+    std::vector<std::uint16_t> cold_mirror;
+    try {
+      cold_levels.assign(kRm2PanelWidth * kRm2PanelHeight, 15);
+      cold_mirror.assign(kRm2PanelWidth * kRm2PanelHeight, 0xffffU);
+    } catch (const std::bad_alloc &) {
+      return kPlutoStatusInternal;
+    }
+
+    std::string error;
+    const std::optional<int> temperature = read_powered_temperature(&error);
+    std::vector<std::uint8_t> init_codes;
+    Rm2WaveformSelection selection;
+    if (!temperature.has_value() ||
+        !waveforms_.select(kPlutoRefreshFast, *temperature, &selection) ||
+        !waveforms_.select(kPlutoRefreshUi, *temperature, &selection) ||
+        !waveforms_.select(kPlutoRefreshText, *temperature, &selection) ||
+        !waveforms_.select(kPlutoRefreshFull, *temperature, &selection) ||
+        !waveforms_.init_pan_codes(*temperature, &init_codes) ||
+        !run_init_clear(init_codes)) {
+      (void)device_->blank_powerdown();
+      return kPlutoStatusDeviceLost;
+    }
+    {
+      std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+      settled_levels_ = std::move(cold_levels);
+      mirror_ = std::move(cold_mirror);
+    }
+    handoff_chain_next_ = 0;
+    handoff_unlinked_ = true;
+    warm_handoff_accepted_ = false;
+    return kPlutoStatusOk;
+  }
+
+  bool renderer_info_valid(const GlassHandoffRendererInfo &info,
+                           std::size_t payload_bytes) const {
+    return info.width == static_cast<std::uint32_t>(kRm2PanelWidth) &&
+           info.height == static_cast<std::uint32_t>(kRm2PanelHeight) &&
+           info.pixel_format ==
+               static_cast<std::uint32_t>(kPlutoPixelFormatRgb565) &&
+           (info.rotation == 0 || info.rotation == 90 || info.rotation == 180 ||
+            info.rotation == 270) &&
+           info.configuration_hash != 0 && payload_bytes != 0 &&
+           payload_bytes <= kMaximumRendererHandoffBytes;
+  }
+
+  bool unpack_handoff_state(const GlassHandoffBundle &bundle,
+                            std::vector<std::uint8_t> *out_settled_levels,
+                            std::vector<std::uint16_t> *out_mirror) const {
+    if (out_settled_levels == nullptr || out_mirror == nullptr ||
+        bundle.identity != handoff_identity_ ||
+        bundle.core.engine_temperature_bin != 0 ||
+        bundle.core.admission_temperature_bin != 0) {
+      return false;
+    }
+    constexpr std::size_t kPhysicalPixels = kRm2PanelWidth * kRm2PanelHeight;
+    constexpr std::size_t kPhysicalPlane =
+        static_cast<std::size_t>(kHandoffEngineStride) * kRm2PanelHeight;
+    constexpr std::size_t kTileColumns =
+        (kRm2PanelWidth + kHandoffTilePixels - 1u) / kHandoffTilePixels;
+    constexpr std::size_t kTileRows =
+        (kRm2PanelHeight + kHandoffTilePixels - 1u) / kHandoffTilePixels;
+    constexpr std::size_t kTiles = kTileColumns * kTileRows;
+    constexpr std::size_t kPresenterBytes = kPhysicalPixels * kBytesPerPixel;
+    if (bundle.core.engine_levels.size() != kPhysicalPlane ||
+        bundle.core.engine_dc.size() != kPhysicalPlane ||
+        bundle.core.engine_stress.size() != kTiles ||
+        bundle.core.engine_rescan.size() != kTiles ||
+        !bundle.core.xochitl_history_ab.empty() ||
+        bundle.presenter_payload.size() != kPresenterBytes ||
+        std::any_of(bundle.core.engine_dc.begin(), bundle.core.engine_dc.end(),
+                    [](std::int8_t value) { return value != 0; }) ||
+        std::any_of(bundle.core.engine_stress.begin(),
+                    bundle.core.engine_stress.end(),
+                    [](std::uint16_t value) { return value != 0; }) ||
+        std::any_of(bundle.core.engine_rescan.begin(),
+                    bundle.core.engine_rescan.end(),
+                    [](std::int32_t value) { return value != 0; })) {
+      return false;
+    }
+
+    try {
+      out_settled_levels->assign(kPhysicalPixels, 0);
+      out_mirror->resize(kPhysicalPixels);
+    } catch (const std::bad_alloc &) {
+      out_settled_levels->clear();
+      out_mirror->clear();
+      return false;
+    }
+    for (std::size_t panel_row = 0; panel_row < kRm2PanelHeight; ++panel_row) {
+      const std::size_t source_row =
+          panel_row * static_cast<std::size_t>(kHandoffEngineStride);
+      for (std::size_t x = 0; x < kRm2PanelWidth; ++x) {
+        const std::uint8_t level = bundle.core.engine_levels[source_row + x];
+        if (level > 15u) {
+          return false;
+        }
+        (*out_settled_levels)[x * kRm2PanelHeight + panel_row] = level;
+      }
+      for (std::size_t x = kRm2PanelWidth; x < kHandoffEngineStride; ++x) {
+        if (bundle.core.engine_levels[source_row + x] != 0) {
+          return false;
+        }
+      }
+    }
+    for (std::size_t index = 0; index < kPhysicalPixels; ++index) {
+      const std::size_t source = index * kBytesPerPixel;
+      (*out_mirror)[index] = static_cast<std::uint16_t>(
+          static_cast<std::uint16_t>(bundle.presenter_payload[source]) |
+          static_cast<std::uint16_t>(bundle.presenter_payload[source + 1u])
+              << 8u);
+    }
+    return true;
+  }
+
+  bool pack_handoff_state_locked(GlassHandoffBundle *bundle) const {
+    constexpr std::size_t kPhysicalPixels = kRm2PanelWidth * kRm2PanelHeight;
+    constexpr std::size_t kPhysicalPlane =
+        static_cast<std::size_t>(kHandoffEngineStride) * kRm2PanelHeight;
+    constexpr std::size_t kTileColumns =
+        (kRm2PanelWidth + kHandoffTilePixels - 1u) / kHandoffTilePixels;
+    constexpr std::size_t kTileRows =
+        (kRm2PanelHeight + kHandoffTilePixels - 1u) / kHandoffTilePixels;
+    constexpr std::size_t kTiles = kTileColumns * kTileRows;
+    if (bundle == nullptr || settled_levels_.size() != kPhysicalPixels ||
+        mirror_.size() != kPhysicalPixels) {
+      return false;
+    }
+    bundle->core.engine_temperature_bin = 0;
+    bundle->core.admission_temperature_bin = 0;
+    bundle->core.engine_levels.assign(kPhysicalPlane, 0);
+    bundle->core.engine_dc.assign(kPhysicalPlane, 0);
+    bundle->core.engine_stress.assign(kTiles, 0);
+    bundle->core.engine_rescan.assign(kTiles, 0);
+    bundle->core.xochitl_history_ab.clear();
+    bundle->presenter_payload.resize(kPhysicalPixels * kBytesPerPixel);
+    for (std::size_t panel_row = 0; panel_row < kRm2PanelHeight; ++panel_row) {
+      const std::size_t destination_row =
+          panel_row * static_cast<std::size_t>(kHandoffEngineStride);
+      for (std::size_t x = 0; x < kRm2PanelWidth; ++x) {
+        const std::uint8_t level =
+            settled_levels_[x * kRm2PanelHeight + panel_row];
+        if (level > 15u) {
+          return false;
+        }
+        bundle->core.engine_levels[destination_row + x] = level;
+      }
+    }
+    for (std::size_t index = 0; index < kPhysicalPixels; ++index) {
+      const std::uint16_t pixel = mirror_[index];
+      const std::size_t destination = index * kBytesPerPixel;
+      bundle->presenter_payload[destination] = static_cast<std::uint8_t>(pixel);
+      bundle->presenter_payload[destination + 1u] =
+          static_cast<std::uint8_t>(pixel >> 8u);
+    }
+    return true;
+  }
+
+  void clear_incoming_handoff_locked(HandoffDecision decision) {
+    incoming_settled_levels_.clear();
+    incoming_mirror_.clear();
+    incoming_renderer_payload_.clear();
+    incoming_renderer_info_ = {};
+    incoming_handoff_claim_ = {};
+    handoff_decision_ = decision;
+    if (decision != HandoffDecision::kAccepted) {
+      warm_handoff_accepted_ = false;
+    }
+  }
+
+  bool discard_handoff_locked() {
+    if (!handoff_route_enabled_) {
+      handoff_unlinked_ = true;
+      return true;
+    }
+    if (!handoff_lease_.valid() ||
+        !glass_handoff_discard(handoff_lease_, handoff_path_)) {
+      return false;
+    }
+    handoff_unlinked_ = true;
+    incoming_handoff_claim_ = {};
+    handoff_saved_ = false;
+    return true;
+  }
+
+  PlutoStatus prepare_incoming_handoff(bool *out_pending) {
+    if (out_pending == nullptr) {
+      return kPlutoStatusInvalidArgument;
+    }
+    *out_pending = false;
+    clear_incoming_handoff_locked(HandoffDecision::kNone);
+    handoff_chain_next_ = 0;
+    if (!handoff_route_enabled_) {
+      return kPlutoStatusOk;
+    }
+    if (!handoff_lease_.valid()) {
+      return kPlutoStatusDeviceLost;
+    }
+
+    GlassHandoffBundle candidate;
+    const GlassHandoffReject reject =
+        glass_handoff_load(handoff_lease_, handoff_path_, handoff_identity_,
+                           handoff_now_(), &candidate);
+    if (reject == GlassHandoffReject::kMissing) {
+      handoff_unlinked_ = true;
+      return kPlutoStatusOk;
+    }
+    std::vector<std::uint8_t> candidate_settled_levels;
+    std::vector<std::uint16_t> candidate_mirror;
+    const bool candidate_valid =
+        reject == GlassHandoffReject::kNone &&
+        renderer_info_valid(candidate.renderer,
+                            candidate.renderer_payload.size()) &&
+        unpack_handoff_state(candidate, &candidate_settled_levels,
+                             &candidate_mirror);
+    if (!candidate_valid) {
+      std::fprintf(stderr, "lcdif_tcon: warm handoff rejected: %s\n",
+                   reject == GlassHandoffReject::kNone
+                       ? glass_handoff_reject_name(GlassHandoffReject::kState)
+                       : glass_handoff_reject_name(reject));
+      if (!discard_handoff_locked()) {
+        return kPlutoStatusDeviceLost;
+      }
+      clear_incoming_handoff_locked(HandoffDecision::kRejected);
+      return kPlutoStatusOk;
+    }
+
+    incoming_settled_levels_ = std::move(candidate_settled_levels);
+    incoming_mirror_ = std::move(candidate_mirror);
+    incoming_renderer_payload_ = std::move(candidate.renderer_payload);
+    incoming_renderer_info_ = candidate.renderer;
+    incoming_handoff_claim_ = candidate.claim;
+    handoff_chain_next_ = candidate.chain + 1u;
+    handoff_unlinked_ = false;
+    handoff_decision_ = HandoffDecision::kPending;
+    *out_pending = true;
+    std::fprintf(stderr,
+                 "lcdif_tcon: warm handoff candidate validated chain=%u "
+                 "renderer_bytes=%zu\n",
+                 candidate.chain, incoming_renderer_payload_.size());
+    return kPlutoStatusOk;
+  }
+
+  PlutoStatus consume_handoff_before_admission_locked() {
+    if (handoff_unlinked_) {
+      return kPlutoStatusOk;
+    }
+    if (!warm_handoff_accepted_ ||
+        handoff_decision_ != HandoffDecision::kAccepted ||
+        !glass_handoff_claim(handoff_lease_, handoff_path_,
+                             incoming_handoff_claim_)) {
+      std::fprintf(stderr, "lcdif_tcon: warm handoff claim lost before first "
+                           "admission\n");
+      handoff_unlinked_ = true;
+      incoming_handoff_claim_ = {};
+      (void)device_->blank_powerdown();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
+    handoff_unlinked_ = true;
+    incoming_handoff_claim_ = {};
+    handoff_saved_ = false;
+    std::fprintf(stderr, "lcdif_tcon: warm handoff consumed\n");
+    return kPlutoStatusOk;
   }
 
   PlutoStatus fail_powered_start(PlutoStatus status) {
@@ -771,6 +1486,12 @@ private:
   Rm2TemperatureReader temperature_reader_;
   Rm2PowerReadyReader power_ready_reader_;
   Rm2WaveformProgram waveforms_;
+  std::string handoff_path_;
+  GlassHandoffClock (*handoff_now_)() = glass_handoff_now;
+  GlassHandoffIdentity handoff_identity_{};
+  GlassHandoffLease handoff_lease_{};
+  GlassHandoffClaim incoming_handoff_claim_{};
+  GlassHandoffRendererInfo incoming_renderer_info_{};
 
   mutable std::mutex state_mutex_;
   mutable std::mutex frame_mutex_;
@@ -781,8 +1502,17 @@ private:
   std::optional<Job> pending_job_;
   std::vector<std::uint8_t> settled_levels_;
   std::vector<std::uint16_t> mirror_;
+  std::vector<std::uint8_t> incoming_renderer_payload_;
+  std::vector<std::uint8_t> incoming_settled_levels_;
+  std::vector<std::uint16_t> incoming_mirror_;
   PlutoPresentCompleteCallback callback_ = nullptr;
   void *callback_user_data_ = nullptr;
+  std::uint32_t handoff_chain_next_ = 0;
+  HandoffDecision handoff_decision_ = HandoffDecision::kNone;
+  bool handoff_route_enabled_ = false;
+  bool handoff_unlinked_ = true;
+  bool handoff_saved_ = false;
+  bool warm_handoff_accepted_ = false;
   bool probed_ = false;
   bool started_ = false;
   bool accepting_ = false;
@@ -798,10 +1528,10 @@ LcdifTconDisplayBackend::LcdifTconDisplayBackend(
     const GeneratedDeviceProfile &profile,
     std::unique_ptr<MxsLcdifDevice> device,
     Rm2TemperatureReader temperature_reader,
-    Rm2PowerReadyReader power_ready_reader)
-    : impl_(std::make_unique<Impl>(profile, std::move(device),
-                                   std::move(temperature_reader),
-                                   std::move(power_ready_reader))) {}
+    Rm2PowerReadyReader power_ready_reader, Rm2HandoffOptions handoff)
+    : impl_(std::make_unique<Impl>(
+          profile, std::move(device), std::move(temperature_reader),
+          std::move(power_ready_reader), std::move(handoff))) {}
 
 LcdifTconDisplayBackend::~LcdifTconDisplayBackend() = default;
 
@@ -834,15 +1564,17 @@ PlutoStatus LcdifTconDisplayBackend::snapshot(PlutoSurface *out_surface) {
 PlutoStatus LcdifTconDisplayBackend::set_pen_focus(const PlutoPenFocus *focus) {
   return impl_->set_pen_focus(focus);
 }
-PlutoStatus LcdifTconDisplayBackend::stage_handoff(const PlutoHandoffPayload *,
-                                                   std::uint32_t) {
-  return kPlutoStatusUnsupported;
+PlutoStatus
+LcdifTconDisplayBackend::stage_handoff(const PlutoHandoffPayload *payload,
+                                       std::uint32_t timeout_ms) {
+  return impl_->stage_handoff(payload, timeout_ms);
 }
-PlutoStatus LcdifTconDisplayBackend::get_handoff(PlutoHandoffPayload *) {
-  return kPlutoStatusUnsupported;
+PlutoStatus
+LcdifTconDisplayBackend::get_handoff(PlutoHandoffPayload *out_payload) {
+  return impl_->get_handoff(out_payload);
 }
-PlutoStatus LcdifTconDisplayBackend::confirm_handoff(bool) {
-  return kPlutoStatusUnsupported;
+PlutoStatus LcdifTconDisplayBackend::confirm_handoff(bool accepted) {
+  return impl_->confirm_handoff(accepted);
 }
 PlutoStatus LcdifTconDisplayBackend::suspend(std::uint32_t timeout_ms) {
   return impl_->suspend(timeout_ms);
