@@ -39,6 +39,9 @@ HIBERNATED_DIR="$CTL/hibernated"
 # The generated device profile owns this production memory policy. Tests may
 # exercise smaller pools through the guarded PLUTO_MAX_WARM_APPS seam.
 MAX_RESIDENT_APPS=""
+# Device-profiled cadence for the common control-file monitor. RM1 has one CPU,
+# so avoiding twenty shell wakeups per second materially reduces idle cost.
+SUPERVISOR_CONTROL_POLL_MS=""
 # Native detach owns a 5s optical fence before renderer encoding, atomic tmpfs
 # publication, presenter close, and marker publication. Keep the supervisor's
 # envelope strictly wider so a safe exact-color close is never killed at its
@@ -284,6 +287,13 @@ configure_profile() {
     log "profile rejected: resident app limit is invalid"
     return 78
   fi
+  SUPERVISOR_CONTROL_POLL_MS="${PLUTO_PROFILE_SUPERVISOR_CONTROL_POLL_MS:-}"
+  if ! is_uint "$SUPERVISOR_CONTROL_POLL_MS" ||
+     [ "$SUPERVISOR_CONTROL_POLL_MS" -lt 25 ] ||
+     [ "$SUPERVISOR_CONTROL_POLL_MS" -gt 1000 ]; then
+    log "profile rejected: supervisor control poll is invalid"
+    return 78
+  fi
   validate_profile_runtime_identity || return $?
 
   if [ "${PLUTO_TESTING:-0}" = 1 ]; then
@@ -354,7 +364,7 @@ configure_profile() {
   export PLUTO_BEZEL_REDRAW_IIO="$BEZEL_REDRAW_IIO"
   export PLUTO_BEZEL_REDRAW_ENABLE="$BEZEL_REDRAW_ENABLE"
   PROFILE_CONFIGURED=1
-  log "profile accepted: $PLUTO_PROFILE_ID driver=$PLUTO_PROFILE_DISPLAY_DRIVER target=$PLUTO_PROFILE_TARGET resident=$MAX_RESIDENT_APPS"
+  log "profile accepted: $PLUTO_PROFILE_ID driver=$PLUTO_PROFILE_DISPLAY_DRIVER target=$PLUTO_PROFILE_TARGET resident=$MAX_RESIDENT_APPS control_poll_ms=$SUPERVISOR_CONTROL_POLL_MS"
 }
 
 proc_start_ticks() {
@@ -1218,7 +1228,7 @@ monitor_foreground() {
       fi
       return 0
     fi
-    sleep 0.05
+    sleep_milliseconds "$SUPERVISOR_CONTROL_POLL_MS"
   done
   return 0
 }

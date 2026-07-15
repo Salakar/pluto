@@ -68,6 +68,10 @@ final class _Runtime {
         json,
         'takeoverQuiesceMilliseconds',
       ),
+      supervisorControlPollMilliseconds = _integer(
+        json,
+        'supervisorControlPollMilliseconds',
+      ),
       displayDevice = _string(json, 'displayDevice'),
       display = _DisplayContract(_map(json, 'display')),
       waveform = _Waveform(_map(json, 'waveform')),
@@ -91,6 +95,7 @@ final class _Runtime {
   final String kernelRelease;
   final int maxResidentApps;
   final int takeoverQuiesceMilliseconds;
+  final int supervisorControlPollMilliseconds;
   final String displayDevice;
   final _DisplayContract display;
   final _Waveform waveform;
@@ -452,6 +457,10 @@ void _validate(List<_Profile> profiles) {
     if (profile.runtime.takeoverQuiesceMilliseconds > 10000) {
       _fail('${profile.id} panel takeover quiesce exceeds 10 seconds');
     }
+    if (profile.runtime.supervisorControlPollMilliseconds < 25 ||
+        profile.runtime.supervisorControlPollMilliseconds > 1000) {
+      _fail('${profile.id} supervisor control poll must be in 25..1000 ms');
+    }
     _validateDisplayContract(profile);
     if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(profile.panel.signature)) {
       _fail('${profile.id} panel signature is not shell-safe');
@@ -780,6 +789,7 @@ String _cpp(List<_Profile> profiles) {
     ..writeln('  std::string_view kernel_release;')
     ..writeln('  std::uint32_t max_resident_apps;')
     ..writeln('  std::uint32_t takeover_quiesce_milliseconds;')
+    ..writeln('  std::uint32_t supervisor_control_poll_milliseconds;')
     ..writeln('  std::string_view display_device;')
     ..writeln('  GeneratedDisplayContract display;')
     ..writeln('  GeneratedWaveformProfile waveform;')
@@ -896,6 +906,9 @@ String _cpp(List<_Profile> profiles) {
       )
       ..writeln(
         '                    .takeover_quiesce_milliseconds = ${profile.runtime.takeoverQuiesceMilliseconds},',
+      )
+      ..writeln(
+        '                    .supervisor_control_poll_milliseconds = ${profile.runtime.supervisorControlPollMilliseconds},',
       )
       ..writeln(
         '                    .display_device = ${_cppString(profile.runtime.displayDevice)},',
@@ -1205,6 +1218,9 @@ String _dart(List<_Profile> profiles) {
         '          takeoverQuiesceMilliseconds: ${profile.runtime.takeoverQuiesceMilliseconds},',
       )
       ..writeln(
+        '          supervisorControlPollMilliseconds: ${profile.runtime.supervisorControlPollMilliseconds},',
+      )
+      ..writeln(
         '          displayDevice: ${_dartString(profile.runtime.displayDevice)},',
       )
       ..writeln('          display: DisplayContract(')
@@ -1449,6 +1465,9 @@ String _shell(List<_Profile> profiles) {
         '      PLUTO_PROFILE_TAKEOVER_QUIESCE_MS=${profile.runtime.takeoverQuiesceMilliseconds}',
       )
       ..writeln(
+        '      PLUTO_PROFILE_SUPERVISOR_CONTROL_POLL_MS=${profile.runtime.supervisorControlPollMilliseconds}',
+      )
+      ..writeln(
         "      PLUTO_PROFILE_DISPLAY_DEVICE=${_shellString(profile.runtime.displayDevice)}",
       )
       ..writeln(
@@ -1573,6 +1592,7 @@ String _shell(List<_Profile> profiles) {
     ..writeln('  export PLUTO_PROFILE_FIRMWARE_BUILD')
     ..writeln('  export PLUTO_PROFILE_KERNEL_RELEASE')
     ..writeln('  export PLUTO_PROFILE_MAX_RESIDENT_APPS')
+    ..writeln('  export PLUTO_PROFILE_SUPERVISOR_CONTROL_POLL_MS')
     ..writeln('  export PLUTO_PROFILE_DISPLAY_DEVICE')
     ..writeln(
       '  export PLUTO_PROFILE_SCANOUT_WIDTH PLUTO_PROFILE_SCANOUT_HEIGHT',

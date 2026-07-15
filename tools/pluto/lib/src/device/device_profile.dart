@@ -226,6 +226,7 @@ final class DeviceRuntimeProfile {
     required this.kernelRelease,
     required this.maxResidentApps,
     required this.takeoverQuiesceMilliseconds,
+    required this.supervisorControlPollMilliseconds,
     required this.displayDevice,
     required this.display,
     required this.waveform,
@@ -256,6 +257,9 @@ final class DeviceRuntimeProfile {
 
   /// Delay after stock UI shutdown before native code claims panel ownership.
   final int takeoverQuiesceMilliseconds;
+
+  /// Cadence used by the common supervisor while waiting for control files.
+  final int supervisorControlPollMilliseconds;
 
   /// Display ownership node validated by the native backend.
   final String displayDevice;

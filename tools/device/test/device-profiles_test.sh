@@ -51,6 +51,8 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
   fail "rm1 resident-process limit drifted"
 [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" = 5500 ] ||
   fail "rm1 stock-panel quiesce window drifted"
+[ "$PLUTO_PROFILE_SUPERVISOR_CONTROL_POLL_MS" = 200 ] ||
+  fail "rm1 supervisor control poll drifted"
 [ "$PLUTO_PROFILE_DISPLAY_DEVICE" = /dev/fb0 ] ||
   fail "rm1 display path drifted"
 [ "$PLUTO_PROFILE_SCANOUT_WIDTH:$PLUTO_PROFILE_SCANOUT_HEIGHT" = \
@@ -97,6 +99,8 @@ pluto_profile_load rm2 || fail "could not load rm2 runtime profile"
   fail "rm2 resident-process limit drifted"
 [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" = 300 ] ||
   fail "rm2 stock-panel quiesce window drifted"
+[ "$PLUTO_PROFILE_SUPERVISOR_CONTROL_POLL_MS" = 100 ] ||
+  fail "rm2 supervisor control poll drifted"
 [ "$PLUTO_PROFILE_PANEL_SIGNATURE" = ED103TC2C5 ] ||
   fail "rm2 panel signature drifted"
 [ "$PLUTO_PROFILE_SCANOUT_WIDTH:$PLUTO_PROFILE_SCANOUT_HEIGHT" = \
@@ -156,6 +160,8 @@ pluto_profile_load move || fail "could not load Move runtime profile"
   fail "Move resident-process limit drifted"
 [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" = 300 ] ||
   fail "Move stock-panel quiesce window drifted"
+[ "$PLUTO_PROFILE_SUPERVISOR_CONTROL_POLL_MS" = 50 ] ||
+  fail "Move supervisor control poll drifted"
 [ "$PLUTO_PROFILE_DISPLAY_DEVICE" = /dev/dri/card0 ] ||
   fail "Move display path drifted"
 [ "$PLUTO_PROFILE_SCANOUT_WIDTH:$PLUTO_PROFILE_SCANOUT_HEIGHT:$PLUTO_PROFILE_BITS_PER_PIXEL" = \

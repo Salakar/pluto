@@ -25,6 +25,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       kernelRelease: '5.4.70-v1.6.3-rm10x',
       maxResidentApps: 2,
       takeoverQuiesceMilliseconds: 5500,
+      supervisorControlPollMilliseconds: 200,
       displayDevice: '/dev/fb0',
       display: DisplayContract(
         scanoutWidth: 1404,
@@ -114,6 +115,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       kernelRelease: '5.4.70-v1.6.3-rm11x',
       maxResidentApps: 4,
       takeoverQuiesceMilliseconds: 300,
+      supervisorControlPollMilliseconds: 100,
       displayDevice: '/dev/fb0',
       display: DisplayContract(
         scanoutWidth: 260,
@@ -206,6 +208,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       kernelRelease: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
       maxResidentApps: 4,
       takeoverQuiesceMilliseconds: 300,
+      supervisorControlPollMilliseconds: 50,
       displayDevice: '/dev/dri/card0',
       display: DisplayContract(
         scanoutWidth: 365,
