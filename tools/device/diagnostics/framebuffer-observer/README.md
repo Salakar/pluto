@@ -3,7 +3,7 @@
 This directory contains a diagnostics-only ARMv7 `LD_PRELOAD` observer for
 recovering the exact framebuffer protocol used by stock `xochitl` on
 reMarkable 1 and reMarkable 2. It is an oracle for native Pluto work, not a
-runtime dependency and not an AppLoad replacement.
+runtime dependency and not a second display owner.
 
 Nothing here is referenced by either product payload assembler. Builds go to
 the ignored `.pluto-cache/diagnostics/framebuffer-observer/` tree. The observer

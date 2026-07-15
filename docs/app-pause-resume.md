@@ -253,12 +253,9 @@ The renderer waits for current panel work, discards superseded queued damage,
 then drives one full-screen Fast black/white BlinkNow cycle. Because a lone
 blink left visible yellowing on the Move, production BlinkNow immediately
 continues through the complete two-cycle BleachNow policy before a balanced
-Full redraw of the newest retained application frame. Under direct SWTCON the
-black/white rails use the Move's short mode 7 and the final restore uses Full.
-The current Pluto qtfb presenter cannot carry an atomic per-update refresh
-class, so Xochitl chooses its downstream waveform. Upstream's newer
-connection-global mode setter is not used here because it delays mode changes
-and has no immutable snapshot/ack contract.
+Full redraw of the newest retained application frame. Each native panel driver
+maps the Fast rails and final Full restore through its profile-pinned waveform
+contract and reports real completion before the next stage begins.
 The rail bands overlap after a one-frame onset stagger; they do not crawl down
 the display one budget-sized third at a time.
 

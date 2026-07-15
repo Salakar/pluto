@@ -11,11 +11,11 @@ to another firmware without validation.
 
 ## Tested hardware and firmware
 
-| Device | Codename | Tested reMarkable OS | CPU / target | Internally selected integration | Validation status |
+| Device | Codename | Tested reMarkable OS | CPU / target | Native panel path | Validation status |
 | --- | --- | --- | --- | --- | --- |
-| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | AArch64 / `linux-arm64` | Direct SWTCON presenter and managed lifecycle | ✅ Reference device; release platform, Ink, and Codex validated |
-| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ARMv7l / `linux-arm` | Managed XOVI + AppLoad + QTFB integration | 🧪 Runtime and base real-panel path verified; final managed-control, Ink, and real Codex acceptance in progress |
-| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ARMv7l / `linux-arm` | Managed XOVI + AppLoad + QTFB integration | 🧪 Runtime and real-panel path verified; final provision, Ink, and real Codex acceptance in progress |
+| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | AArch64 / `linux-arm64` | Native Gallery3/DRM + SWTCON | ✅ Reference device; release platform, Ink, and Codex validated |
+| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ARMv7l / `linux-arm` | Native LCDIF/TCON | 🧪 Final release deployment, app switching, Ink stroke, screenshots, and camera acceptance required |
+| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ARMv7l / `linux-arm` | Native MXCFB/EPDC | 🧪 Final release deployment, app switching, Ink stroke, screenshots, and camera acceptance required |
 | reMarkable Paper Pro | `ferrari` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
 | reMarkable Paper Pure | `tatsu` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
 
@@ -85,22 +85,15 @@ checks its target, verifies pinned engine checksums, and activates it
 transactionally. Supplying `--payload-dir` never overrides hardware identity;
 a mismatched payload is rejected before device files change.
 
-## Internal integration boundary
+## Native hardware boundary
 
-The common CLI intentionally hides two hardware integrations:
-
-- `linux-arm64` uses the direct SWTCON presenter and Pluto's managed
-  supervisor, boot fallback, standby, and recovery services.
-- `linux-arm` keeps the stock display service alive. A managed XOVI/AppLoad
-  extension owns app lifecycle, while Pluto's QTFB presenter exchanges the
-  framebuffer, damage, pen, touch, and key events with it.
-
-Those are implementation backends, not separate Pluto products. Applications
-use the same Flutter engine pin, manifest, package integrity contract, Home,
-Ink, Codex UI, and device commands. Contributors may work on the backend
-components directly; users must not install XOVI, AppLoad, service overrides,
-or QTFB shims by hand. `pluto provision` owns their validation, activation,
-rollback, and removal.
+The common CLI and on-device supervisor are shared by every supported tablet.
+After exact profile matching, the embedder selects only the hardware-specific
+panel implementation: Gallery3/DRM on Move, LCDIF/TCON on reMarkable 2, or
+MXCFB/EPDC on reMarkable 1. Applications use the same Flutter engine pin,
+manifest, package integrity contract, Home, Ink, Codex UI, lifecycle markers,
+and device commands. There is no stock-UI child launcher or alternate install
+flow.
 
 The `linux-arm` runtime is currently release AOT only. The `linux-arm64`
 runtime additionally supports profile AOT and explicitly requested debug/JIT.
@@ -139,19 +132,19 @@ also be ELF32 `EM_ARM`, EABI5, hard-float. This leaves compatibility margin for
 supported ARMv7 installations instead of allowing a build host or one newer
 firmware image to raise the runtime requirement silently.
 
-## Firmware-sensitive integration
+## Firmware-sensitive native profile
 
-The QTFB/AppLoad integration touches firmware-private Qt/QML interfaces. Pluto
-therefore authenticates the integration bundle and requires a
-firmware-matched QML hash table before activation. Missing or unverified
-firmware data fails closed.
+Display registers, waveform data, framebuffer geometry, input nodes, and boot
+recovery topology vary by exact hardware and firmware. Pluto code-generates
+one profile table and fails closed when immutable identity, semantic firmware,
+build id, architecture, or required artifacts do not match an accepted tuple.
 
 A firmware update must repeat at least:
 
 1. immutable device and firmware probing;
 2. target and ABI validation of every native binary;
-3. QML compatibility and integration-control checks;
-4. guarded activation with rollback available;
+3. native panel initialization, waveform/LUT, input, and control checks;
+4. transactional boot activation with stock fallback available;
 5. Home, Ink, and real Codex runs through the public CLI;
 6. logs, screenshots, camera evidence, and responsiveness measurements;
 7. restore and full-uninstall recovery checks.
@@ -160,14 +153,13 @@ Only after those checks pass should the tested matrix gain the new firmware.
 
 ## Safety and recovery internals
 
-Pluto never intentionally leaves a tablet without a working UI. The direct
-backend uses a transactional boot installer, fallback service, dead-man
-recovery, and a stock peer root for tethered recovery. The QTFB backend keeps
-the stock display owner active, validates its managed extension under a
-one-attempt guard, and rolls back failed activation; a tethered reboot returns
-to stock behavior.
+Pluto never intentionally leaves a tablet without a working UI. The native
+runtime uses one transactional boot installer, owned fallback service, bounded
+recovery receipts, and a verified stock peer root. Provisioning failure rolls
+back to stock; full uninstall restores stock before deleting the runtime and
+hard-removes retired third-party display-service residue.
 
-When developing either backend:
+When developing a native panel implementation:
 
 - keep the tablet unlocked and tethered during activation;
 - never bypass target, checksum, firmware-table, or peer-credential gates;
@@ -175,17 +167,6 @@ When developing either backend:
   three minutes between restart experiments, and batch changes;
 - verify both logs and the physical panel;
 - use the public restore/uninstall commands for the final recovery test.
-
-## Upstream provenance
-
-The managed QTFB integration builds on
-[XOVI](https://github.com/asivery/xovi),
-[AppLoad](https://github.com/asivery/rm-appload), and the archived
-[qtfb protocol/client](https://github.com/asivery/qtfb). The exact source,
-patch, toolchain, firmware authorization, and accepted-binary identities are
-locked in the tracked
-[`tools/integration` rebuild record](../tools/integration/README.md). These
-projects retain their own licenses and release contracts.
 
 The [reMarkable developer links](https://developer.remarkable.com/links)
 publish the official SDK/toolchain used to keep native binaries compatible

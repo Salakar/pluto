@@ -57,9 +57,9 @@ and locale inputs, remaps build paths, and permits no network after the
 lockfile-gated fetch.
 
 After a reviewed promotion, pass the canonical path to
-`assemble-appload-arm-payload.sh --codex-bin ...`; the assembler independently
-repeats the ARM ABI and canonical SHA gates before the unified provision
-workflow can contact a device.
+`assemble-device-payload.sh --target-platform linux-arm --codex-bin ...`; the
+assembler independently repeats the ARM ABI and canonical SHA gates before the
+unified provision workflow can contact a device.
 
 The normal Codex CLI, `exec --json`, authentication, API transport, and tools
 are real. Only optional V8-backed Code Mode is unavailable on 32-bit ARM; an

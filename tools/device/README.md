@@ -14,11 +14,10 @@ pluto provision --device "$DEVICE" --restore-remarkable
 pluto provision --device "$DEVICE" --uninstall
 ```
 
-The CLI probes immutable hardware and firmware identity, then dispatches to a
-direct-panel or stock-session implementation internally. The backend-specific
-sections below document safety and recovery for maintainers; they are not
-parallel user workflows. Isolated diagnostics and retired utilities remain in
-explicitly named subdirectories.
+The CLI probes immutable hardware and firmware identity, selects the matching
+target payload, and provisions the same native supervisor/embedder lifecycle on
+every supported tablet. Only the panel driver and exact hardware parameters
+branch behind the generated device profile.
 
 ## Canonical on-device runtime layout
 
@@ -34,58 +33,29 @@ All device scripts and the `pluto` CLI target the same layout under
   launcher/  bundle/ + manifest.json (app id dev.pluto.launcher)
   apps/      <app-id>/{bundle/, manifest.json, install.json}
   appdata/   per-app data
-  logs/      current.log, boot-hook.log
+  logs/      current.log and rotated supervisor/app logs
   state/     boot-mode, boot-confirmed, default-app, apps.rev, apps-changed
   staging/   install transaction scratch space
 ```
 
-Both implementations promote target payloads into this canonical root. Release
+Both native targets promote payloads into this canonical root. Release
 packages contain `bundle/lib/app.so` and never enter the VM-service or JIT
 path. Debug/profile engines are optional capabilities of targets that advertise
 them; unsupported targets reject those modes before writing. Supplying debug
 payload content also requires explicit authorization, the Home launcher is
 always release AOT, and ordinary Home taps never authorize JIT.
 
-For direct-panel CLI handoffs, the supervisor publishes the exact current child PID
+For CLI handoffs, the supervisor publishes the exact current child PID
 in `/run/pluto/embedder.pid`. After writing the release/profile launch marker
 or the one-shot debug marker, the CLI validates that PID against
 `/proc/<pid>/exe`, requests a graceful stop, and uses a one-second hard-stop
 fallback only if native shutdown wedges. This avoids process-name matching,
 stale-PID signals, and launch requests waiting indefinitely behind an old app.
+The foreground embedder also publishes the root-local
+`/run/pluto/embedder-control.sock` endpoint documented in
+[`embedder-control-protocol.md`](embedder-control-protocol.md).
 
-For stock-session handoffs, managed AppLoad entries point at the same canonical
-runtime and release bundles. A root-only Unix control channel performs launch,
-stop, reload, status, and screenshot operations without scraping or injecting
-the stock UI.
-
-## Stock-session backend internals (`linux-arm`)
-
-On the tested reMarkable 1 and 2, stock Xochitl remains the display owner.
-`pluto provision` validates the exact model, semantic firmware, build id, and
-Xochitl hash before it stages a checksummed XOVI/AppLoad/QTFB integration. The
-firmware-matched hook and QML hash table are selected from the signed payload;
-unknown or crossed profile tuples fail before device writes.
-
-Activation is serialized by a global device lock and a persistent restart
-ledger. The provisioner preserves rollback capacity, refuses unsafe restart
-cadence, stages every file under a unique nonce, and requires a fresh Xochitl
-PID plus a fresh root-owned control socket before committing. Failure restores
-the previous integration and stock UI. A stale socket or a pre-existing
-unmanaged extension cannot satisfy readiness.
-
-Each Pluto application receives the native QTFB surface geometry reported by
-the presenter, along with AppLoad-forwarded touch, pen, button, and keyboard
-events. Flutter widgets are responsible for responsive layout from those live
-constraints; the backend does not pretend that different panels have one
-fixed viewport.
-
-App install, replacement, launch, logs, screenshots, and uninstall use the
-same public commands as the direct-panel implementation. Replacement preserves
-whether the app was running. Full uninstall removes only Pluto-owned entries,
-runtime files, hooks, and shims, restores the previous integration when one
-existed, and leaves the stock notes data untouched.
-
-## Direct-panel power button and standby (`linux-arm64`)
+## Move power button and standby
 
 The supervisor pairs every normal embedder process with
 `pluto-power-key-watch.sh`, which uses `evtest --grab` on the validated
@@ -152,7 +122,7 @@ restores the persisted light as failure recovery. Stale suspend markers are
 cleared at supervisor startup and before each standby child, and the saved
 frontlight marker is deleted only after the sysfs restore succeeds.
 
-## Direct-panel boot-first mechanism (`linux-arm64`)
+## Native boot-first mechanism
 
 `pluto-boot-install.sh install` writes a persistent drop-in at
 `/usr/lib/systemd/system/xochitl.service.d/zz-pluto.conf` (rootfs remounted
@@ -174,8 +144,8 @@ xochitl.
 The supervisor detects the hijack (`hijacked()`) so "exit to stock" execs
 `/usr/bin/xochitl` directly instead of restarting the service it runs as.
 
-The tested direct-panel firmware's `rm-reset-boot-count.service` resets the selected root's error
-counter during graceful shutdown and remains enabled. Pluto adds an earlier,
+The tested Move firmware's `rm-reset-boot-count.service` resets the selected
+root's error counter during graceful shutdown and remains enabled. Pluto adds an earlier,
 readiness-gated confirmation: the embedder atomically publishes
 `/run/pluto/boot-ready` only after the presenter accepts its first real
 frame; the supervisor then waits for a 30-second stable window, invokes the
@@ -196,6 +166,11 @@ deleting `/home/root/pluto`. If inactive-slot cleanup cannot be verified, it
 restores stock on the live slot but exits nonzero and preserves the runtime;
 this prevents a later A/B flip from booting an override whose supervisor was
 deleted.
+
+Provisioning and full uninstall also hard-remove the retired third-party
+display-integration roots, sockets, service drop-ins, staging directories, and
+receipts. Those paths are cleanup denylist entries only; they are never a
+runtime fallback.
 
 `PLUTO_ROOT=<staged-root> pluto-boot-install.sh validate` performs the
 release-AOT launcher/runtime gate without remounting the root filesystem or

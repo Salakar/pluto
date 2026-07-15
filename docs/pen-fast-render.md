@@ -331,10 +331,10 @@ conservatively owes Full truth.
 - achromatic or monochrome: regional `Text`;
 - chromatic on color glass: regional `Full`.
 
-The attached direct SWTCON path is currently luma-only (`is_color=false`): it
-still detects chroma-sensitive RGB565 changes so they are not mistaken for a
-clean frame, but can only chase their luma as Text. qtfb/Xochitl is the current
-color-capable path.
+The native presenter reports panel color capability from the selected profile.
+On monochrome glass, chroma-sensitive RGB565 changes still count as damage and
+chase their luma as Text. On color glass they chase regional Full truth through
+the profile-selected native color pipeline.
 
 ## 5. Fast preview and immediate fidelity chase
 
@@ -349,13 +349,15 @@ Dispatch order is:
 4. budgeted background maintenance.
 
 The preview sets the ABI-stable `InkPriority` bit (the old name now means only
-“pen-correlated app damage”). Direct SWTCON maps it to pen-preview retargeting:
-new pixels start immediately. In a same-rail, same-mode tile, the overlapping
-subrectangle can retarget while unrelated active pixels continue under the
-identical pinned waveform. Across modes, the preview can preempt at a scan
-boundary only when its subrectangle covers every active pixel in that tile;
-otherwise that conflict parks until the waveform boundary. These guards avoid
-the former dashed motion without truncating unrelated optical work.
+“pen-correlated app damage”). Native userspace-TCON drivers map it to
+pen-preview retargeting: new pixels start immediately. In a same-rail,
+same-mode tile, the overlapping subrectangle can retarget while unrelated
+active pixels continue under the identical pinned waveform. Across modes, the
+preview can preempt at a scan boundary only when its subrectangle covers every
+active pixel in that tile; otherwise that conflict parks until the waveform
+boundary. Kernel-driven profiles preserve the same ordering at their native
+update boundary. These guards avoid dashed motion without truncating unrelated
+optical work.
 
 The truth queue is separate from settle/CBS work. It has:
 
@@ -365,29 +367,23 @@ The truth queue is separate from settle/CBS work. It has:
 - no artificial deadline; and
 - no conversion snapshot.
 
-It waits only for real presenter readiness or optical conflicts the presenter
-cannot safely supersede. Direct SWTCON uses real per-request completion and
-coverage-aware in-engine arbitration. qtfb has no optical completion callback,
-but declares downstream overlap supersession, so regional truth can follow the
-preview in the same scheduler tick instead of waiting on its nominal synthetic
-fence. A presenter decline retains priority ownership and retries before
-generic work.
+It waits only for real presenter readiness or optical conflicts the selected
+native driver cannot safely supersede. Every supported device path reports
+real per-request completion; profiles that prove overlap supersession may chase
+regional truth in the same scheduler tick. A presenter decline retains
+priority ownership and retries before generic work.
 
-Direct SWTCON's idle fence includes callback delivery, internal cold clear, and
-the DRM latch—not only PixelEngine completion. Taking a `ScanReadySlot` frees
+The userspace-TCON idle fence includes callback delivery, internal cold clear,
+and the final scan latch—not only PixelEngine completion. Taking a
+`ScanReadySlot` frees
 the one-deep producer, but the slot remains unacknowledged until the matching
 page-flip event proves that exact phase reached the scan latch. Rotation drains
 delivered callbacks before rebuilding geometry, and detach drains them against
 the old scheduler before attach may reuse frame IDs. Active-reset detach also
 finishes the balanced restore, dispatches any newest-ledger Fast follow-up,
 and separately fences it. A backend without `wait_idle` can advance only from
-real callbacks/synthetic polling; a sleep is never optical proof. A late
+real callbacks; a sleep is never optical proof. A late
 completion can therefore never retire work from the next renderer generation.
-
-qtfb's timers remain synthetic, but they are conservative: every accepted
-packet prefix arms its request-class deadline even if a later rectangle hits
-backpressure, and a new deadline is `max(outstanding, new)`. A later Fast
-preview therefore cannot shorten an earlier regional-Full truth fence.
 
 ## 6. Newest pixels always win
 
@@ -435,28 +431,25 @@ draining in the same scheduler tick when the presenter accepts them.
 
 ## 7. Presenter fidelity semantics
 
-The two device presenters have deliberately different authority:
+Every supported device exposes one native presenter contract. Hardware
+differences are capability and profile data, not separate product flows:
 
-| Capability | direct SWTCON | qtfb / downstream Xochitl |
-|---|---|---|
-| color output | no, current `.eink` drive is luma-only (`is_color=false`) | yes, raw RGB565 is quantized downstream |
-| distinct Fast/Text/Full control | yes | no in Pluto's vendored client; current upstream has a connection-global mode setter, but not an atomic per-update snapshot/mode contract |
-| per-request engine/update completion callback | yes | no |
-| optical/latch completion fence | yes; `wait_idle()` includes the callback, final DRM latch, and cold clear | no; nominal timers are bookkeeping |
-| regional PenTruth Full | yes | yes, mapped to `UPDATE_PARTIAL` |
-| overlapping-update supersession | PixelEngine arbitrates per tile/pixel | yes, Xochitl's newest overlap ledger |
+| Capability | Native contract |
+|---|---|
+| color output | selected from the panel profile; monochrome profiles develop luma, color profiles preserve exact color truth |
+| distinct Fast/Text/Full control | required and mapped to profile-pinned legal programs |
+| per-request completion | real kernel marker or final userspace scan-latch acknowledgement |
+| optical/latch idle fence | `wait_idle()` includes callback delivery, cold clear, and the backend's physical completion point |
+| regional PenTruth Full | preserves exact damage instead of promoting to a whole-screen update |
+| overlapping-update supersession | enabled only when the native driver explicitly proves it |
 
-On direct SWTCON, Fast preview uses current renderer luma and the Fast
-waveform's legal-target map. On qtfb, Pluto's Fast/Text/Full labels still
-control scheduling order and conversion, but the current presenter cannot
-promise a particular waveform class; it copies the current pixels and issues
-a regional partial update for downstream Xochitl. Both notifications refer to
-one mutable shared framebuffer, so immediate truth may replace preview bytes
-before Xochitl consumes the first notification. Its overlap-supersession
-capability guarantees newest-content convergence, not that a distinct Fast
-preview becomes optically visible.
+Fast preview uses current renderer luma and the selected profile's legal short
+waveform. Text/Full truth follows immediately at the strongest class owed by
+the changed component. The present job carries immutable generation, damage,
+class, and content intent, so newest-content convergence never depends on a
+mutable shared framebuffer or a connection-global mode switch.
 
-Direct admissions also pin one exact hysteretic temperature record. The
+Userspace-waveform admissions also pin one exact hysteretic temperature record. The
 producer legalizes RGB565 levels with that record, carries `temp_bin` through
 the lock-free mailbox or large lane, and PixelEngine pins the same LUT for the
 whole optical sequence. Same-mode in-place retargeting additionally requires
@@ -464,16 +457,6 @@ the same bin; a covered pen preview crossing a threshold safely preempts and
 restarts, otherwise it parks. Presenter startup synchronously samples the EPD
 thermistor before cold clear, and both black/white cold-clear stages share that
 initial bin.
-
-Current upstream AppLoad does now define `MESSAGE_SET_REFRESH_MODE` with
-`UFAST`, `FAST`, `ANIMATE`, `CONTENT`, and `UI`. That is not silently enabled:
-the inspected server handles it as connection-global state, deliberately
-sleeps one second after each change, and still repaints later from the mutable
-shared image. Per-preview `UFAST -> CONTENT/UI` switching would therefore add
-artificial latency and would not provide snapshot ordering. The safe protocol
-shape is an atomic `{mode, region, immutable generation}` submission (or an
-equivalent server-side copy plus real panel fence), negotiated as an
-`ORDERED_PRESENT_V2` extension.
 
 The statically closed direct-colour prerequisite is implemented separately as
 `Ct33Frontend`: exact 33-cube tetrahedral interpolation, the recovered `64 x
@@ -541,15 +524,14 @@ for the stock source-origin contract.
 
 Pen truth sets `kPlutoPresentFlagPenTruth` (`1 << 17`):
 
-- direct SWTCON already honors the damage rectangles;
-- qtfb maps `Full + PenTruth` to `UPDATE_PARTIAL`;
-- ordinary unflagged `Full` keeps the existing `UPDATE_ALL` behavior.
+- every native driver preserves the exact PenTruth damage rectangles;
+- ordinary unflagged `Full` retains the backend's normal quality behavior.
 
 For a color app change, preview is chroma-free Fast gray, then regional Full
 truth passes the latest raw RGB565 to the backend with `PreDithered` unset.
-That end-to-end color behavior applies to the color-capable qtfb path and the
-color presenter tests. Direct SWTCON currently displays the corresponding luma
-preview/Text truth. White erases remain white; no path can force them black.
+Color profiles develop that exact truth; monochrome profiles develop the
+corresponding luma preview/Text truth. White erases remain white; no path can
+force them black.
 
 ## 8. Removed legacy machinery
 
@@ -587,8 +569,8 @@ input and publish render hints,” not “draw globally.”
 | scroll pacing cannot hide nearby pen damage | `FrameRendererTest.PenDamageInsidePacedScrollBypassesBodySuppressionAndChasesTruth` keeps the body below its emission cadence while an app-owned hover indicator inside it still receives Fast preview and queued truth; unmatched body pixels remain paced |
 | draw-back uses newest pixels without a bbox union | `FrameRendererTest.DrawBackBeforeTruthUsesNewestAppPixels`, `RegionSchedulerPenDamageTest.ContainedDrawBackCoalescesWithoutLosingOldestTruthTurn`, and `BridgingColorPromotesComponentWithoutBoundingBoxUnion` |
 | same-luma recolor and color erase are not lost | `FrameRendererTest.SameLumaHueChangeIsDamageAndChasesLatestRegionalRawColor`, `LumaOnlyBackendStillDetectsSameLumaAppHueChange`, and `ColorEraseToWhiteStillGetsFullTruthButNearbyGrayChangeStaysText` |
-| color is gray-fast then raw regional truth on a color-capable backend | `FrameRendererTest.ColorAppDamagePreviewsGrayThenChasesRegionalRawColor`; direct SWTCON's explicit luma-only boundary is recorded in section 7 |
-| Full pen truth stays regional | `QtfbPresenterTest.PenTruthFullKeepsAppDamageRegional` and `DrmSwtconPresenterTest.PenTruthFullPreservesRegionalRequest` |
+| color is gray-fast then raw regional truth on a color-capable backend | `FrameRendererTest.ColorAppDamagePreviewsGrayThenChasesRegionalRawColor`; section 7 records the monochrome/color profile split |
+| Full pen truth stays regional | `Gallery3DrmPresenterTest.PenTruthFullPreservesRegionalRequest` and `MxcfbBackend.PenTruthFullPreservesExactRegionalDamage` |
 | preview precedes immediate truth | `RegionSchedulerPenDamageTest.PreviewDispatchesBeforeTruth`, `SynchronousPreviewCompletionDispatchesTruthImmediately`, `OverlapSupersedingPresenterChasesTruthInThePreviewTick`, plus blocked/decline/maintenance-order cases |
 | pen truth supersedes ordinary queued, parked, and later damage without filling gaps | `RegionSchedulerPenDamageTest.NewTruthCutsQueuedFastAndUiWithoutRecoalescingTheHole`, `DisjointQueuedFastRectsCannotMergeBackAcrossTruthGap`, `ReverseTemporalTruthExpansionRecutsOlderExactWork`, `NewTruthCutsAlreadyParkedGenericWithoutLosingItsRemainder`, `TextTruthPreservesOlderFullQualityInsideAndOutsideTheCut`, and `GenericDamageDuringPendingAndInflightTruthStaysInTruthLane` |
 | cross-lane overload is bounded and conservative | `RegionSchedulerPenDamageTest.DeepResidualPrefixSurvivesLocalTailReconciliation` protects existing exact work while only a new tail is cut; `ExactResidualCapPromotesOverflowInsteadOfDroppingOrBoundingFast` proves the emergency newest `Full` truth path |
@@ -603,50 +585,15 @@ input and publish render hints,” not “draw globally.”
 | completion delivery cannot cross a renderer generation | `DrmSwtconPresenterTest.WaitIdleIncludesCompletionCallbackDelivery` blocks the callback and proves zero-timeout idle remains false; `NullAndThrowingCompletionCallbacksCannotStrandIdle` covers both cleanup edges; `FrameRendererTest.RotationAndDetachDrainCompletionBeforeFrameIdReuse` proves delivered old IDs are drained before rotation/detach rebuilds reuse frame ID 1 |
 | final phase and cold clear cannot be mistaken for idle | `ScanLoopTest.ReadySlotRemainsUnacknowledgedUntilFlipEvent`, `DrmSwtconPresenterTest.WaitIdleFencesFinalReadySlotUntilLatchAcknowledgement`, and `WaitIdleIncludesColdClearThroughItsFinalLatch` distinguish producer take, engine completion, callback delivery, and the actual DRM latch |
 | active-reset detach cannot lose newest app truth | `FrameRendererTest.ActiveResetDetachFencesNewestLedgerFollowupBeforeGenerationReset`, `ActiveResetDetachBackpressureHonorsAbsoluteDeadline`, and `ActiveResetDetachWithoutWaitIdleCannotRetireAnUnfinishedRail` cover the follow-up generation, ready=false with idle presenter, and a backend without an optical fence |
-| qtfb synthetic idle never moves backward or omits accepted work | `QtfbPresenterTest.LaterFastPresentCannotShortenOutstandingFullIdleFence`, `SyntheticIdleFenceExpiresNormally`, and `PartiallyAcceptedFullRequestStillArmsFullIdleFence` |
 | hover/contact event parity | `InkThreadTest.EveryCoherentHoverAndContactSampleEmitsOnePureHint` and replay-vs-bare-tracker test |
 
-The aggregate source-frozen sandbox run, with the subsequent 46/46 input
-ownership-fixture rerun folded into its zero-second input row, is:
-
-```text
-cmake --build --preset host-debug --parallel
-ctest --preset host-debug --output-on-failure
-105.43 s total
-renderer_replay_harness: 70.10 s, pass
-pluto_renderer_test: 2.36 s, 177/177
-pluto_input_test: 0.00 s, 46/46
-pluto_embedder_core_test: 3.42 s, 142/148
-pluto_presenter_test: 29.02 s, 157/168
-
-cmake --build --preset host-release --parallel
-ctest --preset host-release --output-on-failure
-32.25 s total
-renderer_replay_harness: 23.23 s, pass
-pluto_renderer_test: 0.81 s, 177/177
-pluto_input_test: 0.00 s, 46/46
-pluto_embedder_core_test: 3.30 s, 142/148
-pluto_presenter_test: 4.55 s, 157/168
-```
-
-The six core failures and eleven presenter failures are only fixture-setup
-errors: this sandbox denies the fake wpa_supplicant/qtfb Unix socket binds.
-Every non-socket test passes. The process-unique replay work directory was
-also proved by running debug and release replays concurrently.
-
-The combined source builds cleanly in ASan+UBSan and TSan. Both sanitizer core
-binaries pass 142/148 with only the same six socket fixtures blocked; all three
-active-reset regressions pass without a sanitizer diagnostic. Fresh full
-ASan+UBSan and TSan runs also pass renderer 177/177 and input 46/46, while
-presenter reaches 157/168 in each with only the eleven qtfb bind fixtures
-blocked and no sanitizer report.
-Direct latch and cold-clear regressions likewise pass in debug, release,
-ASan+UBSan, and TSan. The qtfb regressions are compiled in all four variants
-but cannot execute until a permission-correct host run can bind their fake
-server. The Flutter wrapper run is also pending permission to update its SDK
-cache. These are
-explicit remaining host-validation gates, not product failures and not
-claimed as passes.
+The native host gate builds debug and release, runs renderer replay, renderer,
+input, embedder-core, native-driver, presenter, and glass-handoff suites, and
+repeats the concurrency-sensitive paths under ASan+UBSan and TSan. A restricted
+sandbox may deny the fake `wpa_supplicant` Unix-socket fixtures; that limitation
+must be reported and rerun in a permission-correct environment rather than
+counted as a product failure or a pass. The process-unique replay work directory
+is also exercised by running debug and release replays concurrently.
 
 ## Performance loop
 
@@ -723,119 +670,47 @@ delay from scheduler CPU cost and optical completion.
 This section remains pending. It must be filled from the final device run and
 is not satisfied by host logic alone.
 
-### Blocking capability gate
+### Native capability gate
 
-The production session currently launches `--presenter=swtcon`. That path can
-prove controlled Fast grayscale, exact regional damage plus a final scan-latch
-idle fence, erase/draw-back, and no system-owned pen marks, but it reports
-`is_color=false` and develops only luma. The alternative qtfb/Xochitl path
-preserves raw color, but Pluto's
-current client cannot safely select a per-update FastGrayscale mode and its
-shared preview bytes may be replaced by immediate truth before downstream
-consumption. Upstream's newer connection-global mode setter does not fix the
-snapshot/order problem and inserts a one-second handler delay on mode changes.
-Consequently neither current backend can optically prove the literal
-combination “controlled Fast preview plus arbitrary-color full-fidelity
-chase.” Static analysis now closes the direct path's per-temperature delta
-table and persistent A/B history mechanics. The separately identified fresh
-ct33 branch is dormant in installed Xochitl 3.27, but that is not the stock
-colour path: Content/UI actively reaches the legacy two-row SIMD mapper at
-`0x004814a0`, which consumes the ct33 byte plane and selected `delta[1024]`,
-updates the same persistent A/B history, and emits u16 transition indices.
-Its entry/output contract and instruction-level scalar algebra are closed in
-a production-disconnected reference model. A deterministic direct-call oracle
-on the installed non-PIE Xochitl now proves operation-local source origin,
-8-by-2 rounding at interior/corner/bottom guard geometry, normal mapping,
-`force27`, `pair31`, low-source bit-6 setup, and an adversarial ordering hazard.
-The hazard proves generic split equivalence is false: one-call/bottom-first
-match while top-first differs. Static reconstruction of the pinned stock path
-closes that apparent ambiguity: for heights 30 and above its even non-last
-stripe and last stripe copy their cross-boundary A/B halos before the shared
-start barrier, making execution observationally frozen rather than
-sequentially visible. The selected-delta builder and ARGB selector policy at
-`0x009abc50` now have hardened, presentation-disconnected production
-components. That closes their static code surfaces, not the still-required
-installed source/selector/selected-delta capture, legal stock interleaving
-matrix, interruption/optical scan ownership, or optical calibration. Those
-remain gates; no newer “active-gate” Xochitl version is needed.
-This goal must not be marked fully complete on grayscale-only device evidence.
-
-The production capture is no longer an ad-hoc debugger recipe. The checked
-orchestrator in `tools/device/diagnostics/swtcon/` pins the exact target hash
-and lifetime, tunnels a localhost-only gdbserver, captures before workers at
-`0x009adbd0`, proves one or two exact-covering mapper hits at `0x004814a0`,
-captures after the same operation at `0x009ade2c`, detaches, proves the same
-Xochitl recovered with `TracerPid: 0`, and fail-closes validation/manifest
-generation. The first stock attempt exposed a one-hardware-breakpoint limit;
-it detached before physical input, recovered the exact original process, and
-correctly produced no manifest. The revised script explicitly uses three
-software breakpoints and recovery now requires every patched live instruction
-word to equal its pinned local ELF byte. Its byte-reproducible ARM64 rev10
-fixture covers rows `0..3` and `4..7`, produces the formula-checked `0x140`-byte
-output, validates with no errors, and the diagnostics pass 31/31 host tests
-(8 capture-specific). This validates the revised capture machinery, not the
-still-pending stock-device retry, mapper parity matrix, or optical colour
-result.
+The production session launches only `--presenter=native`. The selected panel
+profile must prove controlled Fast preview, exact regional Text/Full truth,
+real completion at its kernel-marker or final scan-latch boundary, erase and
+draw-back correctness, and no system-owned pen pixels. Monochrome RM1/RM2
+acceptance covers luma truth; Move acceptance additionally covers exact color
+truth through its profile-pinned native color pipeline. Static analysis,
+reference models, and host tests are prerequisites, but none substitutes for
+camera-visible glass evidence on the exact device.
 
 ### Build and deployment
 
-The previously built aarch64 release payload at `build/pluto-payload` is
-quarantined as stale because it predates the final lifecycle/mailbox/scheduler
-edits. It contains only the launcher and
-`dev.pluto.examples.ink_lab`; the unrelated user-owned `apps/ink/**` tree was
-not built or copied. ARM64 container smoke executions returned zero.
-
-```text
-payload tree digest excluding .DS_Store:
-  125159275fa79ef7c3407db175164d508d6399eb7e050a1278b70ffd5581e255
-pluto-embedder:
-  4d293ec68660061affdc137665a98928a3b44ac5e498efc0bcf1dcec9edb262a
-launcher release AOT app.so:
-  dccadf25f46986ec194bbe124774f67b1203e78343c17da9945a11da33afaab5
-Ink Lab release AOT app.so:
-  7f6f9897465c335c553166fde06caa1fcd74361dc58d8fdef135406464effad8
-device renderer benchmark:
-  0a4352dd49d0863f5f65173e7e36c2ba405ff6f090e69a0f06a79c57d985d01f
-device presenter benchmark:
-  25d1c131b755d07591b1b5e0f58043f44e2d3cff906fd7e9336ea6fcbf031bf0
-```
-
-None of the hashes above may be deployed; they are retained only to identify
-the quarantined baseline. Provisioning has **not** run. At the last check
-(2026-07-11 21:58:02 CEST), the
-Paper Pro Move still enumerated on USB as VID `04b3`, PID `4010`, but macOS
-interface `en18` was `UP/RUNNING` with carrier `inactive` and no address.
-USB SSH at `10.11.99.1` timed out; the previously recorded Wi-Fi fallback
-`192.168.1.74` also timed out and the known mDNS name did not resolve. No
-Xochitl/service/device mutation was attempted. On current Paper Pro Move
-software, first confirm Developer Mode remains enabled and enable **Menu →
-Settings → Storage → USB Connection** as described by the
-[SSH access guide](https://remarkable.guide/guide/access/ssh.html). When
-carrier returns, capture the stock active mapper with the prepared ARM64
-`gdbserver` and checked GDB
-script in `tools/device/diagnostics/swtcon/` (the hashed server is retained at
-`build/device-tools/pluto-gdbserver-aarch64`) **before** provisioning. Only
-then build and run the prepared transaction, verifying the installed embedder
-against the fresh frozen rebuild hash emitted after host access resumes—not
-against the quarantined `4d293e…` baseline above.
+Build the exact release commit through the universal assembler for both target
+slices, then provision each tablet through the same public CLI. The target,
+engine pin, release-AOT metadata, native ELF ABI, generated device profile, and
+payload hashes must be verified before the device is mutated. Record the local
+payload digest and installed file hashes for each run; never deploy an older
+cached tree merely because it once passed a different device.
 
 ### Device benchmark
 
-Pending reachability. Run each hashed aarch64 release benchmark seven separate
-times on the attached two-core Cortex-A55 (pin to CPU 0 with `taskset` when
-available), retain every row, and report medians using the same method as the
-host evidence. Container smoke timings are not substitutes for these values.
+Run the target-native release benchmarks seven separate times on RM1, RM2, and
+Move. Pin to a core with `taskset` when available, retain every raw row, and
+report medians using the same method as the host evidence. Host or container
+timings are not substitutes for exact-device values.
 
 ### Visible acceptance
 
-Pending reachability and deployment. Camera/log validation must cover:
+Camera/log validation on every supported device must cover:
 
 1. pen hover/contact over a non-drawing app: no marks;
 2. app-rendered hover indicator: fast local draw and erase;
 3. app-rendered stroke/erase: Fast preview followed by newest Text/Full truth;
-4. no stale or black synthetic residue after draw-back/app switch; and
-5. `SCHED_FIFO` success or explicit safe fallback in device logs.
-6. `exclusive=EVIOCGRAB clock=monotonic` in the pen-open log, proving both
+4. Home opens, at least two apps switch in both directions, and warm state is
+   preserved without stale or black synthetic residue;
+5. the root-local acceptance control sends its deterministic stroke to Ink and
+   a fresh camera frame shows that Ink rendered it;
+6. screenshots, process identity, release-AOT metadata, and presenter health
+   match the foreground app; and
+7. `exclusive=EVIOCGRAB clock=monotonic` in the pen-open log, proving both
    exclusive ownership and the timestamp domain used by terminal-ROI expiry.
 
 ## Deliberate non-goals and future work

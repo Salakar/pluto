@@ -698,24 +698,20 @@ budget; the renderer CPU path is no longer the felt-lag bottleneck.
 ## Session 6 (2026-07-11): partial-maintenance correction
 
 Real Move observation invalidated the Session-4/5 sparse-repair assumption.
-Pluto's vendored qtfb presenter carries framebuffer bytes plus
-`ALL`/`PARTIAL`; it does not carry Pluto's Sparkle mask or an atomic
-per-update refresh class. (Current upstream now has a connection-global mode
-setter, but its one-second handler delay and live shared-image semantics do
-not satisfy this contract.) Consequently the supposed
-1/256 color develop pass became a complete rectangular qtfb update every
-350 ms—the visible black squares—and often left white glass more gold/orange.
-The historical sections above are retained as the experiment record, not the
-current production policy.
+The presenter ABI carries rectangular damage but not the sparse per-pixel mask
+required by a 1/256 color-develop pass. Expanding that mask to an ordinary
+rectangle produced visible black squares every 350 ms and often left white
+glass more gold/orange. Sparse development therefore remains disabled until a
+native capability can carry and camera-validate the exact mask.
 
 Production correction:
 
-- qtfb accepts Sparkle/Develop as an unsupported no-op;
+- presenters accept unsupported Sparkle/Develop as a no-op;
 - color develop sparkle and pigment-panel mode-8 top-off are disabled;
 - inferred rail/deep debt never creates `ChromaPending`;
 - broad achromatic backlog coalesces to one Text repayment, never Full;
 - regional Full is exact and reserved for real undeveloped app chroma;
-- direct SWTCON no longer stress-promotes regional Text into mode 2;
+- native presenters do not stress-promote regional Text into a deeper mode;
 - every optional Full/sparkle job waits for touch/pen release plus grace, with
   a final presenter-boundary input check;
 - no regional black/white bleach was added. Pigment hygiene uses only the rare
@@ -848,8 +844,8 @@ worth fixing before device deployment:
   proximity. The source drains pre-snapshot events, rehydrates current kernel
   state, and retains an in-range position for stationary app hover redraws;
 - presenter “idle” was weaker than optical completion at several boundaries.
-  Callback delivery, reset follow-up, qtfb accepted prefixes, internal cold
-  clear, and the final DRM scan latch are now independently fenced; and
+  Callback delivery, reset follow-up, partially accepted requests, internal
+  cold clear, and the final scan latch are now independently fenced; and
 - trace accounting now separates per-frame from cumulative changed pixels and
   reports both oldest and newest correlated hint latency.
 
@@ -860,17 +856,14 @@ the coalesced-hint tests, monotonic-source fixtures, admission-bin round trips,
 cross-bin preemption tests, and the explicit completion/latch regressions pin
 these corrections. In the source-frozen sandbox run, debug completes in
 105.43 s and release in 32.25 s. Renderer is 177/177 and input is 46/46;
-core reaches 142/148 and presenter 157/168, with every failure caused by the
-sandbox denying the fake wpa_supplicant/qtfb Unix socket at fixture setup.
-ASan+UBSan and TSan builds pass; all executable non-socket regressions report
-no sanitizer/runtime-error/data-race finding. Permission-correct socket and
-Flutter wrapper runs remain explicit gates rather than being counted as
-passes.
+core reaches 142/148, with all six failures caused by the sandbox denying fake
+`wpa_supplicant` Unix sockets at fixture setup. ASan+UBSan and TSan builds pass;
+all executable non-socket regressions report no sanitizer/runtime-error/data-
+race finding. Permission-correct socket and Flutter wrapper runs remain
+explicit gates rather than being counted as passes.
 
 Seven consecutive final `host-release` runs on Apple Silicon produced the
-following medians of each run's p50 and p99 batch means. Binary hashes and
-every reported pen/presenter/ct33 run-level value are in
-[`evidence/pen-fast-render/host-release-2026-07-11.md`](evidence/pen-fast-render/host-release-2026-07-11.md):
+following medians of each run's p50 and p99 batch means:
 
 | Bench | Host p50 | Host p99 | Device p99 budget | Hot-path storage audit |
 |---|---:|---:|---:|---:|

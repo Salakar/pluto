@@ -31,7 +31,7 @@ flags for hot reload and can never become the boot default.
 
 | Path | What lives there |
 | --- | --- |
-| `embedder/` | Native embedder, renderer, compositor, presenters (`swtcon`, `qtfb`, host preview), CMake presets, C++ tests + benches |
+| `embedder/` | Native embedder, renderer, compositor, profile-selected panel drivers, host preview, CMake presets, C++ tests + benches |
 | `tools/pluto/` | The `pluto` CLI (standalone Dart package, resolves outside the workspace) |
 | `tools/setup/` | `setup.sh` bootstrap; `camera/` panel-capture helper |
 | `tools/build/` | Host and ARM device builds; target payload assemblers |
@@ -135,17 +135,17 @@ install, run, logs, screenshot, restore, and uninstall dispatch internally.
   more than four (re)starts in ten minutes trips `OnFailure` and can reboot the
   device. Run `systemctl reset-failed xochitl.service` before any restart, keep
   ≥3 minutes between stop/start cycles, and batch experiments.
-- Provisioning is **transactional and reversible**. The direct backend has a
-  fallback path and dead-man recovery; the QTFB backend uses a guarded,
-  checksummed integration activation with rollback.
+- Provisioning is **transactional and reversible**. Every supported device
+  uses the native boot-first runtime with a profile-selected panel driver,
+  bounded recovery, and a verified stock fallback.
 - Never leave the tablet UI-less. Recover through the common commands:
   `pluto provision --restore-remarkable` (keep runtime, stock boots) or
-  `pluto provision --uninstall` (full removal). The on-device layout, boot-first
-  and QTFB mechanisms, standby/suspend, and recovery are documented in
+  `pluto provision --uninstall` (full removal). The on-device layout,
+  boot-first mechanism, standby/suspend, and recovery are documented in
   `tools/device/README.md`.
 - Never bypass the CLI's device-target check or manually install a different
-  target's payload. Users must not install XOVI/AppLoad service overrides by
-  hand; the managed integration owns validation, activation, and rollback.
+  target's payload. The native runtime owns the display service; provisioning
+  removes retired third-party display hooks and refuses mixed-target content.
 
 ## Running tests
 
@@ -256,17 +256,16 @@ system-library ceiling match the target. Outputs live in the ignored
 
 ### Assemble release payloads
 
-Release maintainers prepare each native target, but users never choose the
-backend during provisioning. The direct payload assembler currently produces
-`build/pluto-payload`; the managed QTFB assembler produces
-`build/pluto-appload-arm/home/root/pluto-arm`. Both must contain the same
-release application identities and pass their target gates.
+Release maintainers prepare each native target with the same assembler, while
+users never choose a backend during provisioning. Outputs live under
+`build/pluto-payload/<target>` and must contain the same release application
+identities and pass their target gates.
 
 ```bash
 melos run build:embedder:device
-melos run build:device-payload -- --standard          # launcher + examples + validation_lab + codex
+bash tools/build/assemble-device-payload.sh --target-platform linux-arm64 --standard
 bash tools/build/embedder-device-arm.sh
-bash tools/build/assemble-appload-arm-payload.sh
+bash tools/build/assemble-device-payload.sh --target-platform linux-arm --standard
 ```
 
 The ARMv7 assembler packages a pinned, target-native Codex CLI. It rejects
@@ -323,7 +322,7 @@ evidence, exact release/AOT process identity, camera-visible panel behavior,
 responsive layout at the presenter-reported viewport, and responsiveness
 measurements. The existing
 `tools/device/test/release-aot-hardware-smoke.sh` is additional coverage for
-the direct backend, not the whole compatibility gate.
+the native supervisor, not the whole all-device compatibility gate.
 
 ## Local development flow with hot reload
 

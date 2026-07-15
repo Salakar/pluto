@@ -37,12 +37,12 @@ installation.
 - `bash tools/build/embedder-device-arm.sh` — build the ARMv7 release embedder
   and control client with the pinned reMarkable toolchain (needs Docker on
   non-native hosts).
-- `melos run build:device-payload -- --standard` — assemble the `linux-arm64`
-  release-AOT payload.
-- `bash tools/build/assemble-appload-arm-payload.sh` — assemble the managed
-  `linux-arm` release-AOT payload. These two assembler commands are private
-  release-maintainer mechanics; users provision either target through the same
-  device-aware `pluto provision` command.
+- `bash tools/build/assemble-device-payload.sh --target-platform linux-arm64
+  --standard` — assemble the AArch64 release-AOT payload.
+- `bash tools/build/assemble-device-payload.sh --target-platform linux-arm
+  --standard` — assemble the ARMv7 release-AOT payload. These are target
+  selections on one private release-maintainer assembler; users provision
+  either through the same device-aware `pluto provision` command.
 - `./ci/check.sh` — the complete Dart, shell-contract, and golden quality
   gate. Run it before sending a change.
 
@@ -86,9 +86,9 @@ embedder code must pass both the AArch64 and ARMv7 device builds.
   must go through the public `pluto provision`, `pluto install`,
   `pluto provision --restore-remarkable`, and
   `pluto provision --uninstall` commands so discovery can select the target and
-  its transactional safety path. Do not install XOVI/AppLoad hooks, service
-  overrides, or another target's payload by hand. A tablet must never be left
-  without a working UI.
+  its transactional safety path. Do not install a second display owner,
+  unmanaged service override, or another target's payload by hand. A tablet
+  must never be left without a working UI.
 - Coordinate device display-service changes in `agents_wip.txt`.
 
 ## Sending a change
