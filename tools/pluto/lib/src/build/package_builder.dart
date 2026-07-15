@@ -391,14 +391,16 @@ _ValidatedPackageSlice _validatePackageLayout(
     final bool allowed =
         path == 'manifest.json' ||
         path == BuildLayoutMetadata.fileName ||
-        path.startsWith('bundle/') ||
+        path == 'bundle/icudtl.dat' ||
+        path.startsWith('bundle/flutter_assets/') ||
+        path.startsWith('bundle/lib/') ||
         path == iconPath;
     if (!allowed) {
       throw ArtifactVerificationException(
         message: 'Package layout contains unsupported path $path.',
         remediation:
-            'Only manifest.json, build-metadata.json, bundle/**, and the '
-            'declared icon are package payloads.',
+            'Only manifest.json, build-metadata.json, the canonical Flutter '
+            'asset/AOT layout, and the declared icon are package payloads.',
       );
     }
   }

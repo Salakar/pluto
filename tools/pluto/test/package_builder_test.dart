@@ -358,29 +358,32 @@ void main() {
   });
 
   test('builder rejects files outside exact slice payload paths', () async {
-    await expectLater(
-      const PlapPackageBuilder(compressor: NoopCompressor()).build(
-        source: MemoryPackageSource(<PackageEntry>[
-          ..._releaseEntries(PlutoTargetPlatform.linuxArm64),
-          PackageEntry(
-            path: 'unexpected.txt',
-            bytes: Uint8List.fromList(<int>[1]),
+    for (final String path in <String>[
+      'unexpected.txt',
+      'bundle/unexpected.bin',
+    ]) {
+      await expectLater(
+        const PlapPackageBuilder(compressor: NoopCompressor()).build(
+          source: MemoryPackageSource(<PackageEntry>[
+            ..._releaseEntries(PlutoTargetPlatform.linuxArm64),
+            PackageEntry(path: path, bytes: Uint8List.fromList(<int>[1])),
+          ]),
+          metadata: const PackageMetadata(
+            flutterVersion: '3.44.4',
+            engineCommit: _engine,
+            plutoVersion: '0.1.0',
           ),
-        ]),
-        metadata: const PackageMetadata(
-          flutterVersion: '3.44.4',
-          engineCommit: _engine,
-          plutoVersion: '0.1.0',
         ),
-      ),
-      throwsA(
-        isA<ArtifactVerificationException>().having(
-          (ArtifactVerificationException error) => error.message,
-          'message',
-          contains('unsupported path unexpected.txt'),
+        throwsA(
+          isA<ArtifactVerificationException>().having(
+            (ArtifactVerificationException error) => error.message,
+            'message',
+            contains('unsupported path $path'),
+          ),
         ),
-      ),
-    );
+        reason: path,
+      );
+    }
   });
 
   test('builder rejects host metadata anywhere in a slice', () async {
