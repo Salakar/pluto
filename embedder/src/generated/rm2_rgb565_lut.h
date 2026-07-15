@@ -2059,6 +2059,8 @@ alignas(64) inline constexpr std::array<std::uint8_t, 65536>
     13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
 };
 
+inline constexpr std::uint64_t kRm2Rgb565LevelLutFnv1a64 = 0x851d793bf1575e13ULL;
+
 } // namespace pluto::native::rm2
 
 #endif // PLUTO_GENERATED_RM2_RGB565_LUT_H_

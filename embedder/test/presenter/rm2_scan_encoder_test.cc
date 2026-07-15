@@ -42,6 +42,27 @@ std::vector<std::uint8_t> expanded_phase(const WbfDecoder &waveform,
   return result;
 }
 
+std::uint8_t arithmetic_rgb565_level(std::uint16_t pixel) {
+  const std::uint32_t red5 = (pixel >> 11U) & 0x1fU;
+  const std::uint32_t green6 = (pixel >> 5U) & 0x3fU;
+  const std::uint32_t blue5 = pixel & 0x1fU;
+  const std::uint32_t red8 = (red5 << 3U) | (red5 >> 2U);
+  const std::uint32_t green8 = (green6 << 2U) | (green6 >> 4U);
+  const std::uint32_t blue8 = (blue5 << 3U) | (blue5 >> 2U);
+  const std::uint32_t luma =
+      (77U * red8 + 150U * green8 + 29U * blue8 + 128U) >> 8U;
+  return static_cast<std::uint8_t>((luma * 15U + 127U) / 255U);
+}
+
+std::uint64_t generated_lut_checksum() {
+  std::uint64_t checksum = 0xcbf29ce484222325ULL;
+  for (const std::uint8_t value : kRm2Rgb565LevelLut) {
+    checksum ^= value;
+    checksum *= 0x100000001b3ULL;
+  }
+  return checksum;
+}
+
 TEST(Rm2ScanEncoder, BuildsExactControlRowsAndUniformDriveTemplate) {
   std::vector<std::byte> slot(kRm2SlotBytes);
   ASSERT_TRUE(fill_rm2_scan_slot(slot, 0xaaaaU));
@@ -114,7 +135,17 @@ TEST(Rm2ScanEncoder, RejectsMisalignedOrOutOfRangeWork) {
                                 std::span<const std::uint8_t>{}));
 }
 
-TEST(Rm2ScanEncoder, GeneratedRgb565LutHasPinnedEndpointsAndGrayOrdering) {
+TEST(Rm2ScanEncoder,
+     GeneratedRgb565LutMatchesReferenceExhaustivelyAndPinnedHash) {
+  std::size_t mismatches = 0;
+  for (std::uint32_t pixel = 0; pixel <= 0xffffU; ++pixel) {
+    mismatches += rgb565_to_rm2_level(static_cast<std::uint16_t>(pixel)) !=
+                  arithmetic_rgb565_level(static_cast<std::uint16_t>(pixel));
+  }
+  EXPECT_EQ(mismatches, 0U);
+  EXPECT_EQ(generated_lut_checksum(), kRm2Rgb565LevelLutFnv1a64);
+  EXPECT_EQ(kRm2Rgb565LevelLutFnv1a64, 0x851d793bf1575e13ULL);
+
   EXPECT_EQ(rgb565_to_rm2_level(0x0000U), 0U);
   EXPECT_EQ(rgb565_to_rm2_level(0xffffU), 15U);
   EXPECT_LT(rgb565_to_rm2_level(0x4208U), rgb565_to_rm2_level(0x8410U));
