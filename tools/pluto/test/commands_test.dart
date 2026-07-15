@@ -488,9 +488,9 @@ void main() {
       transport.uploads.any(
         (FakeUpload upload) =>
             upload.remotePath.startsWith(
-              '/home/root/pluto/apps/.dev.example.arm.pluto-new-',
+              '/home/root/pluto/staging/dev.example.arm.',
             ) &&
-            upload.remotePath.endsWith('/install.json'),
+            upload.remotePath.endsWith('/install.json.pending'),
       ),
       isTrue,
       reason: 'all targets use the canonical native app transaction',

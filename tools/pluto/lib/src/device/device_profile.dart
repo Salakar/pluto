@@ -442,14 +442,26 @@ DeviceProfile? matchDeviceProfile(DeviceIdentityEvidence evidence) {
   final String architecture = _normalizeIdentity(
     evidence.architecture,
   ).replaceAll(' ', '');
-  final List<DeviceProfile> matches = <DeviceProfile>[
+  final List<DeviceProfile> boardMatches = <DeviceProfile>[
     for (final DeviceProfile profile in _generatedDeviceProfiles)
-      if (profile.architectures.contains(architecture) &&
-          profile.boardTokens.any(board.contains) &&
-          profile.compatibleTokens.any(compatible.contains))
-        profile,
+      if (profile.boardTokens.any(board.contains)) profile,
   ];
-  return matches.length == 1 ? matches.single : null;
+  final List<DeviceProfile> compatibleMatches = <DeviceProfile>[
+    for (final DeviceProfile profile in _generatedDeviceProfiles)
+      if (profile.compatibleTokens.any(compatible.contains)) profile,
+  ];
+  // A unique intersection is not sufficient: it could hide a second model's
+  // token in one immutable field when the architecture happens to exclude it.
+  // Each evidence group must independently identify exactly one profile.
+  if (boardMatches.length != 1 || compatibleMatches.length != 1) {
+    return null;
+  }
+  final DeviceProfile profile = boardMatches.single;
+  if (compatibleMatches.single.id != profile.id ||
+      !profile.architectures.contains(architecture)) {
+    return null;
+  }
+  return profile;
 }
 
 String _normalizeIdentity(String value) => value
