@@ -31,6 +31,22 @@ sha256_file() {
   fi
 }
 
+validate_generated_digest() {
+  local artifact="$1"
+  local digest_pin="$2"
+  local label="$3"
+  local expected
+  local actual
+
+  [[ -f "$artifact" ]] || fail "missing generated $label: $artifact"
+  expected="$(read_pin "$digest_pin" "$label SHA-256")"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || fail \
+    "$label SHA-256 pin must be 64 lowercase hexadecimal characters"
+  actual="$(sha256_file "$artifact")"
+  [[ "$actual" == "$expected" ]] || fail \
+    "$label SHA-256 mismatch (expected $expected, got $actual)"
+}
+
 validate_engine_artifacts() {
   local artifact_dir="$1"
   local flutter_version="$2"
@@ -329,6 +345,15 @@ main() {
   env HOME="${TMPDIR:-/tmp}" DART_DISABLE_ANALYTICS=1 \
     "$sdk_dir/bin/cache/dart-sdk/bin/dart" \
     "$root/tools/codegen/generate_device_profiles.dart" --check
+
+  printf 'Validating generated RM1 RGB565 optical LUT\n'
+  env HOME="${TMPDIR:-/tmp}" DART_DISABLE_ANALYTICS=1 \
+    "$sdk_dir/bin/cache/dart-sdk/bin/dart" \
+    "$root/tools/codegen/generate_rm1_rgb565_optical_lut.dart" --check
+  validate_generated_digest \
+    "$root/embedder/src/generated/rm1_rgb565_optical_lut.h" \
+    "$root/tools/codegen/rm1_rgb565_optical_lut.sha256" \
+    "RM1 RGB565 optical LUT"
 
   if [[ "$verify_only" -eq 1 ]]; then
     printf 'Setup verified: Flutter %s, engine %s, linux-arm64 and linux-arm AOT artifacts.\n' \

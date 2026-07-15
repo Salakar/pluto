@@ -19,6 +19,20 @@ expect_failure() {
   fi
 }
 
+DIGEST_FIXTURE="$TMP/generated-lut.h"
+DIGEST_PIN="$TMP/generated-lut.sha256"
+printf 'abc' > "$DIGEST_FIXTURE"
+printf '%s\n' \
+  'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' \
+  > "$DIGEST_PIN"
+validate_generated_digest "$DIGEST_FIXTURE" "$DIGEST_PIN" "test LUT"
+printf '%064d\n' 0 > "$DIGEST_PIN"
+expect_failure "wrong generated digest" \
+  validate_generated_digest "$DIGEST_FIXTURE" "$DIGEST_PIN" "test LUT"
+printf 'not-a-digest\n' > "$DIGEST_PIN"
+expect_failure "malformed generated digest" \
+  validate_generated_digest "$DIGEST_FIXTURE" "$DIGEST_PIN" "test LUT"
+
 [[ "$(print_path_export /opt/pluto/bin /opt/pub-cache /opt/flutter)" == \
   'export PATH="/opt/pluto/bin:/opt/pub-cache/bin:/opt/flutter/bin:$PATH"' ]] || {
   printf 'FAIL: setup PATH export omitted Pluto, Melos, or Flutter\n' >&2

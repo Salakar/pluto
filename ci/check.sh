@@ -24,6 +24,8 @@ bash tools/setup/test/setup_test.sh
 dart analyze --fatal-infos tools/codegen
 dart tools/codegen/generate_device_profiles_test.dart
 dart tools/codegen/generate_device_profiles.dart --check
+dart tools/codegen/generate_rm1_rgb565_optical_lut_test.dart
+dart tools/codegen/generate_rm1_rgb565_optical_lut.dart --check
 bash -n tools/setup/camera/capture.sh
 python3 -m unittest discover -s tools/setup/camera/test -p 'test_*.py'
 for script in tools/device/*.sh tools/device/test/*.sh; do

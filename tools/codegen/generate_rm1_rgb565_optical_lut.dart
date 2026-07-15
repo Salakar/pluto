@@ -17,14 +17,7 @@ int _opticalLevel(int pixel) {
   return level * 2;
 }
 
-void main(List<String> arguments) {
-  if (arguments.length != 1) {
-    stderr.writeln(
-      'usage: dart tools/codegen/generate_rm1_rgb565_optical_lut.dart OUTPUT',
-    );
-    exitCode = 64;
-    return;
-  }
+String _render() {
   final StringBuffer output = StringBuffer()
     ..writeln(
       '// GENERATED FILE. Run '
@@ -58,5 +51,49 @@ void main(List<String> arguments) {
     ..writeln('} // namespace pluto::native::mxcfb')
     ..writeln()
     ..writeln('#endif // PLUTO_GENERATED_RM1_RGB565_OPTICAL_LUT_H_');
-  File(arguments.single).writeAsStringSync(output.toString());
+  return output.toString();
+}
+
+void main(List<String> arguments) {
+  final bool check = arguments.contains('--check');
+  final List<String> outputArguments = arguments
+      .where((String argument) => argument != '--check')
+      .toList(growable: false);
+  if (arguments.any(
+        (String argument) => argument != '--check' && argument.startsWith('-'),
+      ) ||
+      arguments.where((String argument) => argument == '--check').length > 1 ||
+      outputArguments.length > 1) {
+    stderr.writeln(
+      'usage: dart tools/codegen/generate_rm1_rgb565_optical_lut.dart '
+      '[--check] [OUTPUT]',
+    );
+    exitCode = 64;
+    return;
+  }
+
+  final Directory repositoryRoot = File.fromUri(
+    Platform.script,
+  ).parent.parent.parent;
+  final File outputFile = File(
+    outputArguments.isEmpty
+        ? '${repositoryRoot.path}/embedder/src/generated/'
+              'rm1_rgb565_optical_lut.h'
+        : outputArguments.single,
+  );
+  final String expected = _render();
+  if (check) {
+    if (!outputFile.existsSync() || outputFile.readAsStringSync() != expected) {
+      stderr.writeln('RM1 RGB565 optical LUT is stale: ${outputFile.path}');
+      stderr.writeln(
+        'run: dart tools/codegen/generate_rm1_rgb565_optical_lut.dart',
+      );
+      exitCode = 1;
+      return;
+    }
+    stdout.writeln('RM1 RGB565 optical LUT is current: ${outputFile.path}');
+    return;
+  }
+  outputFile.parent.createSync(recursive: true);
+  outputFile.writeAsStringSync(expected);
 }
