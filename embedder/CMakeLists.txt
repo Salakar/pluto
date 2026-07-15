@@ -194,6 +194,16 @@ target_link_libraries(rm2_encoder_bench PRIVATE pluto_embedder_core)
 target_include_directories(rm2_encoder_bench PRIVATE test/presenter)
 target_compile_features(rm2_encoder_bench PRIVATE cxx_std_20)
 
+# RM1 warm-handoff optical-state A/B. The target is deliberately part of the
+# ARMv7 build so the generated RGB565 LUT is accepted from Cortex-A9 numbers,
+# not host extrapolation.
+add_executable(
+  rm1_handoff_lut_bench
+  bench/presenter/rm1_handoff_lut_bench.cc
+)
+target_link_libraries(rm1_handoff_lut_bench PRIVATE pluto_renderer)
+target_compile_features(rm1_handoff_lut_bench PRIVATE cxx_std_20)
+
 # Full Paper Pro Move warm-handoff bundle benchmark. This intentionally uses
 # the production serializer (including checksums, fsync, and atomic rename)
 # and reports process RSS alongside save/load latency.
@@ -312,6 +322,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(pluto_renderer_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_presenter_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(rm2_encoder_bench PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(rm1_handoff_lut_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(xochitl_mapped_sweep_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(renderer_replay PRIVATE -Wall -Wextra -Wpedantic)
 endif()

@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "generated/rm1_rgb565_optical_lut.h"
 #include "renderer/quantize.h"
 
 namespace {
@@ -1076,6 +1077,20 @@ TEST(MxcfbBackend,
   ASSERT_TRUE(callbacks.wait_for_count(1));
   EXPECT_TRUE(callbacks.frame_ids() == std::vector<std::uint64_t>({92}));
   EXPECT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
+}
+
+TEST(MxcfbBackend, GeneratedRgb565OpticalLutMatchesReferenceExhaustively) {
+  const auto &lut = pluto::native::mxcfb::kRm1Rgb565OpticalLevelLut;
+  ASSERT_EQ(lut.size(), 1u << 16u);
+  for (std::uint32_t pixel = 0; pixel <= 0xffffu; ++pixel) {
+    const std::uint8_t actual = lut[pixel];
+    const std::uint8_t expected =
+        expected_optical_level(static_cast<std::uint16_t>(pixel));
+    if (actual != expected) {
+      EXPECT_EQ(actual, expected) << "RGB565 pixel=" << pixel;
+      return;
+    }
+  }
 }
 
 TEST(MxcfbBackend, BundleSeparatesExactRgb565MirrorFromMonoOpticalState) {
