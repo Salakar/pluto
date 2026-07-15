@@ -3,6 +3,8 @@ set -euo pipefail
 
 DEVICE="${1:-root@10.11.99.1}"
 CLI="${PLUTO_CLI:-pluto}"
+SSH_TARGET="${PLUTO_ACCEPTANCE_SSH_TARGET:-$DEVICE}"
+SSH_PORT="${PLUTO_ACCEPTANCE_SSH_PORT:-}"
 STAGE_DELAY="${PLUTO_ACCEPTANCE_STAGE_DELAY:-0}"
 STAGE_HOOK="${PLUTO_ACCEPTANCE_STAGE_HOOK:-}"
 CODEX_REQUEST="${PLUTO_ACCEPTANCE_CODEX_REQUEST:-0}"
@@ -20,9 +22,20 @@ SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
   echo "release AOT smoke: stage hook is not executable: $STAGE_HOOK" >&2
   exit 64
 }
+[[ -z "$SSH_PORT" || "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || {
+  echo "release AOT smoke: invalid PLUTO_ACCEPTANCE_SSH_PORT: $SSH_PORT" >&2
+  exit 64
+}
+if [[ -n "$SSH_PORT" ]]; then
+  ((SSH_PORT <= 65535)) || {
+    echo "release AOT smoke: SSH port exceeds 65535: $SSH_PORT" >&2
+    exit 64
+  }
+  SSH_OPTIONS+=(-p "$SSH_PORT")
+fi
 
 remote() {
-  ssh "${SSH_OPTIONS[@]}" "$DEVICE" "$1"
+  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" "$1"
 }
 
 stage() {
