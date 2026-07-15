@@ -46,6 +46,39 @@ stage() {
   sleep "$STAGE_DELAY"
 }
 
+verify_common_supervisor() {
+  remote 'set -eu
+matched=0
+matched_unit=""
+matched_pid=""
+for unit in xochitl.service pluto-session-once.service; do
+  systemctl is-active --quiet "$unit" 2>/dev/null || continue
+  pid=$(systemctl show "$unit" -p MainPID 2>/dev/null |
+    sed -n "s/^MainPID=//p")
+  case "$pid" in ""|*[!0-9]*|0|1) continue ;; esac
+  kill -0 "$pid" 2>/dev/null || continue
+  cmd=$(tr "\000" " " < "/proc/$pid/cmdline")
+  case "$cmd" in
+    *"/home/root/pluto/bin/pluto-session.sh start"*)
+      matched=$((matched + 1))
+      matched_unit=$unit
+      matched_pid=$pid
+      ;;
+  esac
+done
+[ "$matched" -eq 1 ] || {
+  echo "release AOT smoke: expected exactly one common Pluto supervisor, found $matched" >&2
+  exit 84
+}
+if [ "$matched_unit" = pluto-session-once.service ]; then
+  ! systemctl is-active --quiet xochitl.service 2>/dev/null || {
+    echo "release AOT smoke: stock xochitl and current-boot Pluto both own the session" >&2
+    exit 84
+  }
+fi
+echo "release AOT smoke: PASS common supervisor unit=$matched_unit pid=$matched_pid"'
+}
+
 verify_app() {
   local app_id="$1"
   local app_root="$2"
@@ -112,8 +145,8 @@ set -- \$(cat \"\$health_file\" 2>/dev/null || true)
 [ \"\$#\" -eq 3 ] && [ \"\$1\" = \"pid=\$pid\" ] || exit 85
 seq_after=\${2#seq=}
 [ \"\$seq_after\" -gt \"\$seq_before\" ] || exit 86
-systemctl is-active --quiet xochitl.service
 echo \"release AOT smoke: PASS $app_id pid=\$pid present_after=\${i}s\""
+  verify_common_supervisor
   stage "app-$app_id"
 }
 
@@ -352,5 +385,5 @@ case ",$PLUTO_PROFILE_BUILD_MODES," in
 esac
 [ "$(find /home/root/pluto/engine -mindepth 1 -maxdepth 1 -type d | wc -l)" \
   -eq "$expected_engine_flavors" ]
-systemctl is-active --quiet xochitl.service
 echo "release AOT smoke: all standard apps, switcher, and Ink stroke passed; debug/JIT state absent"'
+verify_common_supervisor
