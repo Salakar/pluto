@@ -515,6 +515,103 @@ bool EngineHost::capture_direct_screenshot(
   return true;
 }
 
+bool build_direct_ink_stroke_events(
+    std::int32_t width, std::int32_t height, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectInkStrokeEventCount> *events) {
+  if (events == nullptr || width <= 0 || height <= 0) {
+    return false;
+  }
+  constexpr std::size_t kMoveCount = kDirectInkStrokeEventCount - 4;
+  *events = {};
+  const double panel_width = static_cast<double>(width);
+  const double panel_height = static_cast<double>(height);
+  const double start_x = panel_width * 0.30;
+  const double start_y = panel_height * 0.56;
+  const double end_x = panel_width * 0.70;
+  const double end_y = panel_height * 0.46;
+
+  const auto fill = [&](std::size_t index, FlutterPointerPhase phase, double x,
+                        double y, double pressure) {
+    FlutterPointerEvent &event = (*events)[index];
+    event.struct_size = sizeof(FlutterPointerEvent);
+    event.phase = phase;
+    event.timestamp = started_us + index * 4000u;
+    event.x = x;
+    event.y = y;
+    event.device = 900;
+    event.signal_kind = kFlutterPointerSignalKindNone;
+    event.device_kind = kFlutterPointerDeviceKindStylus;
+    event.view_id = 0;
+    event.pressure = pressure;
+    event.pressure_min = 0.0;
+    event.pressure_max = 1.0;
+  };
+
+  fill(0, kAdd, start_x, start_y, 0.0);
+  fill(1, kDown, start_x, start_y, 0.55);
+  for (std::size_t index = 0; index < kMoveCount; ++index) {
+    const double t = static_cast<double>(index + 1) / kMoveCount;
+    // A shallow S-curve is unmistakably a drawn stroke in camera evidence
+    // while remaining inside Ink's responsive central canvas on every panel.
+    const double bend = (t - 0.5) * (t - 0.5) * (t < 0.5 ? -1.0 : 1.0);
+    fill(index + 2, kMove, start_x + (end_x - start_x) * t,
+         start_y + (end_y - start_y) * t + panel_height * 0.12 * bend, 0.55);
+  }
+  fill(kDirectInkStrokeEventCount - 2, kUp, end_x, end_y, 0.0);
+  fill(kDirectInkStrokeEventCount - 1, kRemove, end_x, end_y, 0.0);
+  return true;
+}
+
+bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
+                                        DirectStrokeResult *result,
+                                        DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (result == nullptr || failure == nullptr) {
+    return false;
+  }
+  if (requested_app_id != config_.app_id) {
+    return fail("wrong-app", "requested app is not the foreground embedder");
+  }
+  if (config_.app_id != "dev.pluto.ink") {
+    return fail("unsupported-app", "draw-stroke is restricted to Pluto Ink");
+  }
+  if (engine_ == nullptr || !engine_library_.loaded()) {
+    return fail("unavailable", "Flutter engine is unavailable");
+  }
+
+  std::array<FlutterPointerEvent, kDirectInkStrokeEventCount> events{};
+  struct timespec monotonic {};
+  if (::clock_gettime(CLOCK_MONOTONIC, &monotonic) != 0) {
+    return fail("clock-failed", "could not timestamp programmatic stroke");
+  }
+  const std::int64_t monotonic_us =
+      static_cast<std::int64_t>(monotonic.tv_sec) * 1000000ll +
+      static_cast<std::int64_t>(monotonic.tv_nsec / 1000);
+  const std::size_t started_us = flutter_pen_pointer_timestamp_us(monotonic_us);
+  if (!build_direct_ink_stroke_events(config_.panel_width, config_.panel_height,
+                                      started_us, &events)) {
+    return fail("invalid-geometry", "panel geometry cannot host an Ink stroke");
+  }
+
+  if (engine_library_.procs().SendPointerEvent(engine_, events.data(),
+                                               events.size()) != kSuccess) {
+    return fail("pointer-send-failed",
+                "Flutter rejected the programmatic Ink stroke");
+  }
+  *result = DirectStrokeResult{
+      .app_id = config_.app_id,
+      .pid = static_cast<std::int64_t>(::getpid()),
+      .event_count = events.size(),
+  };
+  return true;
+}
+
 void EngineHost::start_foreground_services() {
   if (config_.presenter_name == "native") {
     if (direct_control_server_ == nullptr) {
@@ -528,12 +625,17 @@ void EngineHost::start_foreground_services() {
             return capture_direct_screenshot(surface, requested_app_id, capture,
                                              failure);
           };
+      control.draw_stroke = [this](const std::string &requested_app_id,
+                                   DirectStrokeResult *result,
+                                   DirectControlFailure *failure) {
+        return send_direct_ink_stroke(requested_app_id, result, failure);
+      };
       direct_control_server_ =
           std::make_unique<DirectControlServer>(std::move(control));
     }
     std::string error;
     if (!direct_control_server_->start(&error)) {
-      std::cerr << "screenshot-control: " << error << "\n";
+      std::cerr << "direct-control: " << error << "\n";
     }
   }
   if (qtfb_input_enabled_) {

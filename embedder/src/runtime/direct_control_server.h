@@ -46,10 +46,24 @@ using DirectScreenshotHandler = std::function<bool(
     const std::optional<std::string> &requested_app_id,
     DirectScreenshotCapture *capture, DirectControlFailure *failure)>;
 
+// Result of one root-local, deterministic stylus stroke. This is used by the
+// real-device acceptance harness to exercise the same Flutter pointer and Ink
+// rendering path on devices that cannot expose a kernel uinput device.
+struct DirectStrokeResult {
+  std::string app_id;
+  std::int64_t pid = 0;
+  std::size_t event_count = 0;
+};
+
+using DirectStrokeHandler = std::function<bool(
+    const std::string &requested_app_id, DirectStrokeResult *result,
+    DirectControlFailure *failure)>;
+
 struct DirectControlServerConfig {
   std::string run_dir = "/run/pluto";
   std::size_t max_packet_bytes = 32768;
   DirectScreenshotHandler screenshot;
+  DirectStrokeHandler draw_stroke;
 };
 
 // Root-local control endpoint for the direct embedder. On Linux it publishes

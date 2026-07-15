@@ -1,7 +1,10 @@
 #ifndef PLUTO_ENGINE_ENGINE_HOST_H_
 #define PLUTO_ENGINE_ENGINE_HOST_H_
 
+#include <array>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -162,6 +165,9 @@ private:
                             const std::optional<std::string> &requested_app_id,
                             DirectScreenshotCapture *capture,
                             DirectControlFailure *failure);
+  bool send_direct_ink_stroke(const std::string &requested_app_id,
+                              DirectStrokeResult *result,
+                              DirectControlFailure *failure);
   std::string hibernate_marker_path() const;
   bool publish_hibernate_marker() const;
   bool publish_control_file(const std::string &leaf,
@@ -260,6 +266,15 @@ bool apply_presenter_display_info(const PlutoDisplayInfo &info,
 // Shared by production delivery and focused geometry regression tests.
 FlutterWindowMetricsEvent
 window_metrics_for_config(const EngineHostConfig &config);
+
+inline constexpr std::size_t kDirectInkStrokeEventCount = 24;
+
+// Builds the deterministic stylus packet used by the root-local acceptance
+// control. Keeping geometry and phase sequencing pure makes the real pointer
+// path independently testable without a Flutter engine.
+bool build_direct_ink_stroke_events(
+    std::int32_t width, std::int32_t height, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectInkStrokeEventCount> *events);
 
 } // namespace pluto
 

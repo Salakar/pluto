@@ -135,10 +135,16 @@ int hex_value(char value) {
   return -1;
 }
 
+enum class DirectAction : std::uint8_t {
+  kScreenshot,
+  kDrawStroke,
+};
+
 struct ParsedRequest {
   std::string request_id;
   std::optional<std::string> app_id;
   DirectScreenshotSurface surface = DirectScreenshotSurface::kLogical;
+  DirectAction action = DirectAction::kScreenshot;
 };
 
 class RequestParser {
@@ -234,27 +240,40 @@ public:
       return fail(failure, "bad-request-id",
                   "requestId must be 1-128 printable ASCII bytes");
     }
-    if (!have_action || action != "screenshot") {
+    if (!have_action || (action != "screenshot" && action != "draw-stroke")) {
       return fail(failure, "bad-action", "unsupported control action");
     }
     if (!have_app_id) {
-      return fail(failure, "bad-args", "screenshot requires appId");
+      return fail(failure, "bad-args", "control action requires appId");
     }
     if (request->app_id.has_value() &&
         !printable_ascii(*request->app_id, false, kMaximumTokenBytes)) {
       return fail(failure, "bad-args",
                   "appId must be 1-128 visible ASCII bytes");
     }
-    if (!have_surface) {
-      return fail(failure, "bad-args", "screenshot requires surface");
-    }
-    if (surface == "logical") {
-      request->surface = DirectScreenshotSurface::kLogical;
-    } else if (surface == "post-dither") {
-      request->surface = DirectScreenshotSurface::kPostDither;
+    if (action == "screenshot") {
+      request->action = DirectAction::kScreenshot;
+      if (!have_surface) {
+        return fail(failure, "bad-args", "screenshot requires surface");
+      }
+      if (surface == "logical") {
+        request->surface = DirectScreenshotSurface::kLogical;
+      } else if (surface == "post-dither") {
+        request->surface = DirectScreenshotSurface::kPostDither;
+      } else {
+        return fail(failure, "bad-args",
+                    "surface must be logical or post-dither");
+      }
     } else {
-      return fail(failure, "bad-args",
-                  "surface must be logical or post-dither");
+      request->action = DirectAction::kDrawStroke;
+      if (!request->app_id.has_value()) {
+        return fail(failure, "bad-args",
+                    "draw-stroke requires a concrete appId");
+      }
+      if (have_surface) {
+        return fail(failure, "bad-args",
+                    "draw-stroke does not accept a screenshot surface");
+      }
     }
     return true;
   }
@@ -993,6 +1012,10 @@ private:
       return {failure_response(request.request_id, std::move(failure)), {}};
     }
 
+    if (request.action == DirectAction::kDrawStroke) {
+      return dispatch_draw_stroke(request, &failure);
+    }
+
     DirectScreenshotCapture capture;
     bool captured = false;
     try {
@@ -1047,6 +1070,59 @@ private:
           {}};
     }
     return {std::move(response), std::move(leaf)};
+  }
+
+  DispatchResult dispatch_draw_stroke(const ParsedRequest &request,
+                                      DirectControlFailure *failure) {
+    if (!config_.draw_stroke || !request.app_id.has_value()) {
+      return {failure_response(
+                  request.request_id,
+                  {"unavailable", "programmatic stroke is not available"}),
+              {}};
+    }
+
+    DirectStrokeResult result;
+    bool drawn = false;
+    try {
+      drawn = config_.draw_stroke(*request.app_id, &result, failure);
+    } catch (const std::exception &exception) {
+      failure->code = "internal";
+      failure->message =
+          std::string("draw-stroke callback failed: ") + exception.what();
+    } catch (...) {
+      failure->code = "internal";
+      failure->message = "draw-stroke callback failed";
+    }
+    if (!drawn) {
+      if (failure->code.empty()) {
+        failure->code = "unavailable";
+      }
+      if (failure->message.empty()) {
+        failure->message = "programmatic stroke is not available";
+      }
+      return {failure_response(request.request_id, std::move(*failure)), {}};
+    }
+    if (result.app_id != *request.app_id || result.pid <= 0 ||
+        result.event_count < 4 || result.event_count > 256) {
+      return {
+          failure_response(
+              request.request_id,
+              {"internal", "draw-stroke callback returned invalid metadata"}),
+          {}};
+    }
+
+    std::string response =
+        "{\"schema\":1,\"requestId\":" + json_string(request.request_id) +
+        ",\"ok\":true,\"result\":{\"appId\":" + json_string(result.app_id) +
+        ",\"pid\":" + std::to_string(result.pid) +
+        ",\"eventCount\":" + std::to_string(result.event_count) + "}}";
+    if (response.size() > config_.max_packet_bytes) {
+      return {
+          failure_response(request.request_id,
+                           {"internal", "draw-stroke response is too large"}),
+          {}};
+    }
+    return {std::move(response), {}};
   }
 
   bool publish_artifact(const DirectScreenshotCapture &capture,

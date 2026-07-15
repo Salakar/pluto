@@ -147,6 +147,41 @@ TEST(EngineHostPenInput, InvalidNegativeTimestampDoesNotWrap) {
   EXPECT_EQ(pluto::flutter_pen_pointer_timestamp_us(0), 0u);
 }
 
+TEST(EngineHostPenInput,
+     ProgrammaticInkStrokeIsACompleteResponsiveStylusSequence) {
+  for (const auto &[width, height] :
+       std::array<std::pair<std::int32_t, std::int32_t>, 2>{
+           std::pair{1404, 1872}, std::pair{954, 1696}}) {
+    std::array<FlutterPointerEvent, pluto::kDirectInkStrokeEventCount> events{};
+    ASSERT_TRUE(
+        pluto::build_direct_ink_stroke_events(width, height, 1000, &events));
+
+    EXPECT_EQ(events.front().phase, kAdd);
+    EXPECT_EQ(events[1].phase, kDown);
+    EXPECT_EQ(events[events.size() - 2].phase, kUp);
+    EXPECT_EQ(events.back().phase, kRemove);
+    for (std::size_t index = 2; index + 2 < events.size(); ++index) {
+      EXPECT_EQ(events[index].phase, kMove);
+    }
+    for (std::size_t index = 0; index < events.size(); ++index) {
+      EXPECT_EQ(events[index].struct_size, sizeof(FlutterPointerEvent));
+      EXPECT_EQ(events[index].device_kind, kFlutterPointerDeviceKindStylus);
+      EXPECT_EQ(events[index].device, 900);
+      EXPECT_EQ(events[index].timestamp, 1000u + index * 4000u);
+      EXPECT_GE(events[index].x, 0.0);
+      EXPECT_LT(events[index].x, width);
+      EXPECT_GE(events[index].y, 0.0);
+      EXPECT_LT(events[index].y, height);
+    }
+    EXPECT_LT(events[1].x, events[events.size() - 2].x);
+    EXPECT_GT(events[1].y, events[events.size() - 2].y);
+  }
+  std::array<FlutterPointerEvent, pluto::kDirectInkStrokeEventCount> events{};
+  EXPECT_FALSE(pluto::build_direct_ink_stroke_events(0, 1872, 1000, &events));
+  EXPECT_FALSE(
+      pluto::build_direct_ink_stroke_events(1404, 1872, 1000, nullptr));
+}
+
 TEST(EngineHostConfig, RejectsRelativeReadyFileBeforeStartup) {
   pluto::EngineHostConfig config;
   config.ready_file_path = "relative/ready";

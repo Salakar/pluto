@@ -464,6 +464,7 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
   )
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND PLUTO_EMBEDDER_CORE_TEST_SOURCES
+      test/runtime/direct_control_server_test.cc
       test/runtime/event_loop_test.cc
     )
   endif()
