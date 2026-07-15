@@ -133,9 +133,9 @@ struct FrameRendererConfig {
   // Fatal atomic-publication edge for the supervisor liveness record.
   // Production posts shutdown onto the platform loop.
   std::function<void()> on_health_file_failure;
-  // TEST-ONLY deterministic policy clock. Timeout/fence accounting always
-  // keeps the real steady clock; this hook controls only timestamps consumed
-  // by renderer classification, debt, quiescence, and scheduling decisions.
+  // TEST-ONLY deterministic renderer clock. Production leaves this null and
+  // uses the real steady clock; tests may drive every renderer/scheduler
+  // timestamp, including completion-fence accounting, without wall sleeps.
   MonotonicNowForTesting monotonic_now_for_testing = nullptr;
   void *monotonic_now_context_for_testing = nullptr;
 };

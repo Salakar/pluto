@@ -1863,19 +1863,30 @@ TEST(FrameRendererTest, MissingRealCompletionTriggersFatalHealthDeadline) {
   }
   TempReadyMarker health("health-overdue");
   std::atomic<size_t> fatal_callbacks{0};
+  std::atomic<uint64_t> now_us{1'000'000};
+  const pluto::RegionSchedulerConfig scheduler_defaults{};
+  ASSERT_EQ(scheduler_defaults.fence_timeout_ms, 5500u);
   FrameRendererConfig config = mono_capture_config();
   config.start_presenter_thread = true;
   config.health_file_path = health.marker().string();
   config.on_health_file_failure = [&fatal_callbacks] {
     fatal_callbacks.fetch_add(1, std::memory_order_release);
   };
+  config.monotonic_now_for_testing = [](void *context) {
+    return static_cast<std::atomic<uint64_t> *>(context)->load(
+        std::memory_order_acquire);
+  };
+  config.monotonic_now_context_for_testing = &now_us;
   FrameRenderer renderer(config);
   ASSERT_TRUE(renderer.valid());
 
   std::vector<uint16_t> pixels(64 * 64, 0xffff);
   ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  now_us.fetch_add(
+      static_cast<uint64_t>(scheduler_defaults.fence_timeout_ms) * 1000u + 1u,
+      std::memory_order_release);
   const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(4);
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (fatal_callbacks.load(std::memory_order_acquire) == 0u &&
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
