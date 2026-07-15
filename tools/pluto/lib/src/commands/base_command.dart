@@ -62,7 +62,11 @@ abstract class PlutoCommand extends Command<int> {
     if (target == 'usb') {
       return const DeviceEndpoint(id: 'usb', host: '10.11.99.1');
     }
-    return DeviceEndpoint.parse(target, id: target);
+    try {
+      return DeviceEndpoint.parse(target, id: target);
+    } on FormatException catch (error) {
+      usageException('Invalid --device endpoint: ${error.message}.');
+    }
   }
 
   /// Runs [operation] and maps known exceptions to exit codes.

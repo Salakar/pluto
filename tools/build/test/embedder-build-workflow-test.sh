@@ -97,19 +97,22 @@ fi
 PAYLOAD_DRY_RUN="$(bash "$PAYLOAD_SCRIPT" --dry-run --app counter --app motion_lab)"
 assert_contains "$PAYLOAD_DRY_RUN" "setup.sh --verify"
 assert_contains "$PAYLOAD_DRY_RUN" "build app --release"
-assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/launcher"
-assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/apps/dev.pluto.examples.counter"
-assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/apps/dev.pluto.examples.motion_lab"
+assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/linux-arm64/launcher"
+assert_contains "$PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/linux-arm64/apps/dev.pluto.examples.counter"
+assert_contains "$PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/linux-arm64/apps/dev.pluto.examples.motion_lab"
 assert_contains "$PAYLOAD_DRY_RUN" "engine/release/libflutter_engine.so"
 assert_contains "$PAYLOAD_DRY_RUN" "engine/profile/libflutter_engine.so"
-assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/bin/pluto-controlctl"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/share/device-profiles.sh"
+  "build/pluto-payload/linux-arm64/bin/pluto-controlctl"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/pluto-boot-confirm.sh"
+  "build/pluto-payload/linux-arm64/share/device-profiles.sh"
+assert_contains "$PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/linux-arm64/pluto-boot-confirm.sh"
 [[ "$PAYLOAD_DRY_RUN" != *"apps/codex"* ]] || fail "Codex was selected implicitly"
 [[ "$PAYLOAD_DRY_RUN" != *"kernel_blob.bin"* ]] || fail "dry run copied a JIT kernel"
-EXPECTED_NEXT="Direct-backend handoff: pluto provision --payload-dir $ROOT/build/pluto-payload"
+EXPECTED_NEXT="Native-runtime handoff: pluto provision --payload-dir $ROOT/build/pluto-payload/linux-arm64"
 [[ "$(printf '%s\n' "$PAYLOAD_DRY_RUN" | tail -1)" == "$EXPECTED_NEXT" ]] ||
   fail "payload dry run did not end with the exact provision command"
 
@@ -124,21 +127,26 @@ assert_contains "$STANDARD_DRY_RUN" "dev.pluto.examples.counter"
 assert_contains "$STANDARD_DRY_RUN" "dev.pluto.examples.motion_lab"
 assert_contains "$STANDARD_DRY_RUN" "dev.pluto.examples.ink_lab"
 assert_contains "$STANDARD_DRY_RUN" "dev.pluto.validation_lab"
+assert_contains "$STANDARD_DRY_RUN" "/apps/dev.pluto.ink"
 assert_contains "$STANDARD_DRY_RUN" "dev.pluto.codex"
 [[ "$STANDARD_DRY_RUN" != *"kernel_blob.bin"* ]] ||
   fail "--standard dry run copied a JIT kernel"
 
-if ARM_PAYLOAD_REFUSAL="$(
-  bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm --app counter 2>&1
-)"; then
-  fail "direct-backend payload assembler accepted linux-arm"
-fi
-assert_contains "$ARM_PAYLOAD_REFUSAL" "normal Pluto workflow"
-assert_contains "$ARM_PAYLOAD_REFUSAL" "cooperative backend"
-[[ "$ARM_PAYLOAD_REFUSAL" != *"pluto-session.sh"* ]] ||
-  fail "refused linux-arm payload included Move supervisor scripts"
-[[ "$ARM_PAYLOAD_REFUSAL" != *"pluto provision"* ]] ||
-  fail "refused linux-arm payload printed a boot-first handoff"
+ARM_PAYLOAD_DRY_RUN="$(
+  bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm --app counter
+)"
+assert_contains "$ARM_PAYLOAD_DRY_RUN" \
+  "embedder/build/device-arm/pluto-embedder 2.35 linux-arm"
+assert_contains "$ARM_PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/linux-arm/pluto-session.sh"
+assert_contains "$ARM_PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/linux-arm/apps/dev.pluto.examples.counter"
+assert_contains "$ARM_PAYLOAD_DRY_RUN" \
+  "Native-runtime handoff: pluto provision --payload-dir $ROOT/build/pluto-payload/linux-arm"
+[[ "$ARM_PAYLOAD_DRY_RUN" != *"engine/profile/libflutter_engine.so"* ]] ||
+  fail "release-only linux-arm payload included the profile engine"
+[[ "$ARM_PAYLOAD_DRY_RUN" != *"cooperative"* ]] ||
+  fail "native linux-arm payload still names the cooperative backend"
 
 ENGINE_HASH="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/engine.version")"
 ARM_ENGINE="$ROOT/third_party/engine/$ENGINE_HASH/linux-arm-release/libflutter_engine.so"
@@ -164,7 +172,7 @@ git -C "$ROOT" check-ignore -q embedder/build/device-arm64/pluto-embedder ||
   fail "device binary is not ignored"
 git -C "$ROOT" check-ignore -q embedder/build/device-arm/pluto-embedder ||
   fail "ARMv7 device binary is not ignored"
-git -C "$ROOT" check-ignore -q build/pluto-payload/pluto-embedder ||
+git -C "$ROOT" check-ignore -q build/pluto-payload/linux-arm64/pluto-embedder ||
   fail "assembled payload is not ignored"
 
 echo "PASS: embedder build workflow dry-run contract"

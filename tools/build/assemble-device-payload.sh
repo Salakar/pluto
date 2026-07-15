@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PAYLOAD="$ROOT/build/pluto-payload"
+PAYLOAD_ROOT="$ROOT/build/pluto-payload"
+PAYLOAD=""
 FLUTTER_VERSION="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/flutter.version")"
 ENGINE_COMMIT="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/engine.version")"
 SDK="${PLUTO_SDK:-$HOME/.pluto/sdk/$FLUTTER_VERSION}"
@@ -10,12 +11,14 @@ DART="$SDK/bin/cache/dart-sdk/bin/dart"
 CLI="$ROOT/tools/pluto/bin/pluto.dart"
 PACKAGES="$ROOT/tools/pluto/.dart_tool/package_config.json"
 EMBEDDER=""
-CONTROL_CLIENT="$ROOT/embedder/build/device-arm64/pluto-controlctl"
+CONTROL_CLIENT=""
 DEVICE_PROFILES="$ROOT/tools/device/generated/device-profiles.sh"
 ENGINE_ROOT="$ROOT/third_party/engine/$ENGINE_COMMIT"
 TARGET_PLATFORM=linux-arm64
 TARGET_GLIBC_CEILING=2.39
 SNAPSHOT_ARCH=arm64
+HAS_PROFILE_ENGINE=1
+OUTPUT_EXPLICIT=0
 DRY_RUN=0
 SELECTED_APPS=()
 SELECTED_APP_COUNT=0
@@ -36,8 +39,8 @@ usage() {
 Usage: tools/build/assemble-device-payload.sh [options]
 
 Assemble the release-AOT launcher and selected apps into the canonical
-build/pluto-payload directory. No app is selected implicitly besides the
-launcher; debug/JIT payloads are never copied.
+build/pluto-payload/<target> directory. No app is selected implicitly besides
+the launcher; debug/JIT payloads are never copied.
 
 Options:
   --app NAME       include one repo app; repeat for more apps
@@ -45,11 +48,12 @@ Options:
                    apps/... repo-relative directory)
   --examples       include counter, motion_lab, and ink_lab
   --standard       include every standard app: the examples, Validation Lab,
-                   and Codex (the launcher is always included)
+                   Ink, and Codex (the launcher is always included)
   --target-platform TARGET
-                   build this low-level direct backend for linux-arm64
-                   (default); model-specific routing belongs to the CLI
+                   build the native runtime for linux-arm64 (default) or
+                   linux-arm; model-specific routing belongs to the CLI
   --embedder PATH  use an alternate target-compatible pluto-embedder
+  --output DIR     override build/pluto-payload/<target>
   --dry-run        print the complete assembly plan without changing files
   -h, --help       show this help
 
@@ -120,6 +124,7 @@ while (($# > 0)); do
       add_selected_app motion_lab
       add_selected_app ink_lab
       add_selected_app validation_lab
+      add_selected_app ink
       add_selected_app codex
       ;;
     --embedder)
@@ -128,6 +133,17 @@ while (($# > 0)); do
       EMBEDDER="$1"
       ;;
     --embedder=*) EMBEDDER="${1#*=}" ;;
+    --output)
+      shift
+      (($# > 0)) || die "--output requires a value"
+      PAYLOAD="${1%/}"
+      OUTPUT_EXPLICIT=1
+      ;;
+    --output=*)
+      PAYLOAD="${1#*=}"
+      PAYLOAD="${PAYLOAD%/}"
+      OUTPUT_EXPLICIT=1
+      ;;
     --target-platform)
       shift
       (($# > 0)) || die "--target-platform requires a value"
@@ -148,11 +164,30 @@ case "$TARGET_PLATFORM" in
   linux-arm64)
     [[ -n "$EMBEDDER" ]] || \
       EMBEDDER="$ROOT/embedder/build/device-arm64/pluto-embedder"
+    CONTROL_CLIENT="$ROOT/embedder/build/device-arm64/pluto-controlctl"
+    TARGET_GLIBC_CEILING=2.39
+    SNAPSHOT_ARCH=arm64
+    HAS_PROFILE_ENGINE=1
     ;;
   linux-arm)
-    die "linux-arm is not supported by this direct-backend assembler; the normal Pluto workflow must dispatch the cooperative backend"
+    [[ -n "$EMBEDDER" ]] || \
+      EMBEDDER="$ROOT/embedder/build/device-arm/pluto-embedder"
+    CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-controlctl"
+    TARGET_GLIBC_CEILING=2.35
+    SNAPSHOT_ARCH=arm
+    HAS_PROFILE_ENGINE=0
     ;;
   *) die "unsupported target platform: $TARGET_PLATFORM" ;;
+esac
+
+if ((OUTPUT_EXPLICIT == 0)); then
+  PAYLOAD="$PAYLOAD_ROOT/$TARGET_PLATFORM"
+fi
+[[ -n "$PAYLOAD" ]] || die "output directory must not be empty"
+case "$PAYLOAD" in
+  / | . | .. | */. | */.. | "$ROOT" | "$ROOT/" | "$HOME" | "$HOME/")
+    die "refusing unsafe output directory: $PAYLOAD"
+    ;;
 esac
 
 resolve_app_directory() {
@@ -192,11 +227,9 @@ manifest_app_id() {
 
 require_target_elf() {
   local elf="$1"
-  local description
   [[ -s "$elf" ]] || die "missing ELF: $elf"
-  description="$(file "$elf")"
-  [[ "$description" == *"ELF 64-bit"* && "$description" == *"ARM aarch64"* ]] ||
-    die "expected ELF64 AArch64 ELF: $description"
+  bash "$ROOT/tools/build/verify-device-elf.sh" \
+    "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
 }
 
 verify_release_layout() {
@@ -302,18 +335,22 @@ run bash "$ROOT/tools/build/verify-device-elf.sh" \
   "$CONTROL_CLIENT" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
 run bash "$ROOT/tools/build/verify-device-elf.sh" \
   "$RELEASE_ENGINE" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
-run bash "$ROOT/tools/build/verify-device-elf.sh" \
-  "$PROFILE_ENGINE" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+if ((HAS_PROFILE_ENGINE == 1)); then
+  run bash "$ROOT/tools/build/verify-device-elf.sh" \
+    "$PROFILE_ENGINE" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+fi
 
 run rm -rf "$PAYLOAD"
 PAYLOAD_DIRECTORIES=(
   "$PAYLOAD"
   "$PAYLOAD/bin"
   "$PAYLOAD/engine/release"
-  "$PAYLOAD/engine/profile"
   "$PAYLOAD/apps"
   "$PAYLOAD/share"
 )
+if ((HAS_PROFILE_ENGINE == 1)); then
+  PAYLOAD_DIRECTORIES+=("$PAYLOAD/engine/profile")
+fi
 run install -d "${PAYLOAD_DIRECTORIES[@]}"
 run install -m 0755 "$EMBEDDER" "$PAYLOAD/pluto-embedder"
 run install -m 0755 "$CONTROL_CLIENT" "$PAYLOAD/bin/pluto-controlctl"
@@ -321,8 +358,10 @@ run install -m 0644 "$DEVICE_PROFILES" \
   "$PAYLOAD/share/device-profiles.sh"
 run install -m 0644 "$RELEASE_ENGINE" \
   "$PAYLOAD/engine/release/libflutter_engine.so"
-run install -m 0644 "$PROFILE_ENGINE" \
-  "$PAYLOAD/engine/profile/libflutter_engine.so"
+if ((HAS_PROFILE_ENGINE == 1)); then
+  run install -m 0644 "$PROFILE_ENGINE" \
+    "$PAYLOAD/engine/profile/libflutter_engine.so"
+fi
 
 for script in "${DEVICE_SCRIPTS[@]}"; do
   source_script="$ROOT/tools/device/$script"
@@ -354,4 +393,4 @@ if ((DRY_RUN == 0)); then
   fi
 fi
 
-echo "Direct-backend handoff: pluto provision --payload-dir $PAYLOAD"
+echo "Native-runtime handoff: pluto provision --payload-dir $PAYLOAD"
