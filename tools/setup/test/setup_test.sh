@@ -150,4 +150,12 @@ validate_engine_artifacts \
   release \
   linux-arm
 
+PLUTO_ARM_SDK_PIN="$ROOT/tools/pluto/pins/arm-sdk.pin" \
+  bash "$ROOT/tools/build/verify-arm-sdk.sh" --pin-only >/dev/null
+cp "$ROOT/tools/pluto/pins/arm-sdk.pin" "$TMP/arm-sdk.pin"
+sed 's/^sha256=.*/sha256=xyz/' "$TMP/arm-sdk.pin" > "$TMP/arm-sdk.invalid"
+expect_failure "malformed ARM SDK content pin" \
+  env PLUTO_ARM_SDK_PIN="$TMP/arm-sdk.invalid" \
+  bash "$ROOT/tools/build/verify-arm-sdk.sh" --pin-only
+
 printf 'setup validation tests passed\n'

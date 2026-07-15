@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 HOST_SCRIPT="$ROOT/tools/build/embedder-host.sh"
 DEVICE_SCRIPT="$ROOT/tools/build/embedder-device.sh"
 ARM_DEVICE_SCRIPT="$ROOT/tools/build/embedder-device-arm.sh"
+ARM_SDK_FINGERPRINT="$ROOT/tools/build/fingerprint-arm-sdk.sh"
+ARM_SDK_VERIFY="$ROOT/tools/build/verify-arm-sdk.sh"
+ARM_SDK_PIN="$ROOT/tools/pluto/pins/arm-sdk.pin"
 PAYLOAD_SCRIPT="$ROOT/tools/build/assemble-device-payload.sh"
 CONTROL_CLIENT_SOURCE="$ROOT/tools/device/pluto-controlctl.c"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pluto-controlctl-test.XXXXXX")"
@@ -25,6 +28,8 @@ bash -n \
   "$HOST_SCRIPT" \
   "$DEVICE_SCRIPT" \
   "$ARM_DEVICE_SCRIPT" \
+  "$ARM_SDK_FINGERPRINT" \
+  "$ARM_SDK_VERIFY" \
   "$PAYLOAD_SCRIPT" \
   "$ROOT/tools/build/embedder-device-container.sh" \
   "$ROOT/tools/build/embedder-device-arm-container.sh" \
@@ -83,6 +88,17 @@ assert_contains "$ARM_DEVICE_DRY_RUN" "docker run --rm --platform linux/amd64"
 assert_contains "$ARM_DEVICE_DRY_RUN" "pluto-rm2-sdk-4.4.128-v2:/sdk:ro"
 assert_contains "$ARM_DEVICE_DRY_RUN" "embedder-device-arm-container.sh"
 assert_contains "$ARM_DEVICE_DRY_RUN" "embedder/build/device-arm/pluto-embedder 2.35 linux-arm"
+assert_contains "$ARM_DEVICE_DRY_RUN" "bash tools/build/verify-arm-sdk.sh"
+assert_contains "$ARM_DEVICE_DRY_RUN" "$ROOT:/work:ro"
+assert_contains "$ARM_DEVICE_DRY_RUN" "--user"
+PLUTO_ARM_SDK_PIN="$ARM_SDK_PIN" bash "$ARM_SDK_VERIFY" --pin-only >/dev/null
+cp "$ARM_SDK_PIN" "$TMP/arm-sdk.pin"
+sed 's/^regular_files=.*/regular_files=0/' "$TMP/arm-sdk.pin" > \
+  "$TMP/arm-sdk.invalid"
+if PLUTO_ARM_SDK_PIN="$TMP/arm-sdk.invalid" \
+  bash "$ARM_SDK_VERIFY" --pin-only >/dev/null 2>&1; then
+  fail "ARM SDK gate accepted a malformed authoritative pin"
+fi
 
 ARM_DEVICE_DIR_DRY_RUN="$(
   bash "$ARM_DEVICE_SCRIPT" --dry-run --skip-image-build \
@@ -193,8 +209,9 @@ if bash "$ROOT/tools/build/verify-device-elf.sh" \
   fail "linux-arm engine passed the linux-arm64 ELF gate"
 fi
 
-grep -q '^FROM ubuntu:24\.04$' "$ROOT/tools/build/Dockerfile.embedder-device" ||
-  fail "device builder is not pinned to Ubuntu 24.04"
+grep -q '^FROM ubuntu:24\.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90$' \
+  "$ROOT/tools/build/Dockerfile.embedder-device" ||
+  fail "device builder base image is not digest-pinned"
 grep -q 'bash tools/build/embedder-host\.sh' "$ROOT/pubspec.yaml" ||
   fail "root host build command is not wired"
 grep -q 'bash tools/build/embedder-device\.sh' "$ROOT/pubspec.yaml" ||

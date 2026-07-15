@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 BUILD_SCRIPT="$ROOT/tools/build/build-codex-armv7.sh"
 CONTAINER_SCRIPT="$ROOT/tools/build/codex-armv7/build-container.sh"
-SDK_FINGERPRINT_SCRIPT="$ROOT/tools/build/codex-armv7/fingerprint-sdk.sh"
+SDK_FINGERPRINT_SCRIPT="$ROOT/tools/build/fingerprint-arm-sdk.sh"
+SDK_PIN="$ROOT/tools/pluto/pins/arm-sdk.pin"
 ASSEMBLER="$ROOT/tools/build/assemble-device-payload.sh"
 PIN="$ROOT/tools/pluto/pins/codex-armv7.json"
 RECIPE="$ROOT/tools/build/codex-armv7"
@@ -34,6 +35,7 @@ assert_contains "$DRY_RUN" '44918ea10c0f99151c6710411b4322c2f5c96bea'
 assert_contains "$DRY_RUN" 'docker build --platform linux/amd64'
 assert_contains "$DRY_RUN" 'PLUTO_CODEX_RECIPE_DIGEST='
 assert_contains "$DRY_RUN" 'pluto-test-rm-sdk:/sdk:ro'
+assert_contains "$DRY_RUN" "$SDK_PIN"
 assert_contains "$DRY_RUN" 'runs/<input-key>/<automatic-utc-pid>'
 assert_contains "$DRY_RUN" 'cargo +1.95.0'
 assert_contains "$DRY_RUN" '<candidate>/output/codex 2.35 linux-arm'
@@ -75,6 +77,8 @@ grep -q -- '--fuzz=0 --no-backup-if-mismatch' "$CONTAINER_SCRIPT" ||
   fail "compatibility patches permit fuzzy or backup-producing application"
 grep -q -- '--sort=name' "$SDK_FINGERPRINT_SCRIPT" ||
   fail "complete SDK content is not deterministically fingerprinted"
+grep -q 'SDK_PIN="$ROOT/tools/pluto/pins/arm-sdk.pin"' "$BUILD_SCRIPT" ||
+  fail "Codex build does not use the authoritative common ARM SDK pin"
 grep -q 'target-cpu=generic' "$CONTAINER_SCRIPT" ||
   fail "Codex build is not on the shared ARMv7 CPU baseline"
 if grep -Eq -- '-mcpu=(cortex-a7|cortex-a9)' "$CONTAINER_SCRIPT"; then

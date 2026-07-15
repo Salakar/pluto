@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RECIPE_DIR="$ROOT/tools/build/codex-armv7"
+SDK_FINGERPRINT="$ROOT/tools/build/fingerprint-arm-sdk.sh"
+SDK_PIN="$ROOT/tools/pluto/pins/arm-sdk.pin"
 BUILD_ROOT="${PLUTO_CODEX_ARMV7_BUILD_ROOT:-$ROOT/.pluto-cache/build/codex-armv7}"
 IMAGE="${PLUTO_CODEX_ARMV7_BUILDER_IMAGE:-pluto/codex-armv7-builder:rust1.95}"
 SDK_VOLUME="${PLUTO_RM_SDK_VOLUME:-pluto-rm2-sdk-4.4.128-v2}"
@@ -82,6 +84,15 @@ sha256_stdin() {
   fi
 }
 
+pin_value() {
+  local key="$1"
+  local values
+  values="$(sed -n "s/^${key}=//p" "$SDK_PIN")"
+  [[ -n "$values" && "$values" != *$'\n'* ]] ||
+    die "ARM SDK pin must contain exactly one $key field: $SDK_PIN"
+  printf '%s\n' "$values"
+}
+
 while (($# > 0)); do
   case "$1" in
     --sdk-volume)
@@ -144,7 +155,6 @@ fi
 for required in \
   Dockerfile \
   build-container.sh \
-  fingerprint-sdk.sh \
   patches/openai-codex-0.144.1-armv7.patch \
   patches/pagable-0.4.1-armv7.patch \
   patches/seccompiler-0.5.0-armv7.patch; do
@@ -152,8 +162,10 @@ for required in \
 done
 [[ -x "$RECIPE_DIR/build-container.sh" ]] ||
   die "missing executable Codex container build script"
-[[ -x "$RECIPE_DIR/fingerprint-sdk.sh" ]] ||
-  die "missing executable Codex SDK fingerprint script"
+[[ -x "$SDK_FINGERPRINT" ]] ||
+  die "missing common ARM SDK fingerprint script"
+[[ -f "$SDK_PIN" ]] || die "missing authoritative ARM SDK pin"
+bash "$ROOT/tools/build/verify-arm-sdk.sh" --pin-only >/dev/null
 
 recipe_key="$({
   printf 'source-url=%s\n' "$SOURCE_URL"
@@ -164,12 +176,13 @@ recipe_key="$({
   for input in \
     Dockerfile \
     build-container.sh \
-    fingerprint-sdk.sh \
     patches/openai-codex-0.144.1-armv7.patch \
     patches/pagable-0.4.1-armv7.patch \
     patches/seccompiler-0.5.0-armv7.patch; do
     printf '%s=%s\n' "$input" "$(sha256_file "$RECIPE_DIR/$input")"
   done
+  printf 'fingerprint-arm-sdk.sh=%s\n' "$(sha256_file "$SDK_FINGERPRINT")"
+  printf 'arm-sdk.pin=%s\n' "$(sha256_file "$SDK_PIN")"
 } | sha256_stdin)"
 
 if [[ -n "$SDK_DIR" ]]; then
@@ -190,6 +203,7 @@ if ((DRY_RUN == 1)); then
   echo "+ checkout $SOURCE_URL tag $SOURCE_TAG at $SOURCE_COMMIT into clean cache $SOURCE_DIR"
   echo "+ docker build --platform linux/amd64 --build-arg PLUTO_CODEX_RECIPE_DIGEST=$recipe_key --tag $IMAGE $RECIPE_DIR"
   echo "+ fingerprint complete read-only SDK input $SDK_MOUNT_SOURCE:/sdk:ro"
+  echo "+ reject SDK unless it matches $SDK_PIN"
   echo "+ create fresh isolated run $BUILD_ROOT/runs/<input-key>/$run_id"
   echo "+ docker run with cargo +$RUST_TOOLCHAIN and fixed /src /cargo-home /target /output mounts"
   echo "+ bash $ROOT/tools/build/verify-device-elf.sh <candidate>/output/codex 2.35 linux-arm"
@@ -235,14 +249,22 @@ image_recipe_key="$(docker image inspect \
 sdk_metadata="$(docker run --rm \
   --platform linux/amd64 \
   --volume "$SDK_MOUNT_SOURCE:/sdk:ro" \
-  --volume "$RECIPE_DIR:/pluto-build:ro" \
+  --volume "$ROOT/tools/build:/pluto-tools:ro" \
   "$IMAGE" \
-  bash /pluto-build/fingerprint-sdk.sh)"
+  bash /pluto-tools/fingerprint-arm-sdk.sh)"
 sdk_sha256="$(printf '%s\n' "$sdk_metadata" | sed -n 's/^SDK_SHA256=//p')"
 sdk_gcc_version="$(printf '%s\n' "$sdk_metadata" | sed -n 's/^GCC_VERSION=//p')"
+sdk_gcc_machine="$(printf '%s\n' "$sdk_metadata" | sed -n 's/^GCC_MACHINE=//p')"
+sdk_regular_files="$(printf '%s\n' "$sdk_metadata" | sed -n 's/^SDK_REGULAR_FILES=//p')"
 [[ "$sdk_sha256" =~ ^[0-9a-f]{64}$ ]] || die "SDK fingerprint did not return a SHA-256"
-[[ "$sdk_gcc_version" = 11.5.0 ]] ||
-  die "official SDK GCC version must be 11.5.0, got $sdk_gcc_version"
+[[ "$sdk_sha256" = "$(pin_value sha256)" ]] ||
+  die "official SDK content does not match the authoritative pin"
+[[ "$sdk_gcc_version" = "$(pin_value gcc_version)" ]] ||
+  die "official SDK GCC version does not match the authoritative pin"
+[[ "$sdk_gcc_machine" = "$(pin_value gcc_machine)" ]] ||
+  die "official SDK machine does not match the authoritative pin"
+[[ "$sdk_regular_files" = "$(pin_value regular_files)" ]] ||
+  die "official SDK file count does not match the authoritative pin"
 
 input_key="$({
   printf 'recipe-key=%s\n' "$recipe_key"

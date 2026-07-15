@@ -281,8 +281,8 @@ usage() {
 Usage: tools/setup/setup.sh [--verify]
 
 Without arguments, validate the committed AArch64 release/profile and ARMv7
-release AOT runtimes, install the pinned Flutter SDK when absent, and bootstrap
-Dart/Flutter dependencies.
+release AOT runtimes, validate the authoritative ARM compiler-SDK pin, install
+the pinned Flutter SDK when absent, and bootstrap Dart/Flutter dependencies.
 
   --verify  Validate existing SDK and committed artifacts without downloads.
 
@@ -299,6 +299,7 @@ main() {
   local release_artifact_dir
   local profile_artifact_dir
   local arm_release_artifact_dir
+  local arm_sdk_pin
   local pub_cache
   local pluto_bin_dir
   local pluto_executable
@@ -320,6 +321,7 @@ main() {
   release_artifact_dir="$root/third_party/engine/$engine_version/linux-arm64-release"
   profile_artifact_dir="$root/third_party/engine/$engine_version/linux-arm64-profile"
   arm_release_artifact_dir="$root/third_party/engine/$engine_version/linux-arm-release"
+  arm_sdk_pin="$root/tools/pluto/pins/arm-sdk.pin"
 
   printf 'Validating committed release runtime: %s\n' "$release_artifact_dir"
   validate_engine_artifacts \
@@ -332,6 +334,9 @@ main() {
   validate_engine_artifacts \
     "$arm_release_artifact_dir" "$flutter_version" "$engine_version" \
     release linux-arm
+  printf 'Validating authoritative ARM compiler SDK pin: %s\n' "$arm_sdk_pin"
+  PLUTO_ARM_SDK_PIN="$arm_sdk_pin" \
+    bash "$root/tools/build/verify-arm-sdk.sh" --pin-only
 
   if [[ ! -e "$sdk_dir" ]]; then
     [[ "$verify_only" -eq 0 ]] || fail \
@@ -345,7 +350,6 @@ main() {
   env HOME="${TMPDIR:-/tmp}" DART_DISABLE_ANALYTICS=1 \
     "$sdk_dir/bin/cache/dart-sdk/bin/dart" \
     "$root/tools/codegen/generate_device_profiles.dart" --check
-
   printf 'Validating generated RM1 RGB565 optical LUT\n'
   env HOME="${TMPDIR:-/tmp}" DART_DISABLE_ANALYTICS=1 \
     "$sdk_dir/bin/cache/dart-sdk/bin/dart" \
@@ -356,7 +360,7 @@ main() {
     "RM1 RGB565 optical LUT"
 
   if [[ "$verify_only" -eq 1 ]]; then
-    printf 'Setup verified: Flutter %s, engine %s, linux-arm64 and linux-arm AOT artifacts.\n' \
+    printf 'Setup verified: Flutter %s, engine %s, pinned ARM SDK, linux-arm64 and linux-arm AOT artifacts.\n' \
       "$flutter_version" "$engine_version"
     return 0
   fi
