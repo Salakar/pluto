@@ -41,6 +41,10 @@ inline constexpr std::uint32_t kGlassHandoffVersion = 2;
 inline constexpr std::uint32_t kGlassHandoffMaxChain = 8;
 inline constexpr std::int64_t kGlassHandoffMaxAgeSec = 60;
 inline constexpr std::uint64_t kGlassHandoffMaxBytes = 128ull << 20;
+// Accommodates the largest supported native RGB565 logical mirror plus its
+// backend envelope while bounding preallocation from an untrusted bundle.
+inline constexpr std::uint64_t kGlassHandoffMaxPresenterPayloadBytes =
+    8ull * 1024ull * 1024ull;
 inline constexpr char kGlassHandoffDefaultPath[] = "/run/pluto/glass.handoff";
 
 enum GlassHandoffFlags : std::uint32_t {
@@ -69,6 +73,9 @@ enum class GlassHandoffSection : std::uint32_t {
   kXochitlHistory = 5,
   // Opaque to the presenter; encoded and validated by FrameRenderer.
   kRenderer = 6,
+  // Opaque to the common bundle; encoded and validated by the native
+  // presenter backend that owns the logical glass mirror.
+  kPresenter = 7,
 };
 
 struct GlassHandoffClock {
@@ -147,6 +154,10 @@ struct GlassHandoffBundle {
   std::uint32_t chain = 0;
   GlassHandoffCoreState core;
   std::vector<std::uint8_t> renderer_payload;
+  // Optional for presenters such as Move whose exact state already lives in
+  // the core/renderer sections. Native backends use this bounded section for
+  // their own exact logical mirror encoding.
+  std::vector<std::uint8_t> presenter_payload;
   // Filled only by glass_handoff_load(); never serialized by save.
   GlassHandoffClaim claim;
 };

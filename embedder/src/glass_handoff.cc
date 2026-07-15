@@ -907,7 +907,8 @@ bool has_usable_written_clock(const GlassHandoffClock &clock) {
 bool validate_core_sizes(const GlassHandoffBundle &bundle) {
   const GlassHandoffIdentity &id = bundle.identity;
   if (!validate_identity_shape(id) || bundle.renderer.width == 0 ||
-      bundle.renderer.height == 0 || bundle.renderer_payload.empty()) {
+      bundle.renderer.height == 0 || bundle.renderer_payload.empty() ||
+      bundle.presenter_payload.size() > kGlassHandoffMaxPresenterPayloadBytes) {
     return false;
   }
   std::uint64_t plane = 0;
@@ -1269,7 +1270,8 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
         !get_u64(all, &cursor, &section.checksum) || section_flags != 0 ||
         raw_type <
             static_cast<std::uint32_t>(GlassHandoffSection::kEngineLevels) ||
-        raw_type > static_cast<std::uint32_t>(GlassHandoffSection::kRenderer) ||
+        raw_type >
+            static_cast<std::uint32_t>(GlassHandoffSection::kPresenter) ||
         raw_type <= previous_type || section.offset != expected_offset ||
         section.size == 0 ||
         !checked_add(section.offset, section.size, &expected_offset) ||
@@ -1362,6 +1364,8 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
       find_section(sections, GlassHandoffSection::kXochitlHistory);
   const SectionView *renderer =
       find_section(sections, GlassHandoffSection::kRenderer);
+  const SectionView *presenter =
+      find_section(sections, GlassHandoffSection::kPresenter);
   const bool color = (header.identity.flags & kGlassHandoffFlagExactColor) != 0;
   std::uint64_t history_bytes = 0;
   if (!checked_mul(header.identity.history_stride, header.identity.history_rows,
@@ -1376,7 +1380,9 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
        (levels == nullptr || levels->size != plane || history != nullptr))) {
     return GlassHandoffReject::kLayout;
   }
-  if (renderer->size > kMaximumRendererPayloadBytes) {
+  if (renderer->size > kMaximumRendererPayloadBytes ||
+      (presenter != nullptr &&
+       presenter->size > kGlassHandoffMaxPresenterPayloadBytes)) {
     return GlassHandoffReject::kTooLarge;
   }
 
@@ -1431,6 +1437,14 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
   if (read_status != ReadStatus::kOk) {
     return reject_for_read(read_status);
   }
+  if (presenter != nullptr) {
+    loaded.presenter_payload.resize(static_cast<std::size_t>(presenter->size));
+    read_status = read_byte_section(
+        file.get(), *presenter, loaded.presenter_payload, &payload_checksum);
+    if (read_status != ReadStatus::kOk) {
+      return reject_for_read(read_status);
+    }
+  }
   if (payload_checksum != header.payload_checksum) {
     return GlassHandoffReject::kChecksum;
   }
@@ -1467,13 +1481,14 @@ bool glass_handoff_save(const GlassHandoffLease &lease, const std::string &path,
       !validate_core_sizes(bundle)) {
     return false;
   }
-  if (bundle.renderer_payload.size() > kMaximumRendererPayloadBytes) {
+  if (bundle.renderer_payload.size() > kMaximumRendererPayloadBytes ||
+      bundle.presenter_payload.size() > kGlassHandoffMaxPresenterPayloadBytes) {
     return false;
   }
   reclaim_stale_private_files(path);
 
   std::vector<PayloadView> payloads;
-  payloads.reserve(6);
+  payloads.reserve(7);
   if (!bundle.core.engine_levels.empty()) {
     payloads.push_back(
         {GlassHandoffSection::kEngineLevels, PayloadEncoding::kBytes,
@@ -1497,6 +1512,11 @@ bool glass_handoff_save(const GlassHandoffLease &lease, const std::string &path,
   payloads.push_back({GlassHandoffSection::kRenderer, PayloadEncoding::kBytes,
                       bundle.renderer_payload.data(),
                       bundle.renderer_payload.size()});
+  if (!bundle.presenter_payload.empty()) {
+    payloads.push_back(
+        {GlassHandoffSection::kPresenter, PayloadEncoding::kBytes,
+         bundle.presenter_payload.data(), bundle.presenter_payload.size()});
+  }
 
   WireHeader header;
   header.identity = bundle.identity;
