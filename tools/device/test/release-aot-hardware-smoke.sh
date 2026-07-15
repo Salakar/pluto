@@ -4,6 +4,7 @@ set -euo pipefail
 DEVICE="${1:-root@10.11.99.1}"
 CLI="${PLUTO_CLI:-pluto}"
 STAGE_DELAY="${PLUTO_ACCEPTANCE_STAGE_DELAY:-0}"
+STAGE_HOOK="${PLUTO_ACCEPTANCE_STAGE_HOOK:-}"
 CODEX_REQUEST="${PLUTO_ACCEPTANCE_CODEX_REQUEST:-0}"
 SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
 
@@ -15,9 +16,21 @@ SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
   echo "release AOT smoke: PLUTO_ACCEPTANCE_CODEX_REQUEST must be 0 or 1" >&2
   exit 64
 }
+[[ -z "$STAGE_HOOK" || -x "$STAGE_HOOK" ]] || {
+  echo "release AOT smoke: stage hook is not executable: $STAGE_HOOK" >&2
+  exit 64
+}
 
 remote() {
   ssh "${SSH_OPTIONS[@]}" "$DEVICE" "$1"
+}
+
+stage() {
+  local label="$1"
+  if [[ -n "$STAGE_HOOK" ]]; then
+    "$STAGE_HOOK" "$label"
+  fi
+  sleep "$STAGE_DELAY"
 }
 
 verify_app() {
@@ -88,6 +101,7 @@ seq_after=\${2#seq=}
 [ \"\$seq_after\" -gt \"\$seq_before\" ] || exit 86
 systemctl is-active --quiet xochitl.service
 echo \"release AOT smoke: PASS $app_id pid=\$pid present_after=\${i}s\""
+  stage "app-$app_id"
 }
 
 open_switcher() {
@@ -129,7 +143,7 @@ echo \"release AOT smoke: switcher never became ready for $origin\" >&2
 echo \"active=\$active cmd=\$cmd\" >&2
 exit 87"
 
-  sleep "$STAGE_DELAY"
+  stage "switcher-$origin"
 }
 
 select_switcher_preview() {
@@ -199,7 +213,7 @@ done
 echo \"release AOT smoke: switcher UI did not foreground \$target\" >&2
 exit 93"
 
-  sleep "$STAGE_DELAY"
+  stage "switcher-selected-$target"
 }
 
 inject_ink_stroke() {
@@ -239,7 +253,7 @@ done
 echo \"release AOT smoke: Ink stroke produced no completion-backed present\" >&2
 exit 94"
 
-  sleep "$STAGE_DELAY"
+  stage "ink-stroke"
 }
 
 verify_real_codex() {
@@ -313,7 +327,6 @@ select_switcher_preview
 verify_app dev.pluto.ink /home/root/pluto/apps/dev.pluto.ink
 inject_ink_stroke
 verify_app dev.pluto.launcher /home/root/pluto/launcher
-sleep "$STAGE_DELAY"
 
 remote 'set -eu
 [ ! -d /home/root/pluto/engine/debug ]
