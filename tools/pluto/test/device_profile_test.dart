@@ -8,14 +8,26 @@ void main() {
       deviceProfileById('rm1')!.runtime.kernelRelease,
       '5.4.70-v1.6.3-rm10x',
     );
+    expect(
+      deviceProfileById('rm1')!.runtime.takeoverQuiesceMilliseconds,
+      5500,
+    );
     expect(deviceProfileById('rm2')!.runtime.firmwareBuild, '20260629074044');
     expect(
       deviceProfileById('rm2')!.runtime.kernelRelease,
       '5.4.70-v1.6.3-rm11x',
     );
     expect(
+      deviceProfileById('rm2')!.runtime.takeoverQuiesceMilliseconds,
+      300,
+    );
+    expect(
       deviceProfileById('move')!.runtime.kernelRelease,
       '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
+    );
+    expect(
+      deviceProfileById('move')!.runtime.takeoverQuiesceMilliseconds,
+      300,
     );
   });
 

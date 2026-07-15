@@ -104,6 +104,12 @@ is_token() {
   case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; *) return 0 ;; esac
 }
 
+sleep_milliseconds() {
+  is_uint "$1" || return 64
+  milliseconds=$1
+  sleep "$(printf '%d.%03d' "$((milliseconds / 1000))" "$((milliseconds % 1000))")"
+}
+
 validate_profile_runtime_identity() {
   firmware_file=/etc/version
   uname_command=uname
@@ -255,6 +261,11 @@ configure_profile() {
   fi
   if [ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" != 1 ]; then
     log "profile rejected: native session for '$PLUTO_PROFILE_ID' has not passed its device acceptance gate"
+    return 78
+  fi
+  if ! is_uint "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" ||
+     [ "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" -gt 10000 ]; then
+    log "profile rejected: panel takeover quiesce is invalid"
     return 78
   fi
   validate_profile_runtime_identity || return $?
@@ -1428,7 +1439,8 @@ start() {
     systemctl reset-failed xochitl.service 2>/dev/null || true
     systemctl stop xochitl.service 2>/dev/null || true
   fi
-  sleep 0.3
+  log "waiting ${PLUTO_PROFILE_TAKEOVER_QUIESCE_MS} ms for stock panel work to quiesce"
+  sleep_milliseconds "$PLUTO_PROFILE_TAKEOVER_QUIESCE_MS" || return $?
   current="$(cat "$DEFAULT_APP_FILE" 2>/dev/null || true)"
   if [ -n "$current" ] && [ "$current" != "$LAUNCHER_ID" ]; then
     log "boot default app: $current"

@@ -73,7 +73,11 @@ struct RegionSchedulerConfig {
   std::array<uint32_t, k_refresh_class_count> latency_model_us = {
       260000, 450000, 450000, 1000000};
   float fence_margin = 1.25f;
-  uint32_t fence_timeout_ms = 3000;
+  // Native presenters may block for up to five seconds in the kernel while
+  // waiting for authoritative panel completion (the RM1 EPDC contract is the
+  // slowest current case).  The scheduler must never declare that same update
+  // lost before the backend's wait has had a chance to return.
+  uint32_t fence_timeout_ms = 5500;
   // Structural Full promotion moved to the ClassifyLadder scenecut rung;
   // guard dilation moved to the GuardBandPackager. The scheduler
   // dispatches the rects it is given.

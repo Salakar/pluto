@@ -23,6 +23,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       nativeSessionEnabled: false,
       firmwareBuild: '20260612085811',
       kernelRelease: '5.4.70-v1.6.3-rm10x',
+      takeoverQuiesceMilliseconds: 5500,
       displayDevice: '/dev/fb0',
       display: DisplayContract(
         scanoutWidth: 1404,
@@ -110,6 +111,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       nativeSessionEnabled: false,
       firmwareBuild: '20260629074044',
       kernelRelease: '5.4.70-v1.6.3-rm11x',
+      takeoverQuiesceMilliseconds: 300,
       displayDevice: '/dev/fb0',
       display: DisplayContract(
         scanoutWidth: 260,
@@ -200,6 +202,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       nativeSessionEnabled: true,
       firmwareBuild: '20260629074044',
       kernelRelease: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
+      takeoverQuiesceMilliseconds: 300,
       displayDevice: '/dev/dri/card0',
       display: DisplayContract(
         scanoutWidth: 365,

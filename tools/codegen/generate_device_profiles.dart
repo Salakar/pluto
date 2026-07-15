@@ -63,6 +63,10 @@ final class _Runtime {
     : nativeSessionEnabled = _boolean(json, 'nativeSessionEnabled'),
       firmwareBuild = _string(json, 'firmwareBuild'),
       kernelRelease = _string(json, 'kernelRelease'),
+      takeoverQuiesceMilliseconds = _integer(
+        json,
+        'takeoverQuiesceMilliseconds',
+      ),
       displayDevice = _string(json, 'displayDevice'),
       display = _DisplayContract(_map(json, 'display')),
       waveform = _Waveform(_map(json, 'waveform')),
@@ -84,6 +88,7 @@ final class _Runtime {
   final bool nativeSessionEnabled;
   final String firmwareBuild;
   final String kernelRelease;
+  final int takeoverQuiesceMilliseconds;
   final String displayDevice;
   final _DisplayContract display;
   final _Waveform waveform;
@@ -439,6 +444,9 @@ void _validate(List<_Profile> profiles) {
     ).hasMatch(profile.runtime.kernelRelease)) {
       _fail('${profile.id} kernel release is not a safe exact token');
     }
+    if (profile.runtime.takeoverQuiesceMilliseconds > 10000) {
+      _fail('${profile.id} panel takeover quiesce exceeds 10 seconds');
+    }
     _validateDisplayContract(profile);
     if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(profile.panel.signature)) {
       _fail('${profile.id} panel signature is not shell-safe');
@@ -765,6 +773,7 @@ String _cpp(List<_Profile> profiles) {
     ..writeln('  bool native_session_enabled;')
     ..writeln('  std::string_view firmware_build;')
     ..writeln('  std::string_view kernel_release;')
+    ..writeln('  std::uint32_t takeover_quiesce_milliseconds;')
     ..writeln('  std::string_view display_device;')
     ..writeln('  GeneratedDisplayContract display;')
     ..writeln('  GeneratedWaveformProfile waveform;')
@@ -875,6 +884,9 @@ String _cpp(List<_Profile> profiles) {
       )
       ..writeln(
         '                    .kernel_release = ${_cppString(profile.runtime.kernelRelease)},',
+      )
+      ..writeln(
+        '                    .takeover_quiesce_milliseconds = ${profile.runtime.takeoverQuiesceMilliseconds},',
       )
       ..writeln(
         '                    .display_device = ${_cppString(profile.runtime.displayDevice)},',
@@ -1178,6 +1190,9 @@ String _dart(List<_Profile> profiles) {
         '          kernelRelease: ${_dartString(profile.runtime.kernelRelease)},',
       )
       ..writeln(
+        '          takeoverQuiesceMilliseconds: ${profile.runtime.takeoverQuiesceMilliseconds},',
+      )
+      ..writeln(
         '          displayDevice: ${_dartString(profile.runtime.displayDevice)},',
       )
       ..writeln('          display: DisplayContract(')
@@ -1414,6 +1429,9 @@ String _shell(List<_Profile> profiles) {
       )
       ..writeln(
         "      PLUTO_PROFILE_KERNEL_RELEASE=${_shellString(profile.runtime.kernelRelease)}",
+      )
+      ..writeln(
+        '      PLUTO_PROFILE_TAKEOVER_QUIESCE_MS=${profile.runtime.takeoverQuiesceMilliseconds}',
       )
       ..writeln(
         "      PLUTO_PROFILE_DISPLAY_DEVICE=${_shellString(profile.runtime.displayDevice)}",

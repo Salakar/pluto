@@ -264,6 +264,28 @@ TEST(RegionSchedulerBehaviorTest, SynchronousCompletionDuringPresentIsHonored) {
   ASSERT_EQ(presenter.calls.size(), 2u);
 }
 
+TEST(RegionSchedulerBehaviorTest,
+     DefaultRealCompletionFenceOutlivesFiveSecondBackendWait) {
+  ScriptedPresenter presenter;
+  RegionSchedulerConfig config;
+  config.width = 128;
+  config.height = 128;
+  config.presenter_reports_completion = true;
+  RegionScheduler scheduler = make_scheduler(&presenter, config);
+
+  submit_one(&scheduler, PlutoRect{0, 0, 16, 16}, kPlutoRefreshUi, 0);
+  scheduler.tick(0);
+  ASSERT_TRUE(scheduler.anything_inflight());
+
+  scheduler.poll_completions(5'000'000);
+  EXPECT_TRUE(scheduler.anything_inflight());
+  EXPECT_FALSE(scheduler.real_completion_overdue());
+
+  scheduler.poll_completions(5'500'000);
+  EXPECT_FALSE(scheduler.anything_inflight());
+  EXPECT_TRUE(scheduler.real_completion_overdue());
+}
+
 TEST(RegionSchedulerBehaviorTest, PixelResetStagesWaitForCompletion) {
   ScriptedPresenter presenter;
   RegionSchedulerConfig config = test_config();
