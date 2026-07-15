@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -24,6 +23,8 @@
 #endif
 #include <unistd.h>
 
+#include "renderer/quantize.h"
+
 namespace pluto::native::mxcfb {
 namespace {
 
@@ -33,8 +34,9 @@ constexpr std::size_t kMaximumDamageRects = 64;
 constexpr std::byte kSafeInitialByte{0xff};
 constexpr std::uint32_t kHandoffTilePixels = 32;
 constexpr std::size_t kMaximumRendererHandoffBytes = 32u << 20;
+constexpr std::uint8_t kPaperWhiteOpticalLevel = 30;
 constexpr std::string_view kHandoffPipelineTag =
-    "pluto-rm1-mxcfb-warm-handoff-v1";
+    "pluto-rm1-mxcfb-warm-handoff-v2-presenter-payload";
 constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagInkPriority | kPlutoPresentFlagPreDithered |
     kPlutoPresentFlagSettle | kPlutoPresentFlagSparkle |
@@ -49,6 +51,30 @@ enum class HandoffDecision : std::uint8_t {
   kAccepted,
   kRejected,
 };
+
+const std::array<std::uint8_t, 1u << 16u> &rm1_rgb565_optical_level_lut() {
+  // RM1 receives the renderer's settled RGB565 gray mirror. Convert that
+  // exact logical value back to the canonical 16-gray 5-bit lattice used by
+  // monochrome GlassHandoffCoreState. This LUT makes the two full-plane
+  // stage/import audits one lookup per pixel while remaining byte-derived
+  // from the renderer's reference quantizers.
+  static const std::array<std::uint8_t, 1u << 16u> lut = [] {
+    std::array<std::uint8_t, 1u << 16u> result{};
+    for (std::size_t pixel = 0; pixel < result.size(); ++pixel) {
+      const std::uint8_t gray8 =
+          quantize_gray16(rgb565_luma8(static_cast<std::uint16_t>(pixel)), 127);
+      result[pixel] = static_cast<std::uint8_t>((gray8 / 17u) * 2u);
+    }
+    return result;
+  }();
+  return lut;
+}
+
+std::uint16_t load_rgb565(const std::uint8_t *pixel) {
+  return static_cast<std::uint16_t>(
+      static_cast<std::uint16_t>(pixel[0]) |
+      (static_cast<std::uint16_t>(pixel[1]) << 8u));
+}
 
 class HandoffFingerprint final {
 public:
@@ -168,6 +194,9 @@ bool build_handoff_identity(const GeneratedDeviceProfile &profile,
   const GeneratedDisplayContract &display = profile.runtime.display;
   HandoffFingerprint pipeline;
   pipeline.add_string(kHandoffPipelineTag);
+  const auto &optical_lut = rm1_rgb565_optical_level_lut();
+  pipeline.add_u64(optical_lut.size());
+  pipeline.add_u64(glass_handoff_crc64(optical_lut));
   pipeline.add_string(profile.id);
   pipeline.add_string(profile.wire_model);
   pipeline.add_string(profile.codename);
@@ -311,6 +340,11 @@ void apply_stock_update_policy(PlutoRefreshClass refresh_class,
 }
 
 } // namespace
+
+bool build_mxcfb_handoff_identity_for_testing(
+    const GeneratedDeviceProfile &profile, GlassHandoffIdentity *out) {
+  return build_handoff_identity(profile, out);
+}
 
 class MxcfbDisplayBackend::Impl final {
 public:
@@ -1007,7 +1041,8 @@ private:
                            std::vector<std::uint8_t> *out_mirror) const {
     if (out_mirror == nullptr || bundle.identity != handoff_identity_ ||
         bundle.core.engine_temperature_bin != 0 ||
-        bundle.core.admission_temperature_bin != 0) {
+        bundle.core.admission_temperature_bin != 0 ||
+        bundle.presenter_payload.size() != frame_size()) {
       return false;
     }
     const std::size_t storage_stride = handoff_identity_.engine_stride;
@@ -1028,6 +1063,8 @@ private:
         bundle.core.engine_stress.size() != tile_cols * tile_rows ||
         bundle.core.engine_rescan.size() != tile_cols * tile_rows ||
         !bundle.core.xochitl_history_ab.empty() ||
+        std::any_of(bundle.core.engine_dc.begin(), bundle.core.engine_dc.end(),
+                    [](std::int8_t value) { return value != 0; }) ||
         std::any_of(bundle.core.engine_stress.begin(),
                     bundle.core.engine_stress.end(),
                     [](std::uint16_t value) { return value != 0; }) ||
@@ -1037,29 +1074,29 @@ private:
       return false;
     }
 
-    try {
-      out_mirror->resize(frame_size());
-    } catch (const std::bad_alloc &) {
-      return false;
-    }
+    const auto &optical_lut = rm1_rgb565_optical_level_lut();
     const std::size_t width = static_cast<std::size_t>(profile_.panel.width);
     for (std::size_t y = 0; y < height; ++y) {
-      const std::size_t source_row = y * storage_stride;
-      const std::size_t destination_row = y * tight_stride();
+      const std::size_t level_row = y * storage_stride;
+      const std::size_t mirror_row = y * tight_stride();
       for (std::size_t x = 0; x < width; ++x) {
-        const std::size_t source = source_row + x;
-        const std::size_t destination = destination_row + x * kBytesPerPixel;
-        (*out_mirror)[destination] = bundle.core.engine_levels[source];
-        (*out_mirror)[destination + 1u] =
-            std::bit_cast<std::uint8_t>(bundle.core.engine_dc[source]);
-      }
-      for (std::size_t x = width; x < storage_stride; ++x) {
-        const std::size_t padding = source_row + x;
-        if (bundle.core.engine_levels[padding] != 0 ||
-            bundle.core.engine_dc[padding] != 0) {
+        const std::size_t pixel = mirror_row + x * kBytesPerPixel;
+        if (bundle.core.engine_levels[level_row + x] !=
+            optical_lut[load_rgb565(bundle.presenter_payload.data() + pixel)]) {
           return false;
         }
       }
+      for (std::size_t x = width; x < storage_stride; ++x) {
+        if (bundle.core.engine_levels[level_row + x] !=
+            kPaperWhiteOpticalLevel) {
+          return false;
+        }
+      }
+    }
+    try {
+      *out_mirror = bundle.presenter_payload;
+    } catch (const std::bad_alloc &) {
+      return false;
     }
     return true;
   }
@@ -1111,11 +1148,13 @@ private:
     }
     bundle->core.engine_temperature_bin = 0;
     bundle->core.admission_temperature_bin = 0;
-    bundle->core.engine_levels.assign(plane, 0);
+    bundle->core.engine_levels.assign(plane, kPaperWhiteOpticalLevel);
     bundle->core.engine_dc.assign(plane, 0);
     bundle->core.engine_stress.assign(tile_cols * tile_rows, 0);
     bundle->core.engine_rescan.assign(tile_cols * tile_rows, 0);
     bundle->core.xochitl_history_ab.clear();
+    bundle->presenter_payload = mirror_;
+    const auto &optical_lut = rm1_rgb565_optical_level_lut();
     const std::size_t width = static_cast<std::size_t>(profile_.panel.width);
     for (std::size_t y = 0; y < height; ++y) {
       const std::size_t source_row = y * tight_stride();
@@ -1123,9 +1162,8 @@ private:
       for (std::size_t x = 0; x < width; ++x) {
         const std::size_t source = source_row + x * kBytesPerPixel;
         const std::size_t destination = destination_row + x;
-        bundle->core.engine_levels[destination] = mirror_[source];
-        bundle->core.engine_dc[destination] =
-            std::bit_cast<std::int8_t>(mirror_[source + 1u]);
+        bundle->core.engine_levels[destination] =
+            optical_lut[load_rgb565(mirror_.data() + source)];
       }
     }
     return true;

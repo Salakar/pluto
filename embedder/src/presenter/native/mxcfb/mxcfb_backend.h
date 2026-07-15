@@ -22,6 +22,11 @@ struct MxcfbHandoffOptions {
   GlassHandoffClock (*now_for_testing)() = nullptr;
 };
 
+// Test-only identity seam for inspecting a bundle produced by the backend.
+// Production routing remains internal to MxcfbDisplayBackend.
+bool build_mxcfb_handoff_identity_for_testing(
+    const GeneratedDeviceProfile &profile, GlassHandoffIdentity *out);
+
 // Conservative first native backend for the reMarkable 1 kernel EPDC path.
 // It deliberately admits one request at a time: the mapped framebuffer is the
 // kernel update source, so overlapping writers would otherwise be able to

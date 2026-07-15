@@ -1,5 +1,6 @@
 #include "presenter/native/mxcfb/mxcfb_backend.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -19,6 +20,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "renderer/quantize.h"
+
 namespace {
 
 using pluto::native::NativeBackendHealthState;
@@ -37,6 +40,7 @@ constexpr std::size_t kTightStride = kWidth * 2;
 constexpr std::uint32_t kMappingBytes = kStride * kVirtualHeight;
 constexpr std::uint8_t kInitialPixel = 0x5a;
 constexpr std::uint8_t kSafeInitialPixel = 0xff;
+constexpr std::uint8_t kPaperWhiteOpticalLevel = 30;
 
 const pluto::GeneratedDeviceProfile &rm1_profile() {
   return *pluto::generated_device_profile_by_id("rm1");
@@ -302,6 +306,36 @@ std::uint8_t source_byte(const OwnedRequest &owned, std::uint32_t x_byte,
   return owned.pixels[static_cast<std::size_t>(y) * owned.stride + x_byte];
 }
 
+void store_rgb565(std::vector<std::uint8_t> *bytes, std::size_t stride,
+                  std::uint32_t x, std::uint32_t y, std::uint16_t pixel) {
+  const std::size_t offset = static_cast<std::size_t>(y) * stride + x * 2u;
+  (*bytes)[offset] = static_cast<std::uint8_t>(pixel);
+  (*bytes)[offset + 1u] = static_cast<std::uint8_t>(pixel >> 8u);
+}
+
+std::uint16_t load_rgb565(const std::uint8_t *pixel) {
+  return static_cast<std::uint16_t>(
+      static_cast<std::uint16_t>(pixel[0]) |
+      (static_cast<std::uint16_t>(pixel[1]) << 8u));
+}
+
+std::uint8_t expected_optical_level(std::uint16_t pixel) {
+  const std::uint8_t gray8 =
+      pluto::quantize_gray16(pluto::rgb565_luma8(pixel), 127);
+  return static_cast<std::uint8_t>((gray8 / 17u) * 2u);
+}
+
+std::vector<std::uint8_t>
+tight_visible_frame(const std::vector<std::uint8_t> &mapped) {
+  std::vector<std::uint8_t> tight(kTightStride * kHeight);
+  for (std::uint32_t y = 0; y < kHeight; ++y) {
+    std::memcpy(tight.data() + static_cast<std::size_t>(y) * kTightStride,
+                mapped.data() + static_cast<std::size_t>(y) * kStride,
+                kTightStride);
+  }
+  return tight;
+}
+
 class IsolatedHandoffPath final {
 public:
   IsolatedHandoffPath() {
@@ -358,11 +392,80 @@ void draw_and_stage_handoff(MxcfbDisplayBackend *backend,
   ASSERT_TRUE(probe_and_start(backend, syscalls));
   OwnedRequest content({{{.x = 3, .y = 4, .width = 5, .height = 6}}},
                        kPlutoRefreshUi, 91);
+  store_rgb565(&content.pixels, content.stride, 3, 4, 0x0000u);
+  store_rgb565(&content.pixels, content.stride, 4, 4, 0xffffu);
+  store_rgb565(&content.pixels, content.stride, 5, 4, 0xf800u);
+  store_rgb565(&content.pixels, content.stride, 6, 4, 0x07e0u);
+  store_rgb565(&content.pixels, content.stride, 7, 4, 0x001fu);
   ASSERT_EQ(backend->submit(&content.request), kPlutoStatusOk);
   ASSERT_TRUE(syscalls->wait_for_wait_count(1));
   syscalls->complete_one();
   ASSERT_EQ(backend->wait_idle(1000), kPlutoStatusOk);
   ASSERT_EQ(backend->stage_handoff(&handoff->payload, 1000), kPlutoStatusOk);
+}
+
+bool load_handoff_bundle(const std::string &path,
+                         pluto::GlassHandoffBundle *out) {
+  pluto::GlassHandoffIdentity identity;
+  pluto::GlassHandoffLease lease;
+  return out != nullptr &&
+         pluto::native::mxcfb::build_mxcfb_handoff_identity_for_testing(
+             rm1_profile(), &identity) &&
+         pluto::glass_handoff_acquire_lease(path, &lease) &&
+         pluto::glass_handoff_load(lease, path, identity,
+                                   pluto::glass_handoff_now(),
+                                   out) == pluto::GlassHandoffReject::kNone;
+}
+
+enum class PresenterPayloadMutation {
+  kMissing,
+  kWrongSize,
+  kSameLevelPixel,
+  kOpticalLevel,
+};
+
+bool rewrite_handoff_bundle(const std::string &path,
+                            PresenterPayloadMutation mutation) {
+  pluto::GlassHandoffIdentity identity;
+  pluto::GlassHandoffLease lease;
+  pluto::GlassHandoffBundle bundle;
+  if (!pluto::native::mxcfb::build_mxcfb_handoff_identity_for_testing(
+          rm1_profile(), &identity) ||
+      !pluto::glass_handoff_acquire_lease(path, &lease) ||
+      pluto::glass_handoff_load(lease, path, identity,
+                                pluto::glass_handoff_now(),
+                                &bundle) != pluto::GlassHandoffReject::kNone) {
+    return false;
+  }
+  switch (mutation) {
+  case PresenterPayloadMutation::kMissing:
+    bundle.presenter_payload.clear();
+    break;
+  case PresenterPayloadMutation::kWrongSize:
+    if (bundle.presenter_payload.empty()) {
+      return false;
+    }
+    bundle.presenter_payload.pop_back();
+    break;
+  case PresenterPayloadMutation::kSameLevelPixel: {
+    constexpr std::uint16_t kNearWhite = 0xfffeu;
+    if (bundle.presenter_payload.size() < 2u ||
+        expected_optical_level(kNearWhite) != kPaperWhiteOpticalLevel) {
+      return false;
+    }
+    bundle.presenter_payload[0] = static_cast<std::uint8_t>(kNearWhite);
+    bundle.presenter_payload[1] = static_cast<std::uint8_t>(kNearWhite >> 8u);
+    break;
+  }
+  case PresenterPayloadMutation::kOpticalLevel:
+    if (bundle.core.engine_levels.empty()) {
+      return false;
+    }
+    bundle.core.engine_levels[0] = 0;
+    break;
+  }
+  bundle.written = pluto::glass_handoff_now();
+  return pluto::glass_handoff_save(lease, path, bundle);
 }
 
 pluto::GlassHandoffClock handoff_clock_100() {
@@ -973,6 +1076,147 @@ TEST(MxcfbBackend,
   ASSERT_TRUE(callbacks.wait_for_count(1));
   EXPECT_TRUE(callbacks.frame_ids() == std::vector<std::uint64_t>({92}));
   EXPECT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
+}
+
+TEST(MxcfbBackend, BundleSeparatesExactRgb565MirrorFromMonoOpticalState) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls syscalls;
+  std::vector<std::uint8_t> expected_mirror;
+  {
+    MxcfbDisplayBackend backend(rm1_profile(), fake_device(&syscalls), 250,
+                                handoff_options(path.get()));
+    draw_and_stage_handoff(&backend, &syscalls, &staged_payload);
+    expected_mirror = tight_visible_frame(syscalls.mapped_storage);
+    backend.stop();
+  }
+
+  pluto::GlassHandoffBundle bundle;
+  ASSERT_TRUE(load_handoff_bundle(path.get(), &bundle));
+  EXPECT_EQ(bundle.presenter_payload.size(), kTightStride * kHeight);
+  EXPECT_TRUE(bundle.presenter_payload == expected_mirror);
+  EXPECT_EQ(bundle.core.engine_levels.size(),
+            static_cast<std::size_t>(kVirtualWidth) * kHeight);
+  EXPECT_TRUE(std::all_of(
+      bundle.core.engine_levels.begin(), bundle.core.engine_levels.end(),
+      [](std::uint8_t level) {
+        return level <= kPaperWhiteOpticalLevel && (level & 1u) == 0;
+      }));
+  EXPECT_EQ(bundle.core.engine_dc.size(), bundle.core.engine_levels.size());
+  EXPECT_TRUE(std::all_of(bundle.core.engine_dc.begin(),
+                          bundle.core.engine_dc.end(),
+                          [](std::int8_t value) { return value == 0; }));
+  EXPECT_TRUE(std::all_of(bundle.core.engine_stress.begin(),
+                          bundle.core.engine_stress.end(),
+                          [](std::uint16_t value) { return value == 0; }));
+  EXPECT_TRUE(std::all_of(bundle.core.engine_rescan.begin(),
+                          bundle.core.engine_rescan.end(),
+                          [](std::int32_t value) { return value == 0; }));
+
+  const auto payload_pixel = [&bundle](std::uint32_t x, std::uint32_t y) {
+    return load_rgb565(bundle.presenter_payload.data() +
+                       static_cast<std::size_t>(y) * kTightStride + x * 2u);
+  };
+  const auto optical_level = [&bundle](std::uint32_t x, std::uint32_t y) {
+    return bundle.core
+        .engine_levels[static_cast<std::size_t>(y) * kVirtualWidth + x];
+  };
+  EXPECT_EQ(payload_pixel(3, 4), 0x0000u);
+  EXPECT_EQ(payload_pixel(4, 4), 0xffffu);
+  EXPECT_EQ(payload_pixel(5, 4), 0xf800u);
+  EXPECT_EQ(payload_pixel(6, 4), 0x07e0u);
+  EXPECT_EQ(payload_pixel(7, 4), 0x001fu);
+  for (std::uint32_t x = 3; x <= 7; ++x) {
+    EXPECT_EQ(optical_level(x, 4), expected_optical_level(payload_pixel(x, 4)));
+  }
+  EXPECT_EQ(optical_level(kWidth, 4), kPaperWhiteOpticalLevel);
+  EXPECT_EQ(optical_level(kVirtualWidth - 1u, 4), kPaperWhiteOpticalLevel);
+
+  bool complete_plane_matches = true;
+  for (std::uint32_t y = 0; y < kHeight && complete_plane_matches; ++y) {
+    const std::size_t payload_row = static_cast<std::size_t>(y) * kTightStride;
+    const std::size_t level_row = static_cast<std::size_t>(y) * kVirtualWidth;
+    for (std::uint32_t x = 0; x < kWidth; ++x) {
+      const std::uint16_t pixel =
+          load_rgb565(bundle.presenter_payload.data() + payload_row + x * 2u);
+      if (bundle.core.engine_levels[level_row + x] !=
+          expected_optical_level(pixel)) {
+        complete_plane_matches = false;
+        break;
+      }
+    }
+    for (std::uint32_t x = kWidth; x < kVirtualWidth && complete_plane_matches;
+         ++x) {
+      if (bundle.core.engine_levels[level_row + x] != kPaperWhiteOpticalLevel) {
+        complete_plane_matches = false;
+      }
+    }
+  }
+  EXPECT_TRUE(complete_plane_matches);
+}
+
+TEST(MxcfbBackend, MissingOrWrongSizePresenterPayloadFallsBackCold) {
+  for (const PresenterPayloadMutation mutation :
+       {PresenterPayloadMutation::kMissing,
+        PresenterPayloadMutation::kWrongSize}) {
+    IsolatedHandoffPath path;
+    OwnedHandoffPayload staged_payload;
+    BlockingMxcfbSyscalls outgoing_syscalls;
+    std::vector<std::uint8_t> inherited_framebuffer;
+    {
+      MxcfbDisplayBackend outgoing(rm1_profile(),
+                                   fake_device(&outgoing_syscalls), 260,
+                                   handoff_options(path.get()));
+      draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+      inherited_framebuffer = outgoing_syscalls.mapped_storage;
+      outgoing.stop();
+    }
+    ASSERT_TRUE(rewrite_handoff_bundle(path.get(), mutation));
+
+    BlockingMxcfbSyscalls incoming_syscalls;
+    incoming_syscalls.mapped_storage = inherited_framebuffer;
+    MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                                 270, handoff_options(path.get()));
+    ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+    const PlutoPresenterConfig config = presenter_config();
+    ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+    EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+    EXPECT_EQ(incoming_syscalls.sent_updates().size(), 1U);
+    EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+    PlutoHandoffPayload received{.struct_size = sizeof(PlutoHandoffPayload)};
+    EXPECT_EQ(incoming.get_handoff(&received), kPlutoStatusAgain);
+  }
+}
+
+TEST(MxcfbBackend, CrcValidPresenterOrOpticalTamperFallsBackCold) {
+  for (const PresenterPayloadMutation mutation :
+       {PresenterPayloadMutation::kSameLevelPixel,
+        PresenterPayloadMutation::kOpticalLevel}) {
+    IsolatedHandoffPath path;
+    OwnedHandoffPayload staged_payload;
+    BlockingMxcfbSyscalls outgoing_syscalls;
+    std::vector<std::uint8_t> inherited_framebuffer;
+    {
+      MxcfbDisplayBackend outgoing(rm1_profile(),
+                                   fake_device(&outgoing_syscalls), 280,
+                                   handoff_options(path.get()));
+      draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+      inherited_framebuffer = outgoing_syscalls.mapped_storage;
+      outgoing.stop();
+    }
+    ASSERT_TRUE(rewrite_handoff_bundle(path.get(), mutation));
+
+    BlockingMxcfbSyscalls incoming_syscalls;
+    incoming_syscalls.mapped_storage = inherited_framebuffer;
+    MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                                 290, handoff_options(path.get()));
+    ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+    const PlutoPresenterConfig config = presenter_config();
+    ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+    EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+    EXPECT_EQ(incoming_syscalls.sent_updates().size(), 1U);
+    EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
+  }
 }
 
 TEST(MxcfbBackend, RendererRejectionDiscardsCandidateAndPerformsColdRefresh) {
