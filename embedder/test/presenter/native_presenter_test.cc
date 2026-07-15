@@ -34,15 +34,19 @@ TEST(NativePresenter, AdmitsOnlyAcceptedImplementedProfiles) {
   ASSERT_NE(rm2, nullptr);
   ASSERT_NE(move, nullptr);
 
-  EXPECT_FALSE(pluto::native::native_display_backend_is_implemented(*rm1));
-  EXPECT_FALSE(pluto::native::native_display_backend_is_implemented(*rm2));
+  EXPECT_TRUE(pluto::native::native_display_backend_is_implemented(*rm1));
+  EXPECT_TRUE(pluto::native::native_display_backend_is_implemented(*rm2));
   EXPECT_TRUE(pluto::native::native_display_backend_is_implemented(*move));
 
   PlutoStatus status = kPlutoStatusOk;
-  EXPECT_EQ(pluto::native::make_native_display_backend(*rm1, &status), nullptr);
-  EXPECT_EQ(status, kPlutoStatusUnsupported);
-  EXPECT_EQ(pluto::native::make_native_display_backend(*rm2, &status), nullptr);
-  EXPECT_EQ(status, kPlutoStatusUnsupported);
+  auto rm1_backend = pluto::native::make_native_display_backend(*rm1, &status);
+  ASSERT_NE(rm1_backend, nullptr);
+  EXPECT_EQ(status, kPlutoStatusOk);
+  EXPECT_EQ(rm1_backend->driver_name(), "mxcfb_epdc");
+  auto rm2_backend = pluto::native::make_native_display_backend(*rm2, &status);
+  ASSERT_NE(rm2_backend, nullptr);
+  EXPECT_EQ(status, kPlutoStatusOk);
+  EXPECT_EQ(rm2_backend->driver_name(), "lcdif_tcon");
   EXPECT_NE(pluto::native::make_native_display_backend(*move, &status),
             nullptr);
   EXPECT_EQ(status, kPlutoStatusOk);
@@ -55,16 +59,21 @@ TEST(NativePresenter, AdmitsOnlyAcceptedImplementedProfiles) {
             nullptr);
   EXPECT_EQ(status, kPlutoStatusUnsupported);
 
-  EXPECT_FALSE(pluto::native::native_display_backend_is_implemented(*rm1));
-  pluto::GeneratedDeviceProfile accepted_rm1 = *rm1;
-  accepted_rm1.runtime.native_session_enabled = true;
-  EXPECT_TRUE(
-      pluto::native::native_display_backend_is_implemented(accepted_rm1));
-  auto rm1_backend =
-      pluto::native::make_native_display_backend(accepted_rm1, &status);
-  ASSERT_NE(rm1_backend, nullptr);
-  EXPECT_EQ(status, kPlutoStatusOk);
-  EXPECT_EQ(rm1_backend->driver_name(), "mxcfb_epdc");
+  pluto::GeneratedDeviceProfile disabled_rm1 = *rm1;
+  disabled_rm1.runtime.native_session_enabled = false;
+  EXPECT_FALSE(
+      pluto::native::native_display_backend_is_implemented(disabled_rm1));
+  EXPECT_EQ(pluto::native::make_native_display_backend(disabled_rm1, &status),
+            nullptr);
+  EXPECT_EQ(status, kPlutoStatusUnsupported);
+
+  pluto::GeneratedDeviceProfile disabled_rm2 = *rm2;
+  disabled_rm2.runtime.native_session_enabled = false;
+  EXPECT_FALSE(
+      pluto::native::native_display_backend_is_implemented(disabled_rm2));
+  EXPECT_EQ(pluto::native::make_native_display_backend(disabled_rm2, &status),
+            nullptr);
+  EXPECT_EQ(status, kPlutoStatusUnsupported);
 }
 
 TEST(NativePresenter, RejectsAttemptsToSpoofAnInternalDriverName) {

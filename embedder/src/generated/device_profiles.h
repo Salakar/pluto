@@ -262,7 +262,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                 },
             .runtime =
                 {
-                    .native_session_enabled = false,
+                    .native_session_enabled = true,
                     .firmware_build = "20260612085811",
                     .kernel_release = "5.4.70-v1.6.3-rm10x",
                     .takeover_quiesce_milliseconds = 5500,
@@ -346,7 +346,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                 },
             .runtime =
                 {
-                    .native_session_enabled = false,
+                    .native_session_enabled = true,
                     .firmware_build = "20260629074044",
                     .kernel_release = "5.4.70-v1.6.3-rm11x",
                     .takeover_quiesce_milliseconds = 300,

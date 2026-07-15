@@ -20,7 +20,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       color: false,
     ),
     runtime: DeviceRuntimeProfile(
-      nativeSessionEnabled: false,
+      nativeSessionEnabled: true,
       firmwareBuild: '20260612085811',
       kernelRelease: '5.4.70-v1.6.3-rm10x',
       takeoverQuiesceMilliseconds: 5500,
@@ -108,7 +108,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       color: false,
     ),
     runtime: DeviceRuntimeProfile(
-      nativeSessionEnabled: false,
+      nativeSessionEnabled: true,
       firmwareBuild: '20260629074044',
       kernelRelease: '5.4.70-v1.6.3-rm11x',
       takeoverQuiesceMilliseconds: 300,

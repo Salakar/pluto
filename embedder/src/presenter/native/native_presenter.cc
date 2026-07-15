@@ -9,6 +9,7 @@
 #include "presenter/native/gallery3_drm_backend.h"
 #include "presenter/native/mxcfb/mxcfb_backend.h"
 #include "presenter/native/native_display_backend.h"
+#include "presenter/native/rm2/lcdif_tcon_backend.h"
 
 namespace pluto::native {
 namespace {
@@ -345,7 +346,8 @@ bool native_display_backend_is_implemented(
     return false;
   }
   return profile.display_driver == NativeDisplayDriverKind::kGallery3Drm ||
-         profile.display_driver == NativeDisplayDriverKind::kMxcfbEpdc;
+         profile.display_driver == NativeDisplayDriverKind::kMxcfbEpdc ||
+         profile.display_driver == NativeDisplayDriverKind::kLcdifTcon;
 }
 
 std::unique_ptr<NativeDisplayBackend>
@@ -370,7 +372,10 @@ make_native_display_backend(const GeneratedDeviceProfile &profile,
     }
     return std::make_unique<mxcfb::MxcfbDisplayBackend>(profile);
   case NativeDisplayDriverKind::kLcdifTcon:
-    return nullptr;
+    if (out_status != nullptr) {
+      *out_status = kPlutoStatusOk;
+    }
+    return std::make_unique<rm2::LcdifTconDisplayBackend>(profile);
   }
   return nullptr;
 }

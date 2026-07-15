@@ -42,8 +42,8 @@ assert_rejected \
   'remarkable,zero-gravitas fsl,imx7d-sdb' armv7l
 
 pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
-[ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" = 0 ] ||
-  fail "rm1 native session was enabled before its release gate"
+[ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" = 1 ] ||
+  fail "rm1 native session is not enabled"
 [ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
     '20260612085811:5.4.70-v1.6.3-rm10x' ] ||
   fail "rm1 exact firmware or kernel release drifted"
@@ -86,8 +86,8 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
   fail "rm1 incorrectly gained the Move LPGPR helper"
 
 pluto_profile_load rm2 || fail "could not load rm2 runtime profile"
-[ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" = 0 ] ||
-  fail "rm2 native session was enabled before its display gate"
+[ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" = 1 ] ||
+  fail "rm2 native session is not enabled"
 [ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
     '20260629074044:5.4.70-v1.6.3-rm11x' ] ||
   fail "rm2 exact firmware or kernel release drifted"
