@@ -41,6 +41,16 @@ grep -q 'reject_host_metadata "$layout"' "$PAYLOAD_SCRIPT" ||
   fail "release layouts are not checked for host metadata"
 grep -q 'reject_host_metadata "$PAYLOAD"' "$PAYLOAD_SCRIPT" ||
   fail "the assembled payload is not checked for host metadata"
+grep -q 'PLUTO_ELF_ALLOW_NO_GLIBC=1' "$PAYLOAD_SCRIPT" ||
+  fail "self-contained AOT app snapshots do not use the scoped no-GLIBC gate"
+[[ "$(grep -c 'PLUTO_ELF_ALLOW_NO_GLIBC=1' "$PAYLOAD_SCRIPT")" -eq 1 ]] ||
+  fail "no-GLIBC allowance escaped the single app snapshot verification path"
+if PLUTO_ELF_ALLOW_NO_GLIBC=invalid \
+  bash "$ROOT/tools/build/verify-device-elf.sh" \
+    "$ROOT/third_party/engine/$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/engine.version")/linux-arm-release/libflutter_engine.so" \
+    2.35 linux-arm >/dev/null 2>&1; then
+  fail "ELF verifier accepted an invalid no-GLIBC policy"
+fi
 for forbidden_metadata in '.DS_Store' '.AppleDouble' '._*'; do
   grep -Fq -- "$forbidden_metadata" "$PAYLOAD_SCRIPT" ||
     fail "payload metadata gate is missing $forbidden_metadata"

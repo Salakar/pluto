@@ -33,6 +33,7 @@ DEVICE_SCRIPTS=(
   pluto-boot-install.sh
   pluto-app-control.sh
   pluto-install-transaction.sh
+  pluto-release-activate.sh
   pluto-uninstall.sh
 )
 
@@ -232,9 +233,16 @@ manifest_app_id() {
 
 require_target_elf() {
   local elf="$1"
+  local allow_no_glibc="${2:-0}"
   [[ -s "$elf" ]] || die "missing ELF: $elf"
-  bash "$ROOT/tools/build/verify-device-elf.sh" \
-    "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+  if [[ "$allow_no_glibc" == 1 ]]; then
+    PLUTO_ELF_ALLOW_NO_GLIBC=1 \
+      bash "$ROOT/tools/build/verify-device-elf.sh" \
+        "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+  else
+    bash "$ROOT/tools/build/verify-device-elf.sh" \
+      "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+  fi
 }
 
 reject_host_metadata() {
@@ -302,7 +310,11 @@ verify_release_layout() {
     die "release layout has no bundle/flutter_assets: $layout"
   [[ -s "$layout/bundle/icudtl.dat" ]] ||
     die "release layout has no bundle/icudtl.dat: $layout"
-  require_target_elf "$app_elf"
+  # Product AOT snapshots are target-native ELF shared objects but may be
+  # completely self-contained and therefore have no GLIBC imports. This
+  # exception is scoped to app.so; every native executable/runtime above keeps
+  # the required-import ABI gate.
+  require_target_elf "$app_elf" 1
 
   grep -Eq '"buildMode"[[:space:]]*:[[:space:]]*"release"' "$metadata" ||
     die "layout metadata is not release: $metadata"
