@@ -23,6 +23,13 @@ exit 0
 SYSTEMCTL
 chmod +x "$TMP/bin/systemctl"
 
+cat > "$TMP/bin/uname" <<'UNAME'
+#!/bin/sh
+[ "$1" = -r ] || exit 64
+printf '%s\n' "$PLUTO_TEST_KERNEL_RELEASE_OUTPUT"
+UNAME
+chmod +x "$TMP/bin/uname"
+
 run_refused() {
   profile_id="$1"
   : > "$TMP/session.log"
@@ -49,6 +56,38 @@ grep -q "native session for 'rm1' has not passed" "$TMP/session.log" ||
 run_refused rm2
 grep -q "native session for 'rm2' has not passed" "$TMP/session.log" ||
   fail "rm2 acceptance-gate refusal was not explicit"
+
+run_identity_refused() {
+  build="$1"
+  kernel="$2"
+  expected="$3"
+  printf '%s\n' "$build" > "$TMP/version"
+  : > "$TMP/session.log"
+  rm -f "$TMP/systemctl.log"
+  set +e
+  PATH="$TMP/bin:$PATH" \
+  PLUTO_ROOT="$TMP/root" \
+  PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+  PLUTO_TESTING=1 \
+  PLUTO_TEST_PROFILE_ID=move \
+  PLUTO_TEST_FIRMWARE_BUILD_FILE="$TMP/version" \
+  PLUTO_TEST_UNAME="$TMP/bin/uname" \
+  PLUTO_TEST_KERNEL_RELEASE_OUTPUT="$kernel" \
+  PLUTO_TEST_SYSTEMCTL_LOG="$TMP/systemctl.log" \
+    sh "$SUPERVISOR" start > "$TMP/session.log" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 78 ] || fail "Move identity refusal returned $rc, expected 78"
+  grep -q "$expected" "$TMP/session.log" ||
+    fail "Move identity refusal did not name $expected"
+  [ ! -s "$TMP/systemctl.log" ] ||
+    fail "Move identity refusal touched xochitl.service"
+}
+
+run_identity_refused \
+  20000101000000 6.12.49+git-imx93-chiappa-gf4c2ab7040e8 'firmware build'
+run_identity_refused \
+  20260629074044 6.12.49+git-imx93-chiappa-gf4c2ab7040e9 'kernel release'
 
 : > "$TMP/session.log"
 rm -f "$TMP/systemctl.log"

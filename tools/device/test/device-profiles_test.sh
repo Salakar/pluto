@@ -43,7 +43,10 @@ assert_rejected \
 
 pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
 [ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" = 0 ] ||
-  fail "rm1 native session was enabled before its display gate"
+  fail "rm1 native session was enabled before its release gate"
+[ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
+    '20260612085811:5.4.70-v1.6.3-rm10x' ] ||
+  fail "rm1 exact firmware or kernel release drifted"
 [ "$PLUTO_PROFILE_DISPLAY_DEVICE" = /dev/fb0 ] ||
   fail "rm1 display path drifted"
 [ "$PLUTO_PROFILE_SCANOUT_WIDTH:$PLUTO_PROFILE_SCANOUT_HEIGHT" = \
@@ -83,6 +86,9 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
 pluto_profile_load rm2 || fail "could not load rm2 runtime profile"
 [ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" = 0 ] ||
   fail "rm2 native session was enabled before its display gate"
+[ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
+    '20260629074044:5.4.70-v1.6.3-rm11x' ] ||
+  fail "rm2 exact firmware or kernel release drifted"
 [ "$PLUTO_PROFILE_PANEL_SIGNATURE" = ED103TC2C5 ] ||
   fail "rm2 panel signature drifted"
 [ "$PLUTO_PROFILE_SCANOUT_WIDTH:$PLUTO_PROFILE_SCANOUT_HEIGHT" = \
@@ -135,6 +141,9 @@ esac
 pluto_profile_load move || fail "could not load Move runtime profile"
 [ "$PLUTO_PROFILE_NATIVE_SESSION_ENABLED" = 1 ] ||
   fail "Move native session is not enabled"
+[ "$PLUTO_PROFILE_FIRMWARE_BUILD:$PLUTO_PROFILE_KERNEL_RELEASE" = \
+    '20260629074044:6.12.49+git-imx93-chiappa-gf4c2ab7040e8' ] ||
+  fail "Move exact firmware or kernel release drifted"
 [ "$PLUTO_PROFILE_DISPLAY_DEVICE" = /dev/dri/card0 ] ||
   fail "Move display path drifted"
 [ "$PLUTO_PROFILE_SCANOUT_WIDTH:$PLUTO_PROFILE_SCANOUT_HEIGHT:$PLUTO_PROFILE_BITS_PER_PIXEL" = \

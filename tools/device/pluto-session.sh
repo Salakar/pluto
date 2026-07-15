@@ -104,6 +104,38 @@ is_token() {
   case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; *) return 0 ;; esac
 }
 
+validate_profile_runtime_identity() {
+  firmware_file=/etc/version
+  uname_command=uname
+  if [ "${PLUTO_TESTING:-0}" = 1 ]; then
+    # Existing supervisor contract tests may stop at an earlier gate. Exact
+    # runtime-identity tests opt in with both isolated seams; neither seam is
+    # accepted by a production session.
+    if [ -z "${PLUTO_TEST_FIRMWARE_BUILD_FILE:-}" ] &&
+       [ -z "${PLUTO_TEST_UNAME:-}" ]; then
+      return 0
+    fi
+    [ -n "${PLUTO_TEST_FIRMWARE_BUILD_FILE:-}" ] &&
+      [ -n "${PLUTO_TEST_UNAME:-}" ] || {
+      log "profile rejected: incomplete runtime identity test seam"
+      return 78
+    }
+    firmware_file="$PLUTO_TEST_FIRMWARE_BUILD_FILE"
+    uname_command="$PLUTO_TEST_UNAME"
+  fi
+
+  actual_build="$(head -n 1 "$firmware_file" 2>/dev/null | tr -d '\r\n')"
+  actual_kernel="$("$uname_command" -r 2>/dev/null | tr -d '\r\n')"
+  if [ "$actual_build" != "$PLUTO_PROFILE_FIRMWARE_BUILD" ]; then
+    log "profile rejected: firmware build '$actual_build' != '$PLUTO_PROFILE_FIRMWARE_BUILD'"
+    return 78
+  fi
+  if [ "$actual_kernel" != "$PLUTO_PROFILE_KERNEL_RELEASE" ]; then
+    log "profile rejected: kernel release '$actual_kernel' != '$PLUTO_PROFILE_KERNEL_RELEASE'"
+    return 78
+  fi
+}
+
 runtime_nonce() {
   generated_nonce="$(cat "$NONCE_FILE" 2>/dev/null || true)"
   if ! is_token "$generated_nonce" && [ "${PLUTO_TESTING:-0}" = 1 ]; then
@@ -225,6 +257,7 @@ configure_profile() {
     log "profile rejected: native session for '$PLUTO_PROFILE_ID' has not passed its device acceptance gate"
     return 78
   fi
+  validate_profile_runtime_identity || return $?
 
   if [ "${PLUTO_TESTING:-0}" = 1 ]; then
     [ -z "${PLUTO_TEST_RECOVERY_HELPER:-}" ] ||

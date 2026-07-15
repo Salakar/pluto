@@ -79,6 +79,8 @@ struct GeneratedWaveformProfile {
 
 struct GeneratedRuntimeProfile {
   bool native_session_enabled;
+  std::string_view firmware_build;
+  std::string_view kernel_release;
   std::string_view display_device;
   GeneratedDisplayContract display;
   GeneratedWaveformProfile waveform;
@@ -260,6 +262,8 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
             .runtime =
                 {
                     .native_session_enabled = false,
+                    .firmware_build = "20260612085811",
+                    .kernel_release = "5.4.70-v1.6.3-rm10x",
                     .display_device = "/dev/fb0",
                     .display =
                         {
@@ -341,6 +345,8 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
             .runtime =
                 {
                     .native_session_enabled = false,
+                    .firmware_build = "20260629074044",
+                    .kernel_release = "5.4.70-v1.6.3-rm11x",
                     .display_device = "/dev/fb0",
                     .display =
                         {
@@ -422,6 +428,8 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
             .runtime =
                 {
                     .native_session_enabled = true,
+                    .firmware_build = "20260629074044",
+                    .kernel_release = "6.12.49+git-imx93-chiappa-gf4c2ab7040e8",
                     .display_device = "/dev/dri/card0",
                     .display =
                         {

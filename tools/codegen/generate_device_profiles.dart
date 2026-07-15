@@ -61,6 +61,8 @@ final class _Panel {
 final class _Runtime {
   _Runtime(Map<String, Object?> json)
     : nativeSessionEnabled = _boolean(json, 'nativeSessionEnabled'),
+      firmwareBuild = _string(json, 'firmwareBuild'),
+      kernelRelease = _string(json, 'kernelRelease'),
       displayDevice = _string(json, 'displayDevice'),
       display = _DisplayContract(_map(json, 'display')),
       waveform = _Waveform(_map(json, 'waveform')),
@@ -80,6 +82,8 @@ final class _Runtime {
       suspendCommand = _string(json, 'suspendCommand');
 
   final bool nativeSessionEnabled;
+  final String firmwareBuild;
+  final String kernelRelease;
   final String displayDevice;
   final _DisplayContract display;
   final _Waveform waveform;
@@ -427,6 +431,14 @@ void _validate(List<_Profile> profiles) {
         '${profile.id} color panel and color-quantization capability disagree',
       );
     }
+    if (!RegExp(r'^[0-9]{14}$').hasMatch(profile.runtime.firmwareBuild)) {
+      _fail('${profile.id} firmware build must be exactly 14 digits');
+    }
+    if (!RegExp(
+      r'^[A-Za-z0-9._+-]+$',
+    ).hasMatch(profile.runtime.kernelRelease)) {
+      _fail('${profile.id} kernel release is not a safe exact token');
+    }
     _validateDisplayContract(profile);
     if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(profile.panel.signature)) {
       _fail('${profile.id} panel signature is not shell-safe');
@@ -751,6 +763,8 @@ String _cpp(List<_Profile> profiles) {
     ..writeln()
     ..writeln('struct GeneratedRuntimeProfile {')
     ..writeln('  bool native_session_enabled;')
+    ..writeln('  std::string_view firmware_build;')
+    ..writeln('  std::string_view kernel_release;')
     ..writeln('  std::string_view display_device;')
     ..writeln('  GeneratedDisplayContract display;')
     ..writeln('  GeneratedWaveformProfile waveform;')
@@ -855,6 +869,12 @@ String _cpp(List<_Profile> profiles) {
       ..writeln('                {')
       ..writeln(
         '                    .native_session_enabled = ${profile.runtime.nativeSessionEnabled},',
+      )
+      ..writeln(
+        '                    .firmware_build = ${_cppString(profile.runtime.firmwareBuild)},',
+      )
+      ..writeln(
+        '                    .kernel_release = ${_cppString(profile.runtime.kernelRelease)},',
       )
       ..writeln(
         '                    .display_device = ${_cppString(profile.runtime.displayDevice)},',
@@ -1152,6 +1172,12 @@ String _dart(List<_Profile> profiles) {
         '          nativeSessionEnabled: ${profile.runtime.nativeSessionEnabled},',
       )
       ..writeln(
+        '          firmwareBuild: ${_dartString(profile.runtime.firmwareBuild)},',
+      )
+      ..writeln(
+        '          kernelRelease: ${_dartString(profile.runtime.kernelRelease)},',
+      )
+      ..writeln(
         '          displayDevice: ${_dartString(profile.runtime.displayDevice)},',
       )
       ..writeln('          display: DisplayContract(')
@@ -1384,6 +1410,12 @@ String _shell(List<_Profile> profiles) {
         '      PLUTO_PROFILE_NATIVE_SESSION_ENABLED=${profile.runtime.nativeSessionEnabled ? 1 : 0}',
       )
       ..writeln(
+        "      PLUTO_PROFILE_FIRMWARE_BUILD=${_shellString(profile.runtime.firmwareBuild)}",
+      )
+      ..writeln(
+        "      PLUTO_PROFILE_KERNEL_RELEASE=${_shellString(profile.runtime.kernelRelease)}",
+      )
+      ..writeln(
         "      PLUTO_PROFILE_DISPLAY_DEVICE=${_shellString(profile.runtime.displayDevice)}",
       )
       ..writeln(
@@ -1505,6 +1537,8 @@ String _shell(List<_Profile> profiles) {
     ..writeln('  export PLUTO_PROFILE_PANEL_SIGNATURE')
     ..writeln('  export PLUTO_PROFILE_SOURCE_PIXEL_FORMAT')
     ..writeln('  export PLUTO_PROFILE_NATIVE_SESSION_ENABLED')
+    ..writeln('  export PLUTO_PROFILE_FIRMWARE_BUILD')
+    ..writeln('  export PLUTO_PROFILE_KERNEL_RELEASE')
     ..writeln('  export PLUTO_PROFILE_DISPLAY_DEVICE')
     ..writeln(
       '  export PLUTO_PROFILE_SCANOUT_WIDTH PLUTO_PROFILE_SCANOUT_HEIGHT',

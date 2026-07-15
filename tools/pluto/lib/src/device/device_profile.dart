@@ -222,6 +222,8 @@ final class DeviceRuntimeProfile {
   /// Creates runtime facts emitted from the reviewed profile source.
   const DeviceRuntimeProfile({
     required this.nativeSessionEnabled,
+    required this.firmwareBuild,
+    required this.kernelRelease,
     required this.displayDevice,
     required this.display,
     required this.waveform,
@@ -240,6 +242,12 @@ final class DeviceRuntimeProfile {
 
   /// Whether the native display backend has passed its device bring-up gate.
   final bool nativeSessionEnabled;
+
+  /// Exact `/etc/version` build admitted by this runtime contract.
+  final String firmwareBuild;
+
+  /// Exact `uname -r` release admitted by this runtime contract.
+  final String kernelRelease;
 
   /// Display ownership node validated by the native backend.
   final String displayDevice;

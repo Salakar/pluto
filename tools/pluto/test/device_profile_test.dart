@@ -2,6 +2,23 @@ import 'package:pluto_cli/pluto.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('generated runtime identities pin exact accepted releases', () {
+    expect(deviceProfileById('rm1')!.runtime.firmwareBuild, '20260612085811');
+    expect(
+      deviceProfileById('rm1')!.runtime.kernelRelease,
+      '5.4.70-v1.6.3-rm10x',
+    );
+    expect(deviceProfileById('rm2')!.runtime.firmwareBuild, '20260629074044');
+    expect(
+      deviceProfileById('rm2')!.runtime.kernelRelease,
+      '5.4.70-v1.6.3-rm11x',
+    );
+    expect(
+      deviceProfileById('move')!.runtime.kernelRelease,
+      '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
+    );
+  });
+
   test('generated framebuffer mapping contracts preserve stock lengths', () {
     final DisplayContract rm1 = deviceProfileById('rm1')!.runtime.display;
     final DisplayContract rm2 = deviceProfileById('rm2')!.runtime.display;

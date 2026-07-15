@@ -75,6 +75,24 @@ void main() {
     waveformOptionKey: 'wbf',
     message: 'move Gallery3 waveform option key must be eink',
   );
+  _expectRejected(
+    generator,
+    source,
+    profileId: 'rm1',
+    message: 'rm1 firmware build must be exactly 14 digits',
+    mutateRuntime: (Map<String, Object?> runtime) {
+      runtime['firmwareBuild'] = '2026061208581';
+    },
+  );
+  _expectRejected(
+    generator,
+    source,
+    profileId: 'rm1',
+    message: 'rm1 kernel release is not a safe exact token',
+    mutateRuntime: (Map<String, Object?> runtime) {
+      runtime['kernelRelease'] = '5.4.70 rm1';
+    },
+  );
 
   stdout.writeln('generate_device_profiles_test: ok');
 }
