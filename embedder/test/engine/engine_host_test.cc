@@ -3,10 +3,14 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <string>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #include "gtest/gtest.h"
 
@@ -40,6 +44,36 @@ pluto::EngineHost make_host(const std::filesystem::path &bundle) {
   config.bundle_path = bundle.string();
   config.engine_path = "/definitely/missing/libflutter_engine.so";
   return pluto::EngineHost(std::move(config));
+}
+
+struct SemanticsSpec {
+  std::int32_t id;
+  std::string label;
+  bool tappable = true;
+};
+
+void publish_semantics(pluto::DirectInkSemanticsState *state,
+                       std::initializer_list<SemanticsSpec> specs,
+                       FlutterViewId view_id = 0) {
+  std::vector<SemanticsSpec> stable(specs);
+  std::vector<FlutterSemanticsNode2> nodes(stable.size());
+  std::vector<FlutterSemanticsNode2 *> node_ptrs;
+  node_ptrs.reserve(nodes.size());
+  for (std::size_t index = 0; index < stable.size(); ++index) {
+    nodes[index].struct_size = sizeof(FlutterSemanticsNode2);
+    nodes[index].id = stable[index].id;
+    nodes[index].label = stable[index].label.c_str();
+    nodes[index].actions = stable[index].tappable
+                               ? kFlutterSemanticsActionTap
+                               : static_cast<FlutterSemanticsAction>(0);
+    node_ptrs.push_back(&nodes[index]);
+  }
+  FlutterSemanticsUpdate2 update{};
+  update.struct_size = sizeof(update);
+  update.node_count = node_ptrs.size();
+  update.nodes = node_ptrs.empty() ? nullptr : node_ptrs.data();
+  update.view_id = view_id;
+  state->update(&update);
 }
 
 TEST(EngineHostConfig, DefaultsToReleaseAot) {
@@ -124,6 +158,229 @@ TEST(EngineHostGeometry, InvalidPresenterGeometryFailsWithoutMutation) {
   EXPECT_EQ(config.panel_height, original_height);
   EXPECT_EQ(config.dpi, original_dpi);
   EXPECT_NEAR(config.dpr, original_dpr, 1e-12);
+}
+
+TEST(DirectInkSemanticsState, AcceptsOnlyExactTappableInkControls) {
+  using enum pluto::DirectInkSemanticsTarget;
+  pluto::DirectInkSemanticsState state;
+
+  publish_semantics(&state, {{1, "new artwork"}});
+  const std::uint64_t boundary = state.begin();
+  publish_semantics(&state, {{2, "new artwork", false},
+                             {3, "new artwork copy"},
+                             {4, "Create"},
+                             {5, "Back to gallery later"}});
+  constexpr std::array targets{kCanvasReady, kCreate, kNewArtwork};
+  pluto::DirectInkSemanticsTarget matched{};
+  pluto::DirectInkSemanticsNode node;
+  EXPECT_EQ(static_cast<int>(state.wait_for_any(targets, boundary,
+                                                std::chrono::milliseconds(1),
+                                                &matched, &node)),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kTimedOut));
+
+  publish_semantics(&state, {{12, "new artwork"}}, 77);
+  EXPECT_EQ(static_cast<int>(state.wait_for_any(targets, boundary,
+                                                std::chrono::milliseconds(1),
+                                                &matched, &node)),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kFound));
+  EXPECT_EQ(static_cast<int>(matched), static_cast<int>(kNewArtwork));
+  EXPECT_EQ(node.node_id, 12u);
+  EXPECT_EQ(node.view_id, 77);
+  EXPECT_GT(node.generation, boundary);
+  state.end();
+}
+
+TEST(DirectInkSemanticsState, GenerationBoundaryRejectsStaleControls) {
+  using enum pluto::DirectInkSemanticsTarget;
+  pluto::DirectInkSemanticsState state;
+  state.begin();
+  publish_semantics(&state, {{20, "create"}});
+  const std::uint64_t boundary = state.generation();
+  constexpr std::array target{kCreate};
+  pluto::DirectInkSemanticsTarget matched{};
+  pluto::DirectInkSemanticsNode node;
+  EXPECT_EQ(static_cast<int>(state.wait_for_any(target, boundary,
+                                                std::chrono::milliseconds(1),
+                                                &matched, &node)),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kTimedOut));
+  publish_semantics(&state, {{21, "unrelated"}});
+  EXPECT_EQ(static_cast<int>(state.wait_for_any(target, boundary,
+                                                std::chrono::milliseconds(1),
+                                                &matched, &node)),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kTimedOut));
+  publish_semantics(&state, {{22, "create"}});
+  EXPECT_EQ(static_cast<int>(state.wait_for_any(target, boundary,
+                                                std::chrono::milliseconds(1),
+                                                &matched, &node)),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kFound));
+  EXPECT_EQ(node.node_id, 22u);
+  state.end();
+  EXPECT_EQ(static_cast<int>(state.wait_for_any(
+                target, 0, std::chrono::milliseconds(1), &matched, &node)),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kInactive));
+}
+
+TEST(DirectInkSemanticsState, DuplicateExactActionFailsClosed) {
+  using enum pluto::DirectInkSemanticsTarget;
+  pluto::DirectInkSemanticsState state;
+  const std::uint64_t boundary = state.begin();
+  publish_semantics(&state, {{30, "new artwork"}, {31, "new artwork"}});
+  constexpr std::array target{kNewArtwork};
+  pluto::DirectInkSemanticsTarget matched{};
+  pluto::DirectInkSemanticsNode node;
+  EXPECT_EQ(static_cast<int>(state.wait_for_any(target, boundary,
+                                                std::chrono::milliseconds(1),
+                                                &matched, &node)),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kAmbiguous));
+  state.end();
+}
+
+TEST(DirectInkSemanticsState, PlatformThreadUpdateWakesControlWaiter) {
+  using enum pluto::DirectInkSemanticsTarget;
+  pluto::DirectInkSemanticsState state;
+  const std::uint64_t boundary = state.begin();
+  constexpr std::array target{kCanvasReady};
+  std::thread platform_thread(
+      [&state] { publish_semantics(&state, {{35, "Back to gallery"}}, 5); });
+  pluto::DirectInkSemanticsTarget matched{};
+  pluto::DirectInkSemanticsNode node;
+  const pluto::DirectInkSemanticsWait wait = state.wait_for_any(
+      target, boundary, std::chrono::milliseconds(50), &matched, &node);
+  platform_thread.join();
+  EXPECT_EQ(static_cast<int>(wait),
+            static_cast<int>(pluto::DirectInkSemanticsWait::kFound));
+  EXPECT_EQ(node.node_id, 35u);
+  EXPECT_EQ(node.view_id, 5);
+  state.end();
+}
+
+TEST(DirectInkCanvasPreparation,
+     CreatesThroughExactControlsAndConfirmsMountedEditor) {
+  pluto::DirectInkSemanticsState state;
+  std::vector<bool> toggles;
+  std::vector<std::uint64_t> taps;
+  const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    toggles.push_back(enabled);
+    if (enabled) {
+      publish_semantics(&state, {{40, "new artwork"}}, 9);
+    }
+    return true;
+  };
+  const pluto::DirectInkSemanticsTap tap =
+      [&](const pluto::DirectInkSemanticsNode &node) {
+        taps.push_back(node.node_id);
+        if (node.node_id == 40) {
+          publish_semantics(&state, {{41, "new artwork"}, {42, "create"}}, 9);
+          return true;
+        }
+        if (node.node_id == 42) {
+          publish_semantics(&state, {{43, "Back to gallery"}}, 9);
+          return true;
+        }
+        return false;
+      };
+  std::size_t action_count = 99;
+  pluto::DirectControlFailure failure;
+
+  ASSERT_TRUE(pluto::prepare_direct_ink_canvas_from_semantics(
+      &state, toggle, tap, std::chrono::milliseconds(50), &action_count,
+      &failure));
+  EXPECT_EQ(action_count, 2u);
+  EXPECT_TRUE(taps == (std::vector<std::uint64_t>{40, 42}));
+  EXPECT_TRUE(toggles == (std::vector<bool>{true, false}));
+  EXPECT_TRUE(failure.code.empty());
+}
+
+TEST(DirectInkCanvasPreparation, AlreadyMountedEditorNeedsNoAction) {
+  pluto::DirectInkSemanticsState state;
+  int taps = 0;
+  int disables = 0;
+  const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    if (enabled) {
+      publish_semantics(&state, {{50, "Back to gallery"}});
+    } else {
+      ++disables;
+    }
+    return true;
+  };
+  const pluto::DirectInkSemanticsTap tap =
+      [&](const pluto::DirectInkSemanticsNode &) {
+        ++taps;
+        return true;
+      };
+  std::size_t action_count = 99;
+  pluto::DirectControlFailure failure;
+
+  ASSERT_TRUE(pluto::prepare_direct_ink_canvas_from_semantics(
+      &state, toggle, tap, std::chrono::milliseconds(50), &action_count,
+      &failure));
+  EXPECT_EQ(action_count, 0u);
+  EXPECT_EQ(taps, 0);
+  EXPECT_EQ(disables, 1);
+}
+
+TEST(DirectInkCanvasPreparation, ResumesAnAlreadyOpenChooser) {
+  pluto::DirectInkSemanticsState state;
+  const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    if (enabled) {
+      publish_semantics(&state, {{60, "new artwork"}, {61, "create"}});
+    }
+    return true;
+  };
+  const pluto::DirectInkSemanticsTap tap =
+      [&](const pluto::DirectInkSemanticsNode &node) {
+        if (node.node_id != 61) {
+          return false;
+        }
+        publish_semantics(&state, {{62, "Back to gallery"}});
+        return true;
+      };
+  std::size_t action_count = 99;
+  pluto::DirectControlFailure failure;
+
+  ASSERT_TRUE(pluto::prepare_direct_ink_canvas_from_semantics(
+      &state, toggle, tap, std::chrono::milliseconds(50), &action_count,
+      &failure));
+  EXPECT_EQ(action_count, 1u);
+}
+
+TEST(DirectInkCanvasPreparation, MissingOrRejectedTransitionFailsClosed) {
+  pluto::DirectInkSemanticsState state;
+  int disables = 0;
+  const pluto::DirectInkSemanticsToggle missing = [&](bool enabled) {
+    if (enabled) {
+      publish_semantics(&state, {{70, "new artwork", false}});
+    } else {
+      ++disables;
+    }
+    return true;
+  };
+  const pluto::DirectInkSemanticsTap unused =
+      [](const pluto::DirectInkSemanticsNode &) { return true; };
+  std::size_t action_count = 99;
+  pluto::DirectControlFailure failure;
+
+  EXPECT_FALSE(pluto::prepare_direct_ink_canvas_from_semantics(
+      &state, missing, unused, std::chrono::milliseconds(2), &action_count,
+      &failure));
+  EXPECT_EQ(failure.code, "ink-ui-timeout");
+  EXPECT_EQ(action_count, 0u);
+  EXPECT_EQ(disables, 1);
+
+  const pluto::DirectInkSemanticsToggle available = [&](bool enabled) {
+    if (enabled) {
+      publish_semantics(&state, {{71, "new artwork"}});
+    }
+    return true;
+  };
+  const pluto::DirectInkSemanticsTap rejected =
+      [](const pluto::DirectInkSemanticsNode &) { return false; };
+  failure = {};
+  EXPECT_FALSE(pluto::prepare_direct_ink_canvas_from_semantics(
+      &state, available, rejected, std::chrono::milliseconds(20), &action_count,
+      &failure));
+  EXPECT_EQ(failure.code, "semantics-action-failed");
+  EXPECT_EQ(action_count, 0u);
 }
 
 TEST(EngineHostPenInput, PreservesEachKernelMonotonicTimestamp) {

@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -138,12 +139,14 @@ int hex_value(char value) {
 enum class DirectAction : std::uint8_t {
   kScreenshot,
   kTapSwitcherPreview,
+  kPrepareInkCanvas,
   kDrawStroke,
 };
 
 struct ParsedRequest {
   std::string request_id;
   std::optional<std::string> app_id;
+  std::int64_t expected_pid = 0;
   DirectScreenshotSurface surface = DirectScreenshotSurface::kLogical;
   DirectAction action = DirectAction::kScreenshot;
 };
@@ -166,6 +169,7 @@ public:
     bool have_request_id = false;
     bool have_action = false;
     bool have_app_id = false;
+    bool have_expected_pid = false;
     bool have_surface = false;
     std::string schema;
     std::string action;
@@ -214,6 +218,25 @@ public:
           if (!have_surface) {
             return fail(failure, "bad-args", "surface must be a string");
           }
+        } else if (key == "expectedPid") {
+          std::string encoded_pid;
+          have_expected_pid = parse_number(&encoded_pid);
+          if (!have_expected_pid || encoded_pid.empty() ||
+              encoded_pid.front() == '-' ||
+              encoded_pid.find_first_not_of("0123456789") !=
+                  std::string::npos) {
+            return fail(failure, "bad-args",
+                        "expectedPid must be a positive integer");
+          }
+          const char *begin = encoded_pid.data();
+          const char *end = begin + encoded_pid.size();
+          const auto parsed =
+              std::from_chars(begin, end, request->expected_pid, 10);
+          if (parsed.ec != std::errc() || parsed.ptr != end ||
+              request->expected_pid <= 0) {
+            return fail(failure, "bad-args",
+                        "expectedPid must be a positive integer");
+          }
         } else if (!skip_value(0)) {
           return fail(failure, "bad-request", "request contains invalid JSON");
         }
@@ -243,7 +266,7 @@ public:
     }
     if (!have_action ||
         (action != "screenshot" && action != "tap-switcher-preview" &&
-         action != "draw-stroke")) {
+         action != "prepare-ink-canvas" && action != "draw-stroke")) {
       return fail(failure, "bad-action", "unsupported control action");
     }
     if (!have_app_id) {
@@ -267,6 +290,24 @@ public:
         return fail(failure, "bad-args",
                     "surface must be logical or post-dither");
       }
+      if (have_expected_pid) {
+        return fail(failure, "bad-args",
+                    "screenshot does not accept expectedPid");
+      }
+    } else if (action == "prepare-ink-canvas") {
+      request->action = DirectAction::kPrepareInkCanvas;
+      if (!request->app_id.has_value()) {
+        return fail(failure, "bad-args",
+                    "prepare-ink-canvas requires a concrete appId");
+      }
+      if (!have_expected_pid) {
+        return fail(failure, "bad-args",
+                    "prepare-ink-canvas requires expectedPid");
+      }
+      if (have_surface) {
+        return fail(failure, "bad-args",
+                    "prepare-ink-canvas does not accept a screenshot surface");
+      }
     } else {
       request->action = action == "tap-switcher-preview"
                             ? DirectAction::kTapSwitcherPreview
@@ -283,6 +324,12 @@ public:
             action == "tap-switcher-preview"
                 ? "tap-switcher-preview does not accept a screenshot surface"
                 : "draw-stroke does not accept a screenshot surface");
+      }
+      if (have_expected_pid) {
+        return fail(failure, "bad-args",
+                    action == "tap-switcher-preview"
+                        ? "tap-switcher-preview does not accept expectedPid"
+                        : "draw-stroke does not accept expectedPid");
       }
     }
     return true;
@@ -1026,6 +1073,9 @@ private:
       return dispatch_pointer_action(request, config_.tap_switcher_preview,
                                      "tap-switcher-preview", 4, 4, &failure);
     }
+    if (request.action == DirectAction::kPrepareInkCanvas) {
+      return dispatch_prepare_ink_canvas(request, &failure);
+    }
     if (request.action == DirectAction::kDrawStroke) {
       return dispatch_pointer_action(request, config_.draw_stroke,
                                      "draw-stroke", 4, 256, &failure);
@@ -1085,6 +1135,63 @@ private:
           {}};
     }
     return {std::move(response), std::move(leaf)};
+  }
+
+  DispatchResult dispatch_prepare_ink_canvas(const ParsedRequest &request,
+                                             DirectControlFailure *failure) {
+    if (!config_.prepare_ink_canvas || !request.app_id.has_value() ||
+        request.expected_pid <= 0) {
+      return {failure_response(
+                  request.request_id,
+                  {"unavailable", "Ink canvas preparation is not available"}),
+              {}};
+    }
+
+    DirectInkCanvasResult result;
+    bool prepared = false;
+    try {
+      prepared = config_.prepare_ink_canvas(
+          *request.app_id, request.expected_pid, &result, failure);
+    } catch (const std::exception &exception) {
+      failure->code = "internal";
+      failure->message = std::string("prepare-ink-canvas callback failed: ") +
+                         exception.what();
+    } catch (...) {
+      failure->code = "internal";
+      failure->message = "prepare-ink-canvas callback failed";
+    }
+    if (!prepared) {
+      if (failure->code.empty()) {
+        failure->code = "unavailable";
+      }
+      if (failure->message.empty()) {
+        failure->message = "Ink canvas preparation is not available";
+      }
+      return {failure_response(request.request_id, std::move(*failure)), {}};
+    }
+    if (result.app_id != *request.app_id ||
+        result.pid != request.expected_pid || !result.canvas_ready ||
+        result.action_count > 2) {
+      return {failure_response(request.request_id,
+                               {"internal",
+                                "prepare-ink-canvas callback returned invalid "
+                                "metadata"}),
+              {}};
+    }
+
+    std::string response =
+        "{\"schema\":1,\"requestId\":" + json_string(request.request_id) +
+        ",\"ok\":true,\"result\":{\"appId\":" + json_string(result.app_id) +
+        ",\"pid\":" + std::to_string(result.pid) +
+        ",\"canvasReady\":true,\"actionCount\":" +
+        std::to_string(result.action_count) + "}}";
+    if (response.size() > config_.max_packet_bytes) {
+      return {failure_response(
+                  request.request_id,
+                  {"internal", "prepare-ink-canvas response is too large"}),
+              {}};
+    }
+    return {std::move(response), {}};
   }
 
   DispatchResult dispatch_pointer_action(const ParsedRequest &request,

@@ -60,11 +60,26 @@ using DirectPointerHandler = std::function<bool(
     const std::string &requested_app_id, DirectPointerResult *result,
     DirectControlFailure *failure)>;
 
+// Result of the acceptance-only Ink canvas preparation flow. The caller binds
+// the request to the foreground receipt it just read; the embedder must return
+// that exact process and may invoke only Ink's bounded semantic actions.
+struct DirectInkCanvasResult {
+  std::string app_id;
+  std::int64_t pid = 0;
+  std::size_t action_count = 0;
+  bool canvas_ready = false;
+};
+
+using DirectInkCanvasHandler = std::function<bool(
+    const std::string &requested_app_id, std::int64_t expected_pid,
+    DirectInkCanvasResult *result, DirectControlFailure *failure)>;
+
 struct DirectControlServerConfig {
   std::string run_dir = "/run/pluto";
   std::size_t max_packet_bytes = 32768;
   DirectScreenshotHandler screenshot;
   DirectPointerHandler tap_switcher_preview;
+  DirectInkCanvasHandler prepare_ink_canvas;
   DirectPointerHandler draw_stroke;
 };
 

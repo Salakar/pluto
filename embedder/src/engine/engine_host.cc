@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <string_view>
 #include <vector>
 
 #include "engine/pen_pointer_timestamp.h"
@@ -82,6 +83,228 @@ int32_t degrees_for_sensor_orientation(SensorOrientation orientation) {
 }
 
 } // namespace
+
+std::uint64_t DirectInkSemanticsState::begin() {
+  std::lock_guard lock(mutex_);
+  active_ = true;
+  slots_ = {};
+  ++generation_;
+  changed_.notify_all();
+  return generation_;
+}
+
+void DirectInkSemanticsState::end() {
+  std::lock_guard lock(mutex_);
+  active_ = false;
+  slots_ = {};
+  changed_.notify_all();
+}
+
+void DirectInkSemanticsState::update(const FlutterSemanticsUpdate2 *update) {
+  constexpr std::size_t kTargetCount = 3;
+  if (update == nullptr ||
+      update->struct_size < offsetof(FlutterSemanticsUpdate2, view_id) +
+                                sizeof(FlutterSemanticsUpdate2::view_id) ||
+      (update->node_count != 0 && update->nodes == nullptr)) {
+    return;
+  }
+
+  std::array<std::optional<DirectInkSemanticsNode>, kTargetCount> candidates;
+  std::array<std::size_t, kTargetCount> counts{};
+  for (std::size_t index = 0; index < update->node_count; ++index) {
+    const FlutterSemanticsNode2 *node = update->nodes[index];
+    if (node == nullptr || node->id < 0 ||
+        node->struct_size < offsetof(FlutterSemanticsNode2, label) +
+                                sizeof(FlutterSemanticsNode2::label) ||
+        node->label == nullptr ||
+        (static_cast<std::uint64_t>(node->actions) &
+         static_cast<std::uint64_t>(kFlutterSemanticsActionTap)) == 0) {
+      continue;
+    }
+
+    std::optional<DirectInkSemanticsTarget> target;
+    const std::string_view label(node->label);
+    if (label == "Back to gallery") {
+      target = DirectInkSemanticsTarget::kCanvasReady;
+    } else if (label == "new artwork") {
+      target = DirectInkSemanticsTarget::kNewArtwork;
+    } else if (label == "create") {
+      target = DirectInkSemanticsTarget::kCreate;
+    }
+    if (!target.has_value()) {
+      continue;
+    }
+    const std::size_t slot = static_cast<std::size_t>(*target);
+    ++counts[slot];
+    if (!candidates[slot].has_value()) {
+      candidates[slot] = DirectInkSemanticsNode{
+          .view_id = update->view_id,
+          .node_id = static_cast<std::uint64_t>(node->id),
+      };
+    }
+  }
+
+  std::lock_guard lock(mutex_);
+  if (!active_) {
+    return;
+  }
+  ++generation_;
+  for (std::size_t slot = 0; slot < kTargetCount; ++slot) {
+    if (counts[slot] == 0) {
+      continue;
+    }
+    slots_[slot].node = *candidates[slot];
+    slots_[slot].node.generation = generation_;
+    slots_[slot].ambiguous = counts[slot] != 1;
+  }
+  changed_.notify_all();
+}
+
+std::uint64_t DirectInkSemanticsState::generation() const {
+  std::lock_guard lock(mutex_);
+  return generation_;
+}
+
+DirectInkSemanticsWait DirectInkSemanticsState::wait_for_any(
+    std::span<const DirectInkSemanticsTarget> targets,
+    std::uint64_t after_generation, std::chrono::milliseconds timeout,
+    DirectInkSemanticsTarget *matched, DirectInkSemanticsNode *node) {
+  if (targets.empty() || matched == nullptr || node == nullptr ||
+      timeout < std::chrono::milliseconds::zero()) {
+    return DirectInkSemanticsWait::kInactive;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock lock(mutex_);
+  for (;;) {
+    if (!active_) {
+      return DirectInkSemanticsWait::kInactive;
+    }
+    for (const DirectInkSemanticsTarget target : targets) {
+      const Slot &slot = slots_[static_cast<std::size_t>(target)];
+      if (slot.node.generation <= after_generation) {
+        continue;
+      }
+      if (slot.ambiguous) {
+        return DirectInkSemanticsWait::kAmbiguous;
+      }
+      *matched = target;
+      *node = slot.node;
+      return DirectInkSemanticsWait::kFound;
+    }
+    if (changed_.wait_until(lock, deadline) == std::cv_status::timeout) {
+      return DirectInkSemanticsWait::kTimedOut;
+    }
+  }
+}
+
+bool prepare_direct_ink_canvas_from_semantics(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap, std::chrono::milliseconds timeout,
+    std::size_t *action_count, DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (state == nullptr || !toggle || !tap || action_count == nullptr ||
+      failure == nullptr || timeout <= std::chrono::milliseconds::zero()) {
+    return fail("invalid-control", "invalid Ink canvas preparation state");
+  }
+  *action_count = 0;
+
+  struct SessionCleanup {
+    DirectInkSemanticsState *state;
+    const DirectInkSemanticsToggle *toggle;
+    bool enabled = false;
+    ~SessionCleanup() {
+      state->end();
+      if (enabled) {
+        try {
+          (void)(*toggle)(false);
+        } catch (...) {
+        }
+      }
+    }
+  } cleanup{state, &toggle};
+
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const std::uint64_t initial_generation = state->begin();
+  if (!toggle(true)) {
+    return fail("semantics-unavailable",
+                "Flutter semantics could not be enabled for Ink");
+  }
+  cleanup.enabled = true;
+
+  const auto remaining = [&deadline] {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return std::chrono::milliseconds::zero();
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                 now);
+  };
+  const auto wait_failure = [&fail](DirectInkSemanticsWait wait,
+                                    const char *timeout_message) {
+    if (wait == DirectInkSemanticsWait::kAmbiguous) {
+      return fail("ambiguous-ink-ui",
+                  "Ink exposed duplicate acceptance controls");
+    }
+    if (wait == DirectInkSemanticsWait::kInactive) {
+      return fail("semantics-unavailable",
+                  "Ink semantics became unavailable during preparation");
+    }
+    return fail("ink-ui-timeout", timeout_message);
+  };
+
+  constexpr std::array initial_targets{
+      DirectInkSemanticsTarget::kCanvasReady,
+      DirectInkSemanticsTarget::kCreate,
+      DirectInkSemanticsTarget::kNewArtwork,
+  };
+  DirectInkSemanticsTarget matched{};
+  DirectInkSemanticsNode node;
+  DirectInkSemanticsWait wait = state->wait_for_any(
+      initial_targets, initial_generation, remaining(), &matched, &node);
+  if (wait != DirectInkSemanticsWait::kFound) {
+    return wait_failure(wait,
+                        "Ink did not expose a gallery, chooser, or canvas");
+  }
+  if (matched == DirectInkSemanticsTarget::kCanvasReady) {
+    return true;
+  }
+
+  if (matched == DirectInkSemanticsTarget::kNewArtwork) {
+    const std::uint64_t before_open = state->generation();
+    if (!tap(node)) {
+      return fail("semantics-action-failed",
+                  "Ink rejected its new-artwork action");
+    }
+    ++*action_count;
+    constexpr std::array create_target{DirectInkSemanticsTarget::kCreate};
+    wait = state->wait_for_any(create_target, before_open, remaining(),
+                               &matched, &node);
+    if (wait != DirectInkSemanticsWait::kFound) {
+      return wait_failure(wait,
+                          "Ink's new-artwork chooser did not expose create");
+    }
+  }
+
+  const std::uint64_t before_create = state->generation();
+  if (!tap(node)) {
+    return fail("semantics-action-failed", "Ink rejected its create action");
+  }
+  ++*action_count;
+  constexpr std::array canvas_target{DirectInkSemanticsTarget::kCanvasReady};
+  wait = state->wait_for_any(canvas_target, before_create, remaining(),
+                             &matched, &node);
+  if (wait != DirectInkSemanticsWait::kFound) {
+    return wait_failure(wait,
+                        "Ink did not mount an editor canvas after create");
+  }
+  return true;
+}
 
 std::optional<std::string>
 read_direct_switcher_target(const std::string &run_dir) {
@@ -682,6 +905,64 @@ bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
   return true;
 }
 
+bool EngineHost::send_direct_prepare_ink_canvas(
+    const std::string &requested_app_id, std::int64_t expected_pid,
+    DirectInkCanvasResult *result, DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (result == nullptr || failure == nullptr) {
+    return false;
+  }
+  const std::int64_t process_pid = static_cast<std::int64_t>(::getpid());
+  if (expected_pid != process_pid) {
+    return fail("wrong-pid", "expected PID is not the foreground Ink embedder");
+  }
+  if (requested_app_id != config_.app_id) {
+    return fail("wrong-app", "requested app is not the foreground embedder");
+  }
+  if (config_.app_id != "dev.pluto.ink") {
+    return fail("unsupported-app",
+                "prepare-ink-canvas is restricted to Pluto Ink");
+  }
+  if (engine_ == nullptr || !engine_library_.loaded() ||
+      engine_library_.procs().UpdateSemanticsEnabled == nullptr ||
+      engine_library_.procs().SendSemanticsAction == nullptr) {
+    return fail("unavailable", "Flutter semantics are unavailable");
+  }
+
+  const DirectInkSemanticsToggle toggle = [this](bool enabled) {
+    return engine_library_.procs().UpdateSemanticsEnabled(engine_, enabled) ==
+           kSuccess;
+  };
+  const DirectInkSemanticsTap tap = [this](const DirectInkSemanticsNode &node) {
+    FlutterSendSemanticsActionInfo info{};
+    info.struct_size = sizeof(info);
+    info.view_id = node.view_id;
+    info.node_id = node.node_id;
+    info.action = kFlutterSemanticsActionTap;
+    return engine_library_.procs().SendSemanticsAction(engine_, &info) ==
+           kSuccess;
+  };
+  std::size_t action_count = 0;
+  if (!prepare_direct_ink_canvas_from_semantics(
+          &direct_ink_semantics_, toggle, tap, std::chrono::milliseconds(4200),
+          &action_count, failure)) {
+    return false;
+  }
+  *result = DirectInkCanvasResult{
+      .app_id = config_.app_id,
+      .pid = process_pid,
+      .action_count = action_count,
+      .canvas_ready = true,
+  };
+  return true;
+}
+
 bool EngineHost::send_direct_switcher_preview_tap(
     const std::string &requested_app_id, DirectPointerResult *result,
     DirectControlFailure *failure) {
@@ -749,6 +1030,13 @@ void EngineHost::start_foreground_services() {
                                    DirectPointerResult *result,
                                    DirectControlFailure *failure) {
         return send_direct_ink_stroke(requested_app_id, result, failure);
+      };
+      control.prepare_ink_canvas = [this](const std::string &requested_app_id,
+                                          std::int64_t expected_pid,
+                                          DirectInkCanvasResult *result,
+                                          DirectControlFailure *failure) {
+        return send_direct_prepare_ink_canvas(requested_app_id, expected_pid,
+                                              result, failure);
       };
       control.tap_switcher_preview = [this](const std::string &requested_app_id,
                                             DirectPointerResult *result,
@@ -1728,6 +2016,15 @@ void EngineHost::pre_engine_restart_callback(void *user_data) {
   auto *self = static_cast<EngineHost *>(user_data);
   if (self != nullptr) {
     self->lifecycle_ = LifecycleStateMachine();
+    self->direct_ink_semantics_.end();
+  }
+}
+
+void EngineHost::update_semantics_callback(
+    const FlutterSemanticsUpdate2 *update, void *user_data) {
+  auto *self = static_cast<EngineHost *>(user_data);
+  if (self != nullptr) {
+    self->direct_ink_semantics_.update(update);
   }
 }
 
@@ -1892,6 +2189,7 @@ bool EngineHost::assemble_project_args(std::string *error) {
   project_args_.command_line_argc = static_cast<int>(engine_argv_.size());
   project_args_.command_line_argv = engine_argv_.data();
   project_args_.platform_message_callback = &platform_message_callback;
+  project_args_.update_semantics_callback2 = &update_semantics_callback;
   project_args_.custom_task_runners = event_loop_.custom_task_runners();
   project_args_.compositor = &flutter_compositor_;
   project_args_.vsync_callback =

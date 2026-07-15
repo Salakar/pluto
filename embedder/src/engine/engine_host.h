@@ -3,10 +3,15 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,6 +37,69 @@ enum class EngineMode {
   kProfile,
   kRelease,
 };
+
+// Exact Ink controls exposed through Flutter semantics. These labels are
+// intentionally app-owned and action-specific: no coordinate or arbitrary
+// semantics endpoint is exposed to the device protocol.
+enum class DirectInkSemanticsTarget : std::uint8_t {
+  kCanvasReady,
+  kNewArtwork,
+  kCreate,
+};
+
+struct DirectInkSemanticsNode {
+  FlutterViewId view_id = 0;
+  std::uint64_t node_id = 0;
+  std::uint64_t generation = 0;
+};
+
+enum class DirectInkSemanticsWait : std::uint8_t {
+  kFound,
+  kTimedOut,
+  kAmbiguous,
+  kInactive,
+};
+
+// Thread-safe bridge between Flutter's platform-thread semantics callback and
+// the root-local acceptance worker. Each action must come from a target seen
+// after the caller's generation boundary, so stale gallery/editor nodes cannot
+// satisfy a transition.
+class DirectInkSemanticsState {
+public:
+  std::uint64_t begin();
+  void end();
+  void update(const FlutterSemanticsUpdate2 *update);
+  std::uint64_t generation() const;
+  DirectInkSemanticsWait
+  wait_for_any(std::span<const DirectInkSemanticsTarget> targets,
+               std::uint64_t after_generation,
+               std::chrono::milliseconds timeout,
+               DirectInkSemanticsTarget *matched, DirectInkSemanticsNode *node);
+
+private:
+  struct Slot {
+    DirectInkSemanticsNode node;
+    bool ambiguous = false;
+  };
+
+  mutable std::mutex mutex_;
+  std::condition_variable changed_;
+  std::array<Slot, 3> slots_{};
+  std::uint64_t generation_ = 0;
+  bool active_ = false;
+};
+
+using DirectInkSemanticsToggle = std::function<bool(bool)>;
+using DirectInkSemanticsTap =
+    std::function<bool(const DirectInkSemanticsNode &)>;
+
+// Drives only Ink's exact new-artwork/create semantic actions and does not
+// return success until the editor's Back-to-gallery control proves a real
+// canvas is mounted. An already-open editor succeeds without an action.
+bool prepare_direct_ink_canvas_from_semantics(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap, std::chrono::milliseconds timeout,
+    std::size_t *action_count, DirectControlFailure *failure);
 
 struct EngineHostConfig {
   // Product AOT is the safe default. JIT is reserved for callers that
@@ -143,6 +211,8 @@ private:
   static void log_message_callback(const char *tag, const char *message,
                                    void *user_data);
   static void pre_engine_restart_callback(void *user_data);
+  static void update_semantics_callback(const FlutterSemanticsUpdate2 *update,
+                                        void *user_data);
   static void presenter_completion_callback(uint64_t frame_id, void *user_data);
 
   void resolve_paths();
@@ -168,6 +238,10 @@ private:
   bool send_direct_ink_stroke(const std::string &requested_app_id,
                               DirectPointerResult *result,
                               DirectControlFailure *failure);
+  bool send_direct_prepare_ink_canvas(const std::string &requested_app_id,
+                                      std::int64_t expected_pid,
+                                      DirectInkCanvasResult *result,
+                                      DirectControlFailure *failure);
   std::string hibernate_marker_path() const;
   bool publish_hibernate_marker() const;
   bool publish_control_file(const std::string &leaf,
@@ -212,6 +286,7 @@ private:
   ChannelRegistry channels_;
   EventLoop event_loop_;
   std::unique_ptr<DirectControlServer> direct_control_server_;
+  DirectInkSemanticsState direct_ink_semantics_;
   VsyncPacer vsync_pacer_;
   LifecycleStateMachine lifecycle_;
   bool initialized_ = false;

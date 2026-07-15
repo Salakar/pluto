@@ -20,6 +20,7 @@ namespace {
 using pluto::DirectControlFailure;
 using pluto::DirectControlServer;
 using pluto::DirectControlServerConfig;
+using pluto::DirectInkCanvasResult;
 using pluto::DirectPointerResult;
 using pluto::DirectScreenshotCapture;
 using pluto::DirectScreenshotSurface;
@@ -96,6 +97,129 @@ TEST(DirectControlServerTest, DispatchesRootLocalInkStrokeAndReturnsIdentity) {
   EXPECT_NE(response.find(R"("appId":"dev.pluto.ink")"), std::string::npos)
       << response;
   EXPECT_NE(response.find(R"("eventCount":24)"), std::string::npos) << response;
+  server.stop();
+  std::filesystem::remove_all(run_dir);
+}
+
+TEST(DirectControlServerTest,
+     PreparesInkCanvasOnlyForTheRequestBoundForegroundPid) {
+  const std::filesystem::path run_dir = unique_run_dir();
+  DirectControlServerConfig config = config_for(run_dir);
+  const std::int64_t pid = static_cast<std::int64_t>(::getpid());
+  std::string received_app;
+  std::int64_t received_pid = 0;
+  config.prepare_ink_canvas =
+      [&](const std::string &app_id, std::int64_t expected_pid,
+          DirectInkCanvasResult *result, DirectControlFailure *) {
+        received_app = app_id;
+        received_pid = expected_pid;
+        *result = DirectInkCanvasResult{
+            .app_id = app_id,
+            .pid = expected_pid,
+            .action_count = 2,
+            .canvas_ready = true,
+        };
+        return true;
+      };
+
+  DirectControlServer server(std::move(config));
+  std::string error;
+  ASSERT_TRUE(server.start(&error)) << error;
+  const std::string response = request(
+      server.socket_path(),
+      "{\"schema\":1,\"requestId\":\"prepare-1\",\"action\":\"prepare-ink-"
+      "canvas\",\"appId\":\"dev.pluto.ink\",\"expectedPid\":" +
+          std::to_string(pid) + "}");
+  EXPECT_EQ(received_app, "dev.pluto.ink");
+  EXPECT_EQ(received_pid, pid);
+  EXPECT_NE(response.find(R"("ok":true)"), std::string::npos) << response;
+  EXPECT_NE(response.find(R"("appId":"dev.pluto.ink")"), std::string::npos)
+      << response;
+  EXPECT_NE(response.find("\"pid\":" + std::to_string(pid)), std::string::npos)
+      << response;
+  EXPECT_NE(response.find(R"("canvasReady":true)"), std::string::npos)
+      << response;
+  EXPECT_NE(response.find(R"("actionCount":2)"), std::string::npos) << response;
+  server.stop();
+  std::filesystem::remove_all(run_dir);
+}
+
+TEST(DirectControlServerTest, InkCanvasPreparationRejectsUnboundArguments) {
+  const std::filesystem::path run_dir = unique_run_dir();
+  DirectControlServerConfig config = config_for(run_dir);
+  int calls = 0;
+  config.prepare_ink_canvas = [&](const std::string &, std::int64_t,
+                                  DirectInkCanvasResult *,
+                                  DirectControlFailure *) {
+    ++calls;
+    return false;
+  };
+
+  DirectControlServer server(std::move(config));
+  std::string error;
+  ASSERT_TRUE(server.start(&error)) << error;
+  const std::string missing_pid = request(
+      server.socket_path(),
+      R"({"schema":1,"requestId":"prepare-missing","action":"prepare-ink-canvas","appId":"dev.pluto.ink"})");
+  EXPECT_NE(missing_pid.find("prepare-ink-canvas requires expectedPid"),
+            std::string::npos)
+      << missing_pid;
+  const std::string null_app = request(
+      server.socket_path(),
+      R"({"schema":1,"requestId":"prepare-null","action":"prepare-ink-canvas","appId":null,"expectedPid":12})");
+  EXPECT_NE(null_app.find("prepare-ink-canvas requires a concrete appId"),
+            std::string::npos)
+      << null_app;
+  for (const std::string &pid :
+       {"0", "-1", "1.5", "1e2", "9223372036854775808"}) {
+    const std::string response = request(
+        server.socket_path(),
+        "{\"schema\":1,\"requestId\":\"prepare-bad-pid\",\"action\":\""
+        "prepare-ink-canvas\",\"appId\":\"dev.pluto.ink\",\"expectedPid\":" +
+            pid + "}");
+    EXPECT_NE(response.find("expectedPid must be a positive integer"),
+              std::string::npos)
+        << response;
+  }
+  const std::string surface = request(
+      server.socket_path(),
+      R"({"schema":1,"requestId":"prepare-surface","action":"prepare-ink-canvas","appId":"dev.pluto.ink","expectedPid":12,"surface":"logical"})");
+  EXPECT_NE(surface.find("does not accept a screenshot surface"),
+            std::string::npos)
+      << surface;
+  EXPECT_EQ(calls, 0);
+  server.stop();
+  std::filesystem::remove_all(run_dir);
+}
+
+TEST(DirectControlServerTest, InkCanvasPreparationMetadataFailsClosed) {
+  const std::filesystem::path run_dir = unique_run_dir();
+  DirectControlServerConfig config = config_for(run_dir);
+  const std::int64_t pid = static_cast<std::int64_t>(::getpid());
+  config.prepare_ink_canvas =
+      [](const std::string &app_id, std::int64_t expected_pid,
+         DirectInkCanvasResult *result, DirectControlFailure *) {
+        *result = DirectInkCanvasResult{
+            .app_id = app_id,
+            .pid = expected_pid + 1,
+            .action_count = 3,
+            .canvas_ready = false,
+        };
+        return true;
+      };
+
+  DirectControlServer server(std::move(config));
+  std::string error;
+  ASSERT_TRUE(server.start(&error)) << error;
+  const std::string response = request(
+      server.socket_path(),
+      "{\"schema\":1,\"requestId\":\"prepare-invalid\",\"action\":\""
+      "prepare-ink-canvas\",\"appId\":\"dev.pluto.ink\",\"expectedPid\":" +
+          std::to_string(pid) + "}");
+  EXPECT_NE(response.find(R"("ok":false)"), std::string::npos) << response;
+  EXPECT_NE(response.find("callback returned invalid metadata"),
+            std::string::npos)
+      << response;
   server.stop();
   std::filesystem::remove_all(run_dir);
 }
