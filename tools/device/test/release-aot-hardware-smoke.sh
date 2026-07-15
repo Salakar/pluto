@@ -7,6 +7,7 @@ SSH_TARGET="${PLUTO_ACCEPTANCE_SSH_TARGET:-$DEVICE}"
 SSH_PORT="${PLUTO_ACCEPTANCE_SSH_PORT:-}"
 STAGE_DELAY="${PLUTO_ACCEPTANCE_STAGE_DELAY:-0}"
 STAGE_HOOK="${PLUTO_ACCEPTANCE_STAGE_HOOK:-}"
+SCREENSHOT_DIR="${PLUTO_ACCEPTANCE_SCREENSHOT_DIR:-}"
 CODEX_REQUEST="${PLUTO_ACCEPTANCE_CODEX_REQUEST:-0}"
 SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
 
@@ -22,6 +23,13 @@ SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
   echo "release AOT smoke: stage hook is not executable: $STAGE_HOOK" >&2
   exit 64
 }
+if [[ -n "$SCREENSHOT_DIR" ]]; then
+  [[ ! -L "$SCREENSHOT_DIR" ]] || {
+    echo "release AOT smoke: screenshot directory must not be a symlink: $SCREENSHOT_DIR" >&2
+    exit 64
+  }
+  mkdir -p "$SCREENSHOT_DIR"
+fi
 [[ -z "$SSH_PORT" || "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || {
   echo "release AOT smoke: invalid PLUTO_ACCEPTANCE_SSH_PORT: $SSH_PORT" >&2
   exit 64
@@ -40,6 +48,26 @@ remote() {
 
 stage() {
   local label="$1"
+  local digest
+  if [[ -n "$SCREENSHOT_DIR" ]]; then
+    local output="$SCREENSHOT_DIR/$label.png"
+    [[ ! -e "$output" && ! -L "$output" ]] || {
+      echo "release AOT smoke: screenshot already exists: $output" >&2
+      return 73
+    }
+    "$CLI" screenshot --device "$DEVICE" -o "$output"
+    [[ -s "$output" ]] || {
+      echo "release AOT smoke: screenshot is empty: $output" >&2
+      return 74
+    }
+    if command -v sha256sum >/dev/null 2>&1; then
+      digest="$(sha256sum "$output" | awk '{print $1}')"
+    else
+      digest="$(shasum -a 256 "$output" | awk '{print $1}')"
+    fi
+    printf '%s\t%s\t%s\n' "$label" "$digest" "${output##*/}" >> \
+      "$SCREENSHOT_DIR/stages.tsv"
+  fi
   if [[ -n "$STAGE_HOOK" ]]; then
     "$STAGE_HOOK" "$label"
   fi

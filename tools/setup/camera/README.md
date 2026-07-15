@@ -67,6 +67,7 @@ app, the real switcher selection, and the completed Ink stroke automatically:
 ```sh
 export PLUTO_CAMERA_RIG=2
 export PLUTO_CAMERA_ACCEPTANCE_DIR="$PWD/analysis/native-cutover/final-acceptance/rm1/camera"
+export PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$PWD/analysis/native-cutover/final-acceptance/rm1/screenshots"
 export PLUTO_ACCEPTANCE_STAGE_HOOK="$PWD/tools/setup/camera/capture-acceptance-stage.sh"
 export PLUTO_ACCEPTANCE_STAGE_DELAY=1
 export PLUTO_ACCEPTANCE_CODEX_REQUEST=1
@@ -78,8 +79,11 @@ tools/device/test/release-aot-hardware-smoke.sh root@127.0.0.1:22202
 
 Use the correct SSH target and configured rig number for each tablet. The hook
 writes numbered JPEGs plus `stages.tsv`, which binds every label and filename to
-the image SHA-256. A capture failure fails the smoke run instead of silently
-leaving an evidence gap.
+the image SHA-256. When `PLUTO_ACCEPTANCE_SCREENSHOT_DIR` is set, the smoke also
+writes a native PNG and digest record for every identical stage. Camera glass
+remains authoritative; the paired PNG proves which settled framebuffer Pluto
+reported. A capture failure fails the smoke run instead of silently leaving an
+evidence gap.
 
 Every successful command prints the absolute output/config path as the final
 stdout line. Parent directories for capture outputs are created automatically.
