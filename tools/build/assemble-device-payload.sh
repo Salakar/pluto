@@ -12,6 +12,10 @@ CLI="$ROOT/tools/pluto/bin/pluto.dart"
 PACKAGES="$ROOT/tools/pluto/.dart_tool/package_config.json"
 EMBEDDER=""
 CONTROL_CLIENT=""
+CODEX_BIN="$ROOT/.pluto-cache/build/codex-armv7/output/codex"
+CODEX_PIN="$ROOT/tools/pluto/pins/codex-armv7.json"
+CODEX_VERSION=""
+CODEX_SHA256=""
 DEVICE_PROFILES="$ROOT/tools/device/generated/device-profiles.sh"
 ENGINE_ROOT="$ROOT/third_party/engine/$ENGINE_COMMIT"
 TARGET_PLATFORM=linux-arm64
@@ -31,7 +35,6 @@ DEVICE_SCRIPTS=(
   pluto-app-control.sh
   pluto-install-transaction.sh
   pluto-uninstall.sh
-  pluto-xochitl-guard.sh
 )
 
 usage() {
@@ -53,6 +56,8 @@ Options:
                    build the native runtime for linux-arm64 (default) or
                    linux-arm; model-specific routing belongs to the CLI
   --embedder PATH  use an alternate target-compatible pluto-embedder
+  --codex-bin PATH pinned ARMv7 Codex CLI input when Codex is selected for
+                   linux-arm (default: .pluto-cache/build/codex-armv7/output/codex)
   --output DIR     override build/pluto-payload/<target>
   --dry-run        print the complete assembly plan without changing files
   -h, --help       show this help
@@ -133,6 +138,12 @@ while (($# > 0)); do
       EMBEDDER="$1"
       ;;
     --embedder=*) EMBEDDER="${1#*=}" ;;
+    --codex-bin)
+      shift
+      (($# > 0)) || die "--codex-bin requires a value"
+      CODEX_BIN="$1"
+      ;;
+    --codex-bin=*) CODEX_BIN="${1#*=}" ;;
     --output)
       shift
       (($# > 0)) || die "--output requires a value"
@@ -232,6 +243,46 @@ require_target_elf() {
     "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
 }
 
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    LC_ALL=C LANG=C shasum -a 256 "$path" | awk '{print $1}'
+  fi
+}
+
+load_codex_pin() {
+  local parsed
+  [[ -f "$CODEX_PIN" && ! -L "$CODEX_PIN" ]] ||
+    die "missing regular Codex ARMv7 pin: $CODEX_PIN"
+  command -v python3 >/dev/null 2>&1 ||
+    die "python3 is required to validate $CODEX_PIN"
+  parsed="$(python3 -c '
+import json
+import re
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as source:
+    pin = json.load(source)
+expected = {"schema", "version", "target", "sha256"}
+if not isinstance(pin, dict) or set(pin) != expected:
+    raise SystemExit("pin fields must be exactly schema, version, target, sha256")
+if type(pin["schema"]) is not int or pin["schema"] != 1:
+    raise SystemExit("pin schema must be integer 1")
+if pin["target"] != "linux-arm":
+    raise SystemExit("pin target must be linux-arm")
+if not isinstance(pin["version"], str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", pin["version"]):
+    raise SystemExit("pin version is invalid")
+if not isinstance(pin["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]):
+    raise SystemExit("pin sha256 is invalid")
+print(pin["version"] + "|" + pin["sha256"])
+' "$CODEX_PIN")" || die "invalid Codex ARMv7 pin: $CODEX_PIN"
+  IFS='|' read -r CODEX_VERSION CODEX_SHA256 <<< "$parsed"
+  [[ -n "$CODEX_VERSION" && -n "$CODEX_SHA256" ]] ||
+    die "invalid Codex ARMv7 pin output: $CODEX_PIN"
+}
+
 verify_release_layout() {
   local layout="$1"
   local expected_id="$2"
@@ -295,6 +346,7 @@ LAUNCHER_ID="$(manifest_app_id "$LAUNCHER_PROJECT/pluto.yaml")"
 APP_PROJECTS=()
 APP_IDS=()
 APP_COUNT=0
+INCLUDES_CODEX=0
 for ((selection_index = 0; selection_index < SELECTED_APP_COUNT; selection_index += 1)); do
   selector="${SELECTED_APPS[$selection_index]}"
   project="$(resolve_app_directory "$selector")"
@@ -307,8 +359,15 @@ for ((selection_index = 0; selection_index < SELECTED_APP_COUNT; selection_index
   done
   APP_PROJECTS[$APP_COUNT]="$project"
   APP_IDS[$APP_COUNT]="$app_id"
+  if [[ "$app_id" == dev.pluto.codex ]]; then
+    INCLUDES_CODEX=1
+  fi
   APP_COUNT=$((APP_COUNT + 1))
 done
+
+if [[ "$TARGET_PLATFORM" == linux-arm && "$INCLUDES_CODEX" -eq 1 ]]; then
+  load_codex_pin
+fi
 
 if ((DRY_RUN == 0)); then
   for tool in file find grep install strings; do
@@ -339,6 +398,17 @@ if ((HAS_PROFILE_ENGINE == 1)); then
   run bash "$ROOT/tools/build/verify-device-elf.sh" \
     "$PROFILE_ENGINE" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
 fi
+if [[ "$TARGET_PLATFORM" == linux-arm && "$INCLUDES_CODEX" -eq 1 ]]; then
+  run bash "$ROOT/tools/build/verify-device-elf.sh" \
+    "$CODEX_BIN" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+  if ((DRY_RUN == 0)); then
+    codex_actual_sha256="$(sha256_file "$CODEX_BIN")"
+    [[ "$codex_actual_sha256" == "$CODEX_SHA256" ]] ||
+      die "Codex CLI SHA-256 mismatch: expected $CODEX_SHA256, got $codex_actual_sha256"
+    LC_ALL=C grep -aF -m 1 "$CODEX_VERSION" "$CODEX_BIN" >/dev/null ||
+      die "Codex CLI does not contain pinned version $CODEX_VERSION: $CODEX_BIN"
+  fi
+fi
 
 run rm -rf "$PAYLOAD"
 PAYLOAD_DIRECTORIES=(
@@ -361,6 +431,9 @@ run install -m 0644 "$RELEASE_ENGINE" \
 if ((HAS_PROFILE_ENGINE == 1)); then
   run install -m 0644 "$PROFILE_ENGINE" \
     "$PAYLOAD/engine/profile/libflutter_engine.so"
+fi
+if [[ "$TARGET_PLATFORM" == linux-arm && "$INCLUDES_CODEX" -eq 1 ]]; then
+  run install -m 0755 "$CODEX_BIN" "$PAYLOAD/bin/codex"
 fi
 
 for script in "${DEVICE_SCRIPTS[@]}"; do
@@ -385,6 +458,10 @@ if ((DRY_RUN == 0)); then
     die "assembled payload contains forbidden JIT kernel: $forbidden_kernel"
   [[ ! -d "$PAYLOAD/engine/debug" ]] ||
     die "assembled release payload unexpectedly contains a debug engine"
+  embedded_auth="$(find "$PAYLOAD" -type f \
+    \( -name auth.json -o -name credentials.json \) -print -quit)"
+  [[ -z "$embedded_auth" ]] ||
+    die "release payload contains embedded authentication: $embedded_auth"
   echo "Assembled release payload: $PAYLOAD"
   if ((APP_COUNT > 0)); then
     echo "Target: $TARGET_PLATFORM; apps: launcher ${APP_IDS[*]}"

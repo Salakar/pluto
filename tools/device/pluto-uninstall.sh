@@ -6,17 +6,18 @@ ROOT="${PLUTO_ROOT:-/home/root/pluto}"
 HOME_ROOT="${PLUTO_HOME_ROOT:-/home/root}"
 SYSTEM_ROOT="${PLUTO_SYSTEM_ROOT:-}"
 SYSTEMCTL="${PLUTO_SYSTEMCTL:-systemctl}"
+UMOUNT="${PLUTO_UMOUNT:-umount}"
+RUN_ROOT="${PLUTO_RUN_ROOT:-/run/pluto}"
+TMP_ROOT="${PLUTO_TMP_ROOT:-/tmp}"
 DRY_RUN=0
 KEEP_DATA=0
-REMOVE_XOVI=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --keep-data) KEEP_DATA=1 ;;
-    --remove-xovi) REMOVE_XOVI=1 ;;
     --yes) ;;
-    *) printf 'usage: pluto-uninstall.sh [--dry-run] [--keep-data] [--remove-xovi] [--yes]\n' >&2; exit 64 ;;
+    *) printf 'usage: pluto-uninstall.sh [--dry-run] [--keep-data] [--yes]\n' >&2; exit 64 ;;
   esac
   shift
 done
@@ -35,7 +36,6 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLUTO_UNINSTALL_REEXEC:-0}" != "1" ]; then
   chmod 755 "$copy"
   set -- --yes
   [ "$KEEP_DATA" -eq 0 ] || set -- "$@" --keep-data
-  [ "$REMOVE_XOVI" -eq 0 ] || set -- "$@" --remove-xovi
   PLUTO_UNINSTALL_REEXEC=1 exec "$copy" "$@"
 fi
 
@@ -45,18 +45,75 @@ fi
 
 printf 'Pluto uninstall started at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-GUARD="/tmp/pluto-xochitl-guard.$$.sh"
-if [ -x "$ROOT/bin/pluto-xochitl-guard.sh" ]; then
-  run cp "$ROOT/bin/pluto-xochitl-guard.sh" "$GUARD"
-  run chmod 755 "$GUARD"
-else
-  GUARD=""
-fi
-
 run pkill -f pluto-embedder 2>/dev/null || true
 run pkill -f plutod 2>/dev/null || true
 run "$SYSTEMCTL" stop pluto-deadman.timer pluto-deadman.service 2>/dev/null || true
 run "$SYSTEMCTL" reset-failed pluto-deadman.timer pluto-deadman.service 2>/dev/null || true
+
+# AppLoad/XOVI/QTFB was never a published Pluto contract. Remove it before
+# boot restoration so the boot installer's single xochitl restart loads only
+# the pure stock unit, never a legacy preload whose files were just unlinked.
+remove_retired_display_integration() {
+  legacy_dropin_dir="$SYSTEM_ROOT/etc/systemd/system/xochitl.service.d"
+  run "$UMOUNT" "$legacy_dropin_dir" 2>/dev/null || true
+  for dropin_dir in \
+    "$SYSTEM_ROOT/etc/systemd/system/xochitl.service.d" \
+    "$SYSTEM_ROOT/run/systemd/system/xochitl.service.d" \
+    "$SYSTEM_ROOT/usr/lib/systemd/system/xochitl.service.d"; do
+    for dropin in "$dropin_dir"/*; do
+      [ -f "$dropin" ] || continue
+      if grep -Eiq 'xovi|appload|qtfb' "$dropin"; then
+        run rm -f "$dropin"
+      fi
+    done
+    run rmdir "$dropin_dir" 2>/dev/null || true
+  done
+  run rm -rf \
+    "$HOME_ROOT/xovi" \
+    "$HOME_ROOT/pluto-arm" \
+    "$HOME_ROOT"/.pluto-xovi-* \
+    "$HOME_ROOT"/.pluto-integration-* \
+    "$HOME_ROOT"/.pluto-no-integration-stage \
+    "$HOME_ROOT"/.pluto-uninstall-* \
+    "$HOME_ROOT"/.pluto-restart-* \
+    "$RUN_ROOT/integration-provision.lock" \
+    "$RUN_ROOT/appload-control.sock" \
+    "$TMP_ROOT"/qtfb.sock*
+}
+
+verify_retired_display_integration_absent() {
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  for forbidden in \
+    "$HOME_ROOT/xovi" \
+    "$HOME_ROOT/pluto-arm" \
+    "$HOME_ROOT"/.pluto-xovi-* \
+    "$HOME_ROOT"/.pluto-integration-* \
+    "$HOME_ROOT"/.pluto-no-integration-stage \
+    "$HOME_ROOT"/.pluto-uninstall-* \
+    "$HOME_ROOT"/.pluto-restart-* \
+    "$RUN_ROOT/integration-provision.lock" \
+    "$RUN_ROOT/appload-control.sock" \
+    "$TMP_ROOT"/qtfb.sock*; do
+    if [ -e "$forbidden" ] || [ -L "$forbidden" ]; then
+      printf 'ERROR: retired display integration residue remains: %s\n' \
+        "$forbidden" >&2
+      return 1
+    fi
+  done
+  for dropin_dir in \
+    "$SYSTEM_ROOT/etc/systemd/system/xochitl.service.d" \
+    "$SYSTEM_ROOT/run/systemd/system/xochitl.service.d" \
+    "$SYSTEM_ROOT/usr/lib/systemd/system/xochitl.service.d"; do
+    if grep -Eil 'xovi|appload|qtfb' "$dropin_dir"/* >/dev/null 2>&1; then
+      printf 'ERROR: retired display integration drop-in remains under %s\n' \
+        "$dropin_dir" >&2
+      return 1
+    fi
+  done
+}
+
+remove_retired_display_integration
+verify_retired_display_integration_absent
 
 # Boot-first drop-in (installed by pluto-boot-install.sh): remove it BEFORE
 # deleting $ROOT on BOTH A/B root slots, or a later OTA-slot flip can point
@@ -119,11 +176,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
 else
   printf '%s\n' disabled > "$ROOT/state/boot-mode"
 fi
-run rm -rf "$HOME_ROOT/xovi/exthome/appload/pluto"
-
-if [ "$REMOVE_XOVI" -eq 1 ]; then
-  run rm -rf "$HOME_ROOT/xovi"
-fi
 
 if [ "$KEEP_DATA" -eq 1 ] && [ -d "$ROOT" ]; then
   backup="$HOME_ROOT/pluto-data-backup-$(date +%Y%m%d%H%M%S)"
@@ -134,15 +186,8 @@ fi
 
 run rm -rf "$ROOT"
 
-if [ -n "$GUARD" ] && [ -x "$GUARD" ]; then
-  if [ "$DRY_RUN" -eq 1 ]; then
-    PLUTO_DRY_RUN=1 "$GUARD" restore
-  else
-    "$GUARD" restore
-  fi
-else
-  run "$SYSTEMCTL" reset-failed xochitl.service 2>/dev/null || true
-  run "$SYSTEMCTL" restart xochitl.service
-fi
+# pluto-boot-install.sh completed the stock handoff before runtime deletion.
+# Verify that service instead of spending another xochitl restart allowance.
+run "$SYSTEMCTL" is-active --quiet xochitl.service
 
 printf 'Pluto uninstall finished at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

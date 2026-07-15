@@ -5,7 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 BUILD_SCRIPT="$ROOT/tools/build/build-codex-armv7.sh"
 CONTAINER_SCRIPT="$ROOT/tools/build/codex-armv7/build-container.sh"
 SDK_FINGERPRINT_SCRIPT="$ROOT/tools/build/codex-armv7/fingerprint-sdk.sh"
-ASSEMBLER="$ROOT/tools/build/assemble-appload-arm-payload.sh"
+ASSEMBLER="$ROOT/tools/build/assemble-device-payload.sh"
+PIN="$ROOT/tools/pluto/pins/codex-armv7.json"
 RECIPE="$ROOT/tools/build/codex-armv7"
 
 fail() {
@@ -90,13 +91,29 @@ grep -q 'target_arch = "arm"' \
   fail "ARM pagable layout patch is missing"
 
 build_sha="$(sed -n 's/^readonly CANONICAL_SHA256=//p' "$BUILD_SCRIPT")"
-assembler_sha="$(sed -n 's/^readonly CODEX_SHA256=//p' "$ASSEMBLER")"
-[[ -n "$build_sha" && "$build_sha" = "$assembler_sha" ]] ||
-  fail "Codex canonical and payload SHA-256 pins differ"
-grep -q '"path": "$DEVICE_CODEX_BIN"' "$ASSEMBLER" ||
-  fail "payload metadata does not use the canonical Codex path"
+pin_values="$(python3 -c \
+  'import json,sys; p=json.load(open(sys.argv[1])); print(p["version"]+"|"+p["sha256"])' \
+  "$PIN")"
+pin_version="${pin_values%%|*}"
+pin_sha="${pin_values#*|}"
+[[ -n "$build_sha" && "$build_sha" = "$pin_sha" ]] ||
+  fail "Codex canonical build and authoritative pin SHA-256 differ"
+grep -q "^readonly SOURCE_TAG=rust-v$pin_version$" "$BUILD_SCRIPT" ||
+  fail "Codex source tag and authoritative pin version differ"
+grep -q 'CODEX_PIN="\$ROOT/tools/pluto/pins/codex-armv7.json"' "$ASSEMBLER" ||
+  fail "universal payload does not read the authoritative Codex pin"
+if grep -Eq '^readonly CODEX_(VERSION|SHA256)=' "$ASSEMBLER"; then
+  fail "universal payload duplicates the authoritative Codex pin"
+fi
+grep -q '"\$PAYLOAD/bin/codex"' "$ASSEMBLER" ||
+  fail "universal payload does not install the canonical Codex binary"
+grep -q 'release payload contains embedded authentication' "$ASSEMBLER" ||
+  fail "universal payload does not enforce user-owned Codex authentication"
 if grep -q 'PAPER_CODEX_FAKE\|codexAcceptanceMode' "$ASSEMBLER"; then
   fail "release assembler still contains fake Codex acceptance wiring"
+fi
+if grep -Eqi 'appload|xovi|qtfb|cooperative' "$ASSEMBLER"; then
+  fail "universal native assembler still contains the retired integration"
 fi
 
 git -C "$ROOT" check-ignore -q .pluto-cache/build/codex-armv7/output/codex ||

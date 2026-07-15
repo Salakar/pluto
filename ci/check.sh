@@ -35,16 +35,14 @@ for script in tools/device/*.sh tools/device/test/*.sh; do
 done
 bash tools/build/test/embedder-build-workflow-test.sh
 bash tools/build/test/codex-armv7-build-recipe-test.sh
-bash tools/build/test/assemble-appload-arm-payload-test.sh
-bash tools/integration/test/build-armv7-integration-test.sh
 bash tools/device/test/pluto-power-key-watch_test.sh
 bash tools/device/test/pluto-session-standby_test.sh
 bash tools/device/test/pluto-session-debug-authorization_test.sh
 bash tools/device/test/pluto-session-warm-resume_test.sh
 bash tools/device/test/pluto-session-switcher_test.sh
 bash tools/device/test/pluto-session-power-menu_test.sh
-bash tools/device/test/pluto-boot-hook_test.sh
 bash tools/device/test/pluto-boot-install_test.sh
+bash tools/device/test/pluto-uninstall_test.sh
 sh tools/device/test/device-profiles_test.sh
 sh tools/device/test/pluto-boot-confirm_test.sh
 sh tools/device/test/pluto-session-profile_test.sh

@@ -110,6 +110,17 @@ assert_contains "$PAYLOAD_DRY_RUN" \
   "build/pluto-payload/linux-arm64/share/device-profiles.sh"
 assert_contains "$PAYLOAD_DRY_RUN" \
   "build/pluto-payload/linux-arm64/pluto-boot-confirm.sh"
+assert_contains "$PAYLOAD_DRY_RUN" \
+  "build/pluto-payload/linux-arm64/pluto-boot-install.sh"
+for retired_script in \
+  pluto-boot-hook.sh \
+  pluto-bootloop-check.sh \
+  pluto-deadman.sh \
+  pluto-fingerprint-check.sh \
+  pluto-xochitl-guard.sh; do
+  [[ "$PAYLOAD_DRY_RUN" != *"$retired_script"* ]] ||
+    fail "native payload still carries retired $retired_script"
+done
 [[ "$PAYLOAD_DRY_RUN" != *"apps/codex"* ]] || fail "Codex was selected implicitly"
 [[ "$PAYLOAD_DRY_RUN" != *"kernel_blob.bin"* ]] || fail "dry run copied a JIT kernel"
 EXPECTED_NEXT="Native-runtime handoff: pluto provision --payload-dir $ROOT/build/pluto-payload/linux-arm64"
@@ -147,6 +158,22 @@ assert_contains "$ARM_PAYLOAD_DRY_RUN" \
   fail "release-only linux-arm payload included the profile engine"
 [[ "$ARM_PAYLOAD_DRY_RUN" != *"cooperative"* ]] ||
   fail "native linux-arm payload still names the cooperative backend"
+
+ARM_STANDARD_DRY_RUN="$(
+  bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm --standard
+)"
+assert_contains "$ARM_STANDARD_DRY_RUN" \
+  ".pluto-cache/build/codex-armv7/output/codex 2.35 linux-arm"
+assert_contains "$ARM_STANDARD_DRY_RUN" \
+  "build/pluto-payload/linux-arm/bin/codex"
+ARM64_STANDARD_IDS="$(printf '%s\n' "$STANDARD_DRY_RUN" |
+  sed -n 's|.*build/pluto-payload/linux-arm64/apps/\(dev\.[^ /]*\).*|\1|p' |
+  LC_ALL=C sort -u)"
+ARM_STANDARD_IDS="$(printf '%s\n' "$ARM_STANDARD_DRY_RUN" |
+  sed -n 's|.*build/pluto-payload/linux-arm/apps/\(dev\.[^ /]*\).*|\1|p' |
+  LC_ALL=C sort -u)"
+[[ -n "$ARM64_STANDARD_IDS" && "$ARM64_STANDARD_IDS" = "$ARM_STANDARD_IDS" ]] ||
+  fail "--standard selects different application identities by target"
 
 ENGINE_HASH="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/engine.version")"
 ARM_ENGINE="$ROOT/third_party/engine/$ENGINE_HASH/linux-arm-release/libflutter_engine.so"
