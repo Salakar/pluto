@@ -446,9 +446,12 @@ CPU jiffies over five seconds and held 120,772 KiB and 114,256 KiB RSS. The
 active launcher held 254,868–254,912 KiB and advanced 12 CPU jiffies during the
 sample; the complete pool held 489,896–489,940 KiB (about 478.5 MiB). The
 device still had 1,403,700 KiB available of 2,008,664 KiB. This is the
-performance/RAM trade-off behind the default pool size of four. Constrained
-device profiles can lower `PLUTO_MAX_WARM_APPS` without changing handoff
-correctness.
+performance/RAM trade-off behind Move's generated total-resident limit of four.
+The same lifecycle uses a profile-owned limit of two on RM1 and four on RM2;
+production has no environment override. The smaller RM1 pool preserves one
+foreground and one warm process while bounding the tablet's substantially
+tighter memory envelope. Tests alone may exercise other limits through a
+guarded seam without changing production profile data or handoff correctness.
 
 The deterministic host regression is:
 
