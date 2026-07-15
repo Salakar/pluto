@@ -50,42 +50,61 @@ installer, control client, and device-profile table. Target selection changes
 only the compiler/ABI, committed Flutter engine slice, and profile-selected
 panel implementation.
 
-## Release payloads
+## Universal device release
 
-Release maintainers prepare both target payloads; `pluto provision` probes the
-tablet and selects the matching one automatically.
+Release maintainers use one public command. It builds both native embedders and
+the same standard release-AOT application set for both target ABIs:
 
 ```sh
-# linux-arm64 release runtime and standard applications
-bash tools/build/assemble-device-payload.sh \
-  --target-platform linux-arm64 --standard
-
-# linux-arm release runtime and the same application set
-bash tools/build/assemble-device-payload.sh \
-  --target-platform linux-arm --standard
+bash tools/build/assemble-device-release.sh
 ```
 
-The target staging roots are:
+The result is one ignored release set:
 
 ```text
-build/pluto-payload/linux-arm64/
-build/pluto-payload/linux-arm/
+build/pluto-release/
+  release-manifest.json
+  targets/linux-arm/
+  targets/linux-arm64/
 ```
 
-They are implementation artifacts, not two installation workflows. With both
-present, the same command provisions any tested device:
+The architecture-specific compiler and slice assemblers are private workers.
+The manifest freezes one clean Git revision, the Flutter/engine/Codex pins, and
+the deterministic SHA-256 file set for each slice. Each slice is self-contained
+for deployable payload files; checkout pins and committed engine checksum
+metadata remain the local trust anchors. Provisioning never fills a missing
+payload from checkout source, a committed engine directory, or an embedder
+build tree. The frozen source revision is also installed as
+`/home/root/pluto/share/release-revision` for exact-device acceptance.
+
+The same command provisions any tested device:
 
 ```sh
 pluto provision --device "$DEVICE"
 pluto provision --device "$DEVICE" --status
 ```
 
-The assembler verifies the pinned SDK and engine checksums, exact native ABI,
-release metadata, application manifests, and product `app.so`. A
+The selected profile's recovery policy is internal. If persistent boot default
+is not yet enabled, normal provisioning starts the same Pluto supervisor in a
+runtime-only systemd unit for the current boot and restores stock on stop,
+failure, or reboot. There is no separate install or app flow.
+
+The release assembler verifies the pinned SDK and engine checksums, exact
+native ABI, release metadata, application manifests, and product `app.so`. A
 `kernel_blob.bin`, debug engine, mixed target, or fake/tampered Codex payload
 fails assembly. When Codex is selected for ARMv7, the payload carries the
 pinned target-native Codex CLI; authentication remains user-owned and is never
 built into the artifact.
+
+Published app packages use the same model: one manifest and both exact target
+slices in one `.plap`:
+
+```sh
+pluto build package --published --release
+```
+
+Device-aware development builds remain single-slice. Install probes the tablet
+and selects its slice; a missing or contradictory slice fails before writes.
 
 Every final app layout contains at least:
 

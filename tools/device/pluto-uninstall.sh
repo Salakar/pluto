@@ -42,6 +42,24 @@ fi
 
 printf 'Pluto uninstall started at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# A recovery-gated profile can be running through the runtime-only current-boot
+# service. Retire that supervisor before replacing boot policy or deleting its
+# binaries. The helper's stop path restores stock; the final check below still
+# verifies the result.
+ONCE_SESSION="$ROOT/bin/pluto-session-once.sh"
+if [ "$DRY_RUN" -eq 1 ] || \
+   "$SYSTEMCTL" is-active --quiet pluto-session-once.service 2>/dev/null; then
+  if [ -x "$ONCE_SESSION" ]; then
+    run env PLUTO_ROOT="$ROOT" PLUTO_RUN_DIR=/run/pluto \
+      PLUTO_SYSTEMCTL="$SYSTEMCTL" \
+      sh "$ONCE_SESSION" stop
+  else
+    run "$SYSTEMCTL" stop pluto-session-once.service 2>/dev/null || true
+    run "$SYSTEMCTL" reset-failed xochitl.service 2>/dev/null || true
+    run "$SYSTEMCTL" start xochitl.service
+  fi
+fi
+
 run pkill -f pluto-embedder 2>/dev/null || true
 run pkill -f plutod 2>/dev/null || true
 run "$SYSTEMCTL" stop pluto-deadman.timer pluto-deadman.service 2>/dev/null || true

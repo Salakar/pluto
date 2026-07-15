@@ -37,12 +37,10 @@ installation.
 - `bash tools/build/embedder-device-arm.sh` — build the ARMv7 release embedder
   and control client with the pinned reMarkable toolchain (needs Docker on
   non-native hosts).
-- `bash tools/build/assemble-device-payload.sh --target-platform linux-arm64
-  --standard` — assemble the AArch64 release-AOT payload.
-- `bash tools/build/assemble-device-payload.sh --target-platform linux-arm
-  --standard` — assemble the ARMv7 release-AOT payload. These are target
-  selections on one private release-maintainer assembler; users provision
-  either through the same device-aware `pluto provision` command.
+- `melos run build:device-release` — build both native target slices and the
+  same standard release-AOT app set, then freeze them under one integrity-
+  checked release manifest. Target workers are private; users always provision
+  through the same device-aware `pluto provision` command.
 - `./ci/check.sh` — the complete Dart, shell-contract, and golden quality
   gate. Run it before sending a change.
 

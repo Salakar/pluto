@@ -5,6 +5,7 @@ export 'src/artifacts/checksums.dart';
 export 'src/artifacts/engine_artifacts.dart';
 export 'src/artifacts/glibc_audit.dart';
 export 'src/build/package_builder.dart';
+export 'src/build/release_set.dart';
 export 'src/build/release_pipeline.dart';
 export 'src/cli_environment.dart';
 export 'src/commands.dart';

@@ -70,6 +70,25 @@ final class PayloadApp {
   final String target;
 }
 
+/// Profile-selected release routing and boot policy for one device.
+final class NativeRuntimeSelection {
+  /// Creates an immutable selection from an exact hardware profile.
+  const NativeRuntimeSelection({
+    required this.target,
+    required this.profileId,
+    required this.bootDefaultEnabled,
+  });
+
+  /// Native release slice selected by immutable identity.
+  final String target;
+
+  /// Generated hardware profile id used for the decision.
+  final String profileId;
+
+  /// Whether this profile has passed the complete boot-default recovery gate.
+  final bool bootDefaultEnabled;
+}
+
 final class _PreparedLayoutFile {
   const _PreparedLayoutFile({required this.relativePath, required this.bytes});
 
@@ -110,8 +129,7 @@ final class CleanupItem {
     required this.path,
   });
 
-  /// Kind of artifact (stale-log, orphaned-app, swtcon-probe, bin-backup,
-  /// staging).
+  /// Kind of artifact (stale-log, orphaned-app, bin-backup, staging).
   final String category;
 
   /// Size in kilobytes as reported by `du -sk`.
@@ -192,6 +210,8 @@ final class LiveDeviceOperations {
 
   String get _bootInstall => '$deviceRoot/bin/pluto-boot-install.sh';
 
+  String get _oneShotSession => '$deviceRoot/bin/pluto-session-once.sh';
+
   String get _transaction => '$deviceRoot/bin/pluto-install-transaction.sh';
 
   String get _appControl => '$deviceRoot/bin/pluto-app-control.sh';
@@ -219,9 +239,19 @@ final class LiveDeviceOperations {
   /// Public commands use this to select artifacts without exposing a second
   /// provisioning or lifecycle flow.
   Future<String> runtimeTarget() async {
+    return (await runtimeSelection()).target;
+  }
+
+  /// Probes immutable identity once and returns release plus boot policy.
+  Future<NativeRuntimeSelection> runtimeSelection() async {
     final RemarkableDevice device = await _probeWriteTarget();
     _validateNativeRuntimeDevice(device, operation: 'runtime selection');
-    return device.buildTarget!;
+    final profile = device.profile!;
+    return NativeRuntimeSelection(
+      target: device.buildTarget!,
+      profileId: profile.id,
+      bootDefaultEnabled: profile.runtime.recovery.bootDefaultEnabled,
+    );
   }
 
   String _nextNonce() {
@@ -561,6 +591,25 @@ final class LiveDeviceOperations {
             'were changed.',
       );
     }
+    final bool effectiveBootDefault =
+        bootDefault && device.profile!.runtime.recovery.bootDefaultEnabled;
+    final bool activateForCurrentBoot =
+        bootDefault && !device.profile!.runtime.recovery.bootDefaultEnabled;
+    if (activateForCurrentBoot) {
+      // Re-provisioning must not replace binaries beneath an active transient
+      // supervisor. Stop the old runtime-only session first; its stop path
+      // restores stock while the new integrity-checked release is installed.
+      await _run(
+        'if systemctl is-active --quiet pluto-session-once.service; then '
+        'if [ -x ${_q(_oneShotSession)} ]; then '
+        'PLUTO_ROOT=${_q(deviceRoot)} PLUTO_RUN_DIR=${_q(runDir)} '
+        'sh ${_q(_oneShotSession)} stop; '
+        'else systemctl stop pluto-session-once.service && '
+        'systemctl reset-failed xochitl.service 2>/dev/null || true; '
+        'systemctl start xochitl.service; fi; fi',
+        failure: 'could not retire the active current-boot Pluto session',
+      );
+    }
     final List<String> layout = <String>[
       'bin',
       'engine',
@@ -591,7 +640,7 @@ final class LiveDeviceOperations {
     if (!hasDebugEngine) {
       await _removeStaleDebugState();
     }
-    if (bootDefault) {
+    if (effectiveBootDefault) {
       await _run(
         'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} install',
         failure: 'boot-first install failed',
@@ -609,6 +658,19 @@ final class LiveDeviceOperations {
       'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} uninstall',
       failure: 'removing the Pluto boot override failed',
     );
+    if (activateForCurrentBoot) {
+      await _run(
+        'PLUTO_ROOT=${_q(deviceRoot)} PLUTO_RUN_DIR=${_q(runDir)} '
+        'sh ${_q(_oneShotSession)} start',
+        failure: 'starting the current-boot Pluto session failed',
+      );
+      return const DeviceOperationResult(
+        ok: true,
+        message:
+            'Pluto provisioned and active for this boot; the generated '
+            'recovery gate keeps stock reMarkable as the next boot default.',
+      );
+    }
     return const DeviceOperationResult(
       ok: true,
       message:
@@ -622,6 +684,8 @@ final class LiveDeviceOperations {
     final RemarkableDevice device = await _probeWriteTarget();
     _validateKnownDeviceArchitecture(device, operation: 'status');
     final CommandResult result = await transport.exec(
+      'if systemctl is-active --quiet pluto-session-once.service; then '
+      'printf "current boot: Pluto active (transient); "; fi; '
       'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} status '
       '2>/dev/null || echo "not provisioned"',
     );
@@ -634,13 +698,20 @@ final class LiveDeviceOperations {
     final RemarkableDevice device = await _probeWriteTarget();
     _validateKnownDeviceArchitecture(device, operation: 'restore');
     await _run(
+      'if systemctl is-active --quiet pluto-session-once.service; then '
+      'if [ -x ${_q(_oneShotSession)} ]; then '
+      'PLUTO_ROOT=${_q(deviceRoot)} PLUTO_RUN_DIR=${_q(runDir)} '
+      'sh ${_q(_oneShotSession)} stop || exit; '
+      'else systemctl stop pluto-session-once.service || exit; '
+      'systemctl reset-failed xochitl.service 2>/dev/null || true; '
+      'systemctl start xochitl.service || exit; fi; fi; '
       'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} uninstall',
       failure: 'restoring the stock boot default failed',
     );
     return const DeviceOperationResult(
       ok: true,
       message:
-          'Stock reMarkable UI restored as the boot default. The Pluto '
+          'Stock reMarkable UI restored now and as the boot default. The Pluto '
           'runtime is still installed; re-run `pluto provision` to make it '
           'boot first again.',
     );
@@ -1426,11 +1497,6 @@ done
 for d in "\$ROOT/apps"/*; do
   [ -d "\$d" ] || continue
   [ -f "\$d/manifest.json" ] || emit orphaned-app "\$d"
-done
-# SWTCON probe artifacts.
-for f in /tmp/swtcon_probe*; do
-  [ -e "\$f" ] || continue
-  emit swtcon-probe "\$f"
 done
 # Backup binaries left by manual bin swaps.
 if [ "\$KEEP_BAK" = 0 ]; then

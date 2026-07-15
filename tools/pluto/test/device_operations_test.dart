@@ -312,7 +312,7 @@ Uint8List _releaseMetadata(String target) => Uint8List.fromList(
 
 void main() {
   test(
-    'provision stages the canonical layout and installs boot-first',
+    'provision stages canonical layout and enforces profile boot policy',
     () async {
       final Directory temp = Directory.systemTemp.createTempSync('pluto_prov');
       addTearDown(() => temp.deleteSync(recursive: true));
@@ -555,21 +555,36 @@ void main() {
         fake.commands.any(
           (String c) =>
               c.contains('pluto-boot-install.sh') &&
-              c.contains(' install') &&
+              c.contains(' uninstall') &&
               c.contains("PLUTO_ROOT='$root'"),
         ),
         isTrue,
-        reason: 'boot-first install ran against the canonical root',
+        reason: 'Move cannot bypass its generated boot recovery gate',
       );
-      final int bootInstall = transport.events.indexWhere(
+      final String oneShot = fake.commands.singleWhere(
+        (String command) =>
+            command.contains("sh '$root/bin/pluto-session-once.sh' start"),
+      );
+      expect(
+        oneShot,
+        contains("PLUTO_RUN_DIR='${LiveDeviceOperations.defaultRunDir}'"),
+        reason: 'Move is activated through the common supervisor for this boot',
+      );
+      expect(result.message, contains('active for this boot'));
+      final int bootPolicy = transport.events.indexWhere(
         (String event) =>
             event.startsWith('exec:') &&
             event.contains('pluto-boot-install.sh') &&
-            event.contains(' install'),
+            event.contains(' uninstall'),
       );
       expect(
-        bootInstall,
+        bootPolicy,
         greaterThan(transport.events.indexOf('exec:$appSwap')),
+      );
+      expect(
+        transport.events.indexOf('exec:$oneShot'),
+        greaterThan(bootPolicy),
+        reason: 'current-boot activation happens only after stock boot is safe',
       );
     },
   );
@@ -666,6 +681,14 @@ void main() {
         fake.commands.last,
         contains('pluto-boot-install.sh'),
         reason: '--no-boot-default actively restores the stock boot default',
+      );
+      expect(
+        fake.commands.where(
+          (String command) =>
+              command.contains("sh '$root/bin/pluto-session-once.sh' start"),
+        ),
+        isEmpty,
+        reason: '--no-boot-default must not activate Pluto for this boot',
       );
     },
   );
@@ -1039,10 +1062,10 @@ void main() {
           transport.commands.indexWhere(
             (String command) =>
                 command.contains('pluto-boot-install.sh') &&
-                command.contains(' install'),
+                command.contains(' uninstall'),
           ),
         ),
-        reason: 'stale JIT state cannot survive into boot-first activation',
+        reason: 'stale JIT state cannot survive into final boot policy',
       );
     },
   );
@@ -1298,12 +1321,38 @@ void main() {
       ),
       isTrue,
     );
+    final String restore = transport.commands.singleWhere(
+      (String command) => command.contains('pluto-boot-install.sh'),
+    );
+    expect(
+      restore.indexOf('pluto-session-once.sh'),
+      lessThan(restore.indexOf('pluto-boot-install.sh')),
+      reason: 'the transient session must stop before boot policy is restored',
+    );
+    expect(result.message, contains('restored now'));
     expect(
       transport.commands.any((String c) => c.contains('pluto-uninstall.sh')),
       isFalse,
       reason: 'runtime must be kept installed',
     );
   });
+
+  test(
+    'provisionStatus reports the runtime-only current-boot session',
+    () async {
+      final FakeTransport transport = _moveTransport('h');
+      await LiveDeviceOperations(transport).provisionStatus();
+
+      expect(
+        transport.commands.last,
+        allOf(
+          contains('is-active --quiet pluto-session-once.service'),
+          contains('current boot: Pluto active (transient)'),
+          contains('pluto-boot-install.sh'),
+        ),
+      );
+    },
+  );
 
   test(
     'restoreStockBoot remains available after known-device firmware drift',
@@ -2306,7 +2355,6 @@ void main() {
     expect(report.totalKb, 352);
     expect(transport.commands.single, contains('APPLY=0'));
     expect(transport.commands.single, contains('KEEP_BAK=0'));
-    expect(transport.commands.single, contains('swtcon_probe'));
     expect(transport.commands.single, contains('! -newer /proc/1'));
   });
 

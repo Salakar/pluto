@@ -256,29 +256,25 @@ system-library ceiling match the target. Outputs live in the ignored
 
 ### Assemble release payloads
 
-Release maintainers prepare each native target with the same assembler, while
-users never choose a backend during provisioning. Outputs live under
-`build/pluto-payload/<target>` and must contain the same release application
-identities and pass their target gates.
+Release maintainers use one public assembler. It privately builds both native
+targets, requires one clean source revision, and freezes the common pins plus
+every slice file hash under `build/pluto-release/release-manifest.json`.
 
 ```bash
-melos run build:embedder:device
-bash tools/build/assemble-device-payload.sh --target-platform linux-arm64 --standard
-bash tools/build/embedder-device-arm.sh
-bash tools/build/assemble-device-payload.sh --target-platform linux-arm --standard
+melos run build:device-release
 ```
 
 The ARMv7 assembler packages a pinned, target-native Codex CLI. It rejects
 fake acceptance modes, a missing or tampered binary, the wrong version, and an
 ABI mismatch. Authentication is user-owned and never embedded in the payload.
 
-Payload assembly gates every app as product AOT and verifies the matching
-engine against committed checksums. A bare bundle, mixed targets, or debug
-content in a normal release payload is rejected.
+Release assembly gates every app as product AOT and verifies the matching
+engine against committed checksums. A bare bundle, mixed target, missing slice,
+debug content, dirty source tree, or post-manifest file change is rejected.
 
 ### Provision the platform
 
-After both default payloads are prepared, the public command is identical for
+After the universal release is prepared, the public command is identical for
 every supported tablet:
 
 ```bash
@@ -288,10 +284,17 @@ pluto provision --device "$DEVICE"
 pluto provision --device "$DEVICE" --status
 ```
 
-`pluto provision` chooses the matching preassembled payload after probing the
-device. An explicit `--payload-dir` is target-checked and cannot override
-hardware identity. `--no-boot-default`, `--restore-remarkable`, and
-`--uninstall` also dispatch through the selected safe implementation.
+`pluto provision` verifies the universal manifest and chooses its matching
+slice after probing the device. Each slice contains all deployable payload
+files; checkout pin files and committed engine checksum metadata remain the
+local trust anchors. An explicit
+`--payload-dir` names a release-set root; it cannot override hardware identity
+or supply checkout fallbacks. The profile's `bootDefaultEnabled` recovery gate
+is enforced automatically. When that gate is closed, normal provisioning starts
+the common Pluto supervisor for the current boot only and leaves stock as the
+next-boot default; apps can still be launched immediately through the same CLI.
+`--no-boot-default`, `--restore-remarkable`, and `--uninstall` also dispatch
+through the selected safe implementation.
 
 ### Install and run a single app (release AOT)
 

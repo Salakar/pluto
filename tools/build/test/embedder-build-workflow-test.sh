@@ -8,6 +8,7 @@ ARM_DEVICE_SCRIPT="$ROOT/tools/build/embedder-device-arm.sh"
 ARM_SDK_FINGERPRINT="$ROOT/tools/build/fingerprint-arm-sdk.sh"
 ARM_SDK_VERIFY="$ROOT/tools/build/verify-arm-sdk.sh"
 ARM_SDK_PIN="$ROOT/tools/pluto/pins/arm-sdk.pin"
+RELEASE_SCRIPT="$ROOT/tools/build/assemble-device-release.sh"
 PAYLOAD_SCRIPT="$ROOT/tools/build/assemble-device-payload.sh"
 CONTROL_CLIENT_SOURCE="$ROOT/tools/device/pluto-controlctl.c"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pluto-controlctl-test.XXXXXX")"
@@ -30,6 +31,7 @@ bash -n \
   "$ARM_DEVICE_SCRIPT" \
   "$ARM_SDK_FINGERPRINT" \
   "$ARM_SDK_VERIFY" \
+  "$RELEASE_SCRIPT" \
   "$PAYLOAD_SCRIPT" \
   "$ROOT/tools/build/embedder-device-container.sh" \
   "$ROOT/tools/build/embedder-device-arm-container.sh" \
@@ -119,24 +121,31 @@ if grep -Eq -- '-mcpu=(cortex-a7|cortex-a9)' \
   fail "device-arm toolchain is tuned for only one reMarkable CPU"
 fi
 
-PAYLOAD_DRY_RUN="$(bash "$PAYLOAD_SCRIPT" --dry-run --app counter --app motion_lab)"
+ARM64_SLICE="$TMP/release/targets/linux-arm64"
+ARM_SLICE="$TMP/release/targets/linux-arm"
+PAYLOAD_DRY_RUN="$(
+  bash "$PAYLOAD_SCRIPT" --dry-run --output "$ARM64_SLICE" \
+    --app counter --app motion_lab
+)"
 assert_contains "$PAYLOAD_DRY_RUN" "setup.sh --verify"
 assert_contains "$PAYLOAD_DRY_RUN" "build app --release"
-assert_contains "$PAYLOAD_DRY_RUN" "build/pluto-payload/linux-arm64/launcher"
+assert_contains "$PAYLOAD_DRY_RUN" "$ARM64_SLICE/launcher"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm64/apps/dev.pluto.examples.counter"
+  "$ARM64_SLICE/apps/dev.pluto.examples.counter"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm64/apps/dev.pluto.examples.motion_lab"
+  "$ARM64_SLICE/apps/dev.pluto.examples.motion_lab"
 assert_contains "$PAYLOAD_DRY_RUN" "engine/release/libflutter_engine.so"
 assert_contains "$PAYLOAD_DRY_RUN" "engine/profile/libflutter_engine.so"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm64/bin/pluto-controlctl"
+  "$ARM64_SLICE/bin/pluto-controlctl"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm64/share/device-profiles.sh"
+  "$ARM64_SLICE/share/device-profiles.sh"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm64/pluto-boot-confirm.sh"
+  "$ARM64_SLICE/pluto-boot-confirm.sh"
 assert_contains "$PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm64/pluto-boot-install.sh"
+  "$ARM64_SLICE/pluto-boot-install.sh"
+assert_contains "$PAYLOAD_DRY_RUN" \
+  "$ARM64_SLICE/pluto-session-once.sh"
 for retired_script in \
   pluto-boot-hook.sh \
   pluto-bootloop-check.sh \
@@ -148,17 +157,21 @@ for retired_script in \
 done
 [[ "$PAYLOAD_DRY_RUN" != *"apps/codex"* ]] || fail "Codex was selected implicitly"
 [[ "$PAYLOAD_DRY_RUN" != *"kernel_blob.bin"* ]] || fail "dry run copied a JIT kernel"
-EXPECTED_NEXT="Native-runtime handoff: pluto provision --payload-dir $ROOT/build/pluto-payload/linux-arm64"
+EXPECTED_NEXT="Internal release slice complete: $ARM64_SLICE"
 [[ "$(printf '%s\n' "$PAYLOAD_DRY_RUN" | tail -1)" == "$EXPECTED_NEXT" ]] ||
-  fail "payload dry run did not end with the exact provision command"
+  fail "private slice dry run did not end with its exact output"
 
-EXAMPLES_DRY_RUN="$(bash "$PAYLOAD_SCRIPT" --dry-run --examples)"
+EXAMPLES_DRY_RUN="$(
+  bash "$PAYLOAD_SCRIPT" --dry-run --output "$ARM64_SLICE" --examples
+)"
 assert_contains "$EXAMPLES_DRY_RUN" "dev.pluto.examples.counter"
 assert_contains "$EXAMPLES_DRY_RUN" "dev.pluto.examples.motion_lab"
 assert_contains "$EXAMPLES_DRY_RUN" "dev.pluto.examples.ink_lab"
 [[ "$EXAMPLES_DRY_RUN" != *"apps/codex"* ]] || fail "--examples included Codex"
 
-STANDARD_DRY_RUN="$(bash "$PAYLOAD_SCRIPT" --dry-run --standard)"
+STANDARD_DRY_RUN="$(
+  bash "$PAYLOAD_SCRIPT" --dry-run --output "$ARM64_SLICE" --standard
+)"
 assert_contains "$STANDARD_DRY_RUN" "dev.pluto.examples.counter"
 assert_contains "$STANDARD_DRY_RUN" "dev.pluto.examples.motion_lab"
 assert_contains "$STANDARD_DRY_RUN" "dev.pluto.examples.ink_lab"
@@ -169,33 +182,58 @@ assert_contains "$STANDARD_DRY_RUN" "dev.pluto.codex"
   fail "--standard dry run copied a JIT kernel"
 
 ARM_PAYLOAD_DRY_RUN="$(
-  bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm --app counter
+  bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm \
+    --output "$ARM_SLICE" --app counter
 )"
 assert_contains "$ARM_PAYLOAD_DRY_RUN" \
   "embedder/build/device-arm/pluto-embedder 2.35 linux-arm"
 assert_contains "$ARM_PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm/pluto-session.sh"
+  "$ARM_SLICE/pluto-session.sh"
 assert_contains "$ARM_PAYLOAD_DRY_RUN" \
-  "build/pluto-payload/linux-arm/apps/dev.pluto.examples.counter"
+  "$ARM_SLICE/apps/dev.pluto.examples.counter"
 assert_contains "$ARM_PAYLOAD_DRY_RUN" \
-  "Native-runtime handoff: pluto provision --payload-dir $ROOT/build/pluto-payload/linux-arm"
+  "Internal release slice complete: $ARM_SLICE"
 [[ "$ARM_PAYLOAD_DRY_RUN" != *"engine/profile/libflutter_engine.so"* ]] ||
   fail "release-only linux-arm payload included the profile engine"
 ARM_STANDARD_DRY_RUN="$(
-  bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm --standard
+  bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm \
+    --output "$ARM_SLICE" --standard
 )"
 assert_contains "$ARM_STANDARD_DRY_RUN" \
   ".pluto-cache/build/codex-armv7/output/codex 2.35 linux-arm"
 assert_contains "$ARM_STANDARD_DRY_RUN" \
-  "build/pluto-payload/linux-arm/bin/codex"
+  "$ARM_SLICE/bin/codex"
 ARM64_STANDARD_IDS="$(printf '%s\n' "$STANDARD_DRY_RUN" |
-  sed -n 's|.*build/pluto-payload/linux-arm64/apps/\(dev\.[^ /]*\).*|\1|p' |
+  sed -n 's|.*/targets/linux-arm64/apps/\(dev\.[^ /]*\).*|\1|p' |
   LC_ALL=C sort -u)"
 ARM_STANDARD_IDS="$(printf '%s\n' "$ARM_STANDARD_DRY_RUN" |
-  sed -n 's|.*build/pluto-payload/linux-arm/apps/\(dev\.[^ /]*\).*|\1|p' |
+  sed -n 's|.*/targets/linux-arm/apps/\(dev\.[^ /]*\).*|\1|p' |
   LC_ALL=C sort -u)"
 [[ -n "$ARM64_STANDARD_IDS" && "$ARM64_STANDARD_IDS" = "$ARM_STANDARD_IDS" ]] ||
   fail "--standard selects different application identities by target"
+
+RELEASE_DRY_RUN="$(bash "$RELEASE_SCRIPT" --dry-run)"
+assert_contains "$RELEASE_DRY_RUN" "embedder-device.sh --dry-run"
+assert_contains "$RELEASE_DRY_RUN" "embedder-device-arm.sh --dry-run"
+assert_contains "$RELEASE_DRY_RUN" "--target-platform linux-arm64"
+assert_contains "$RELEASE_DRY_RUN" "--target-platform linux-arm"
+assert_contains "$RELEASE_DRY_RUN" "--standard"
+assert_contains "$RELEASE_DRY_RUN" "targets/linux-arm64"
+assert_contains "$RELEASE_DRY_RUN" "targets/linux-arm"
+assert_contains "$RELEASE_DRY_RUN" "write_release_manifest.dart"
+assert_contains "$RELEASE_DRY_RUN" "write-release-revision"
+assert_contains "$RELEASE_DRY_RUN" "--git-revision"
+EXPECTED_RELEASE_NEXT="Universal release handoff: pluto provision --payload-dir $ROOT/build/pluto-release"
+[[ "$(printf '%s\n' "$RELEASE_DRY_RUN" | tail -1)" == "$EXPECTED_RELEASE_NEXT" ]] ||
+  fail "universal release dry run did not end with the common provision command"
+grep -q 'diff --quiet' "$RELEASE_SCRIPT" ||
+  fail "universal release does not require one clean tracked revision"
+grep -q 'status --porcelain --untracked-files=normal' "$RELEASE_SCRIPT" ||
+  fail "universal release can omit untracked source from its frozen revision"
+[[ "$(grep -c 'require_clean_revision' "$RELEASE_SCRIPT")" -ge 4 ]] ||
+  fail "universal release does not recheck source before manifest and promotion"
+grep -q 'write_release_manifest.dart' "$RELEASE_SCRIPT" ||
+  fail "universal release does not freeze its per-file hash manifest"
 
 ENGINE_HASH="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/engine.version")"
 ARM_ENGINE="$ROOT/third_party/engine/$ENGINE_HASH/linux-arm-release/libflutter_engine.so"
@@ -216,13 +254,13 @@ grep -q 'bash tools/build/embedder-host\.sh' "$ROOT/pubspec.yaml" ||
   fail "root host build command is not wired"
 grep -q 'bash tools/build/embedder-device\.sh' "$ROOT/pubspec.yaml" ||
   fail "root device build command is not wired"
-grep -q 'bash tools/build/assemble-device-payload\.sh' "$ROOT/pubspec.yaml" ||
-  fail "root device payload command is not wired"
+grep -q 'bash tools/build/assemble-device-release\.sh' "$ROOT/pubspec.yaml" ||
+  fail "root universal release command is not wired"
 git -C "$ROOT" check-ignore -q embedder/build/device-arm64/pluto-embedder ||
   fail "device binary is not ignored"
 git -C "$ROOT" check-ignore -q embedder/build/device-arm/pluto-embedder ||
   fail "ARMv7 device binary is not ignored"
-git -C "$ROOT" check-ignore -q build/pluto-payload/linux-arm64/pluto-embedder ||
-  fail "assembled payload is not ignored"
+git -C "$ROOT" check-ignore -q build/pluto-release/targets/linux-arm64/pluto-embedder ||
+  fail "assembled universal release is not ignored"
 
 echo "PASS: embedder build workflow dry-run contract"

@@ -80,10 +80,16 @@ pluto provision --device "$DEVICE" --restore-remarkable
 pluto provision --device "$DEVICE" --uninstall
 ```
 
-Provisioning probes before writing, selects the matching preassembled payload,
-checks its target, verifies pinned engine checksums, and activates it
-transactionally. Supplying `--payload-dir` never overrides hardware identity;
-a mismatched payload is rejected before device files change.
+Provisioning probes before writing, integrity-checks the universal release
+manifest, selects its matching slice, verifies every deployable file and pinned
+engine checksum, and activates it transactionally. Checkout pins and committed
+engine checksum metadata remain the local trust anchors. Supplying
+`--payload-dir` names another complete release-set root and never overrides
+hardware identity; missing, contradictory, hybrid, or tampered content is
+rejected before device files change. A profile whose persistent boot-default
+recovery gate is closed uses the same supervisor in a transient current-boot
+session; stock remains the next-boot default without creating a second app,
+setup, or document workflow.
 
 ## Native hardware boundary
 

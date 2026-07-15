@@ -41,6 +41,7 @@ bash tools/build/test/codex-armv7-build-recipe-test.sh
 bash tools/device/test/pluto-power-key-watch_test.sh
 bash tools/device/test/pluto-session-standby_test.sh
 bash tools/device/test/pluto-session-debug-authorization_test.sh
+bash tools/device/test/pluto-session-once_test.sh
 bash tools/device/test/pluto-session-warm-resume_test.sh
 bash tools/device/test/pluto-session-switcher_test.sh
 bash tools/device/test/pluto-session-power-menu_test.sh

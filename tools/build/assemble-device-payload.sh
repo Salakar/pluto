@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PAYLOAD_ROOT="$ROOT/build/pluto-payload"
 PAYLOAD=""
 FLUTTER_VERSION="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/flutter.version")"
 ENGINE_COMMIT="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/engine.version")"
@@ -22,13 +21,13 @@ TARGET_PLATFORM=linux-arm64
 TARGET_GLIBC_CEILING=2.39
 SNAPSHOT_ARCH=arm64
 HAS_PROFILE_ENGINE=1
-OUTPUT_EXPLICIT=0
 DRY_RUN=0
 SELECTED_APPS=()
 SELECTED_APP_COUNT=0
 
 DEVICE_SCRIPTS=(
   pluto-session.sh
+  pluto-session-once.sh
   pluto-boot-confirm.sh
   pluto-power-key-watch.sh
   pluto-boot-install.sh
@@ -39,11 +38,11 @@ DEVICE_SCRIPTS=(
 
 usage() {
   cat <<'EOF'
-Usage: tools/build/assemble-device-payload.sh [options]
+Internal usage: tools/build/assemble-device-payload.sh [options]
 
-Assemble the release-AOT launcher and selected apps into the canonical
-build/pluto-payload/<target> directory. No app is selected implicitly besides
-the launcher; debug/JIT payloads are never copied.
+Assemble exactly one private release-AOT target slice. The public release entry
+point is tools/build/assemble-device-release.sh, which invokes this worker for
+both targets and checksum-freezes the results in one release manifest.
 
 Options:
   --app NAME       include one repo app; repeat for more apps
@@ -58,13 +57,13 @@ Options:
   --embedder PATH  use an alternate target-compatible pluto-embedder
   --codex-bin PATH pinned ARMv7 Codex CLI input when Codex is selected for
                    linux-arm (default: .pluto-cache/build/codex-armv7/output/codex)
-  --output DIR     override build/pluto-payload/<target>
+  --output DIR     required private slice output directory
   --dry-run        print the complete assembly plan without changing files
   -h, --help       show this help
 
 Examples:
-  melos run build:device-payload -- --standard
-  melos run build:device-payload -- --app counter --app validation_lab
+  tools/build/assemble-device-payload.sh --target-platform linux-arm \
+    --standard --output /tmp/release/targets/linux-arm
 EOF
 }
 
@@ -148,12 +147,10 @@ while (($# > 0)); do
       shift
       (($# > 0)) || die "--output requires a value"
       PAYLOAD="${1%/}"
-      OUTPUT_EXPLICIT=1
       ;;
     --output=*)
       PAYLOAD="${1#*=}"
       PAYLOAD="${PAYLOAD%/}"
-      OUTPUT_EXPLICIT=1
       ;;
     --target-platform)
       shift
@@ -191,10 +188,7 @@ case "$TARGET_PLATFORM" in
   *) die "unsupported target platform: $TARGET_PLATFORM" ;;
 esac
 
-if ((OUTPUT_EXPLICIT == 0)); then
-  PAYLOAD="$PAYLOAD_ROOT/$TARGET_PLATFORM"
-fi
-[[ -n "$PAYLOAD" ]] || die "output directory must not be empty"
+[[ -n "$PAYLOAD" ]] || die "--output is required for the private slice worker"
 case "$PAYLOAD" in
   / | . | .. | */. | */.. | "$ROOT" | "$ROOT/" | "$HOME" | "$HOME/")
     die "refusing unsafe output directory: $PAYLOAD"
@@ -482,4 +476,4 @@ if ((DRY_RUN == 0)); then
   fi
 fi
 
-echo "Native-runtime handoff: pluto provision --payload-dir $PAYLOAD"
+echo "Internal release slice complete: $PAYLOAD"

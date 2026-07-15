@@ -29,6 +29,12 @@ cat > "$ROOT/bin/pluto-boot-install.sh" <<'SCRIPT'
 printf 'boot-install uninstall\n' >> "$PLUTO_TEST_EVENTS"
 exit 0
 SCRIPT
+cat > "$ROOT/bin/pluto-session-once.sh" <<'SCRIPT'
+#!/bin/sh
+[ "${1:-}" = stop ] || exit 64
+printf 'session-once stop\n' >> "$PLUTO_TEST_EVENTS"
+exit 0
+SCRIPT
 cat > "$BIN/systemctl" <<'SCRIPT'
 #!/bin/sh
 printf 'systemctl %s\n' "$*" >> "$PLUTO_TEST_EVENTS"
@@ -41,6 +47,7 @@ exit 1
 SCRIPT
 chmod 0755 \
   "$ROOT/bin/pluto-boot-install.sh" \
+  "$ROOT/bin/pluto-session-once.sh" \
   "$BIN/systemctl" \
   "$BIN/pkill"
 
@@ -63,6 +70,12 @@ env \
   fail 'unrelated stock drop-in was removed'
 grep -q '^boot-install uninstall$' "$EVENTS" ||
   fail 'stock boot restoration did not run'
+grep -q '^session-once stop$' "$EVENTS" ||
+  fail 'current-boot Pluto session was not retired'
+ONCE_LINE=$(grep -n '^session-once stop$' "$EVENTS" | cut -d: -f1)
+BOOT_LINE=$(grep -n '^boot-install uninstall$' "$EVENTS" | cut -d: -f1)
+[ "$ONCE_LINE" -lt "$BOOT_LINE" ] ||
+  fail 'current-boot session remained active during boot restoration'
 grep -q '^systemctl is-active --quiet xochitl.service$' "$EVENTS" ||
   fail 'stock display service was not verified after uninstall'
 

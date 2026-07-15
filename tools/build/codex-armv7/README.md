@@ -56,9 +56,9 @@ required ARM target and rustfmt component, excludes `rust-src`, normalizes time
 and locale inputs, remaps build paths, and permits no network after the
 lockfile-gated fetch.
 
-After a reviewed promotion, pass the canonical path to
-`assemble-device-payload.sh --target-platform linux-arm --codex-bin ...`; the
-assembler independently repeats the ARM ABI and canonical SHA gates before the
+After a reviewed promotion, pass the canonical path to the one public release
+entry point, `assemble-device-release.sh --codex-bin ...`. Its private ARM
+slice worker independently repeats the ABI and canonical SHA gates before the
 unified provision workflow can contact a device.
 
 The normal Codex CLI, `exec --json`, authentication, API transport, and tools

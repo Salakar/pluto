@@ -56,7 +56,7 @@ melos:
       run: bash tools/build/embedder-host.sh
     build:embedder:device:
       run: bash tools/build/embedder-device.sh
-    build:device-payload:
-      run: bash tools/build/assemble-device-payload.sh
+    build:device-release:
+      run: bash tools/build/assemble-device-release.sh
     preview:
       run: echo "not yet implemented" && exit 0

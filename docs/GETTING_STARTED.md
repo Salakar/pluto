@@ -61,7 +61,7 @@ SSH connectivity alone.
 
 ## 3. Provision Pluto
 
-With the repository's release payloads prepared, the normal command is the
+With the repository's universal release prepared, the normal command is the
 same for every supported tablet:
 
 ```bash
@@ -69,15 +69,22 @@ pluto provision --device "$DEVICE"
 pluto provision --device "$DEVICE" --status
 ```
 
-`pluto provision` probes first, selects the matching preassembled release
-payload, verifies engine and application metadata, and activates the correct
-integration transactionally. An explicit `--payload-dir` is optional and is
-rejected if its target does not match the connected device.
+`pluto provision` probes first, integrity-checks
+`build/pluto-release/release-manifest.json`, selects its matching slice, and
+verifies every deployable file plus engine and application metadata before the
+transaction. Checkout pins and committed engine checksum metadata remain the
+local trust anchors; the slice cannot borrow missing deployable files from the
+checkout. An explicit `--payload-dir` names another complete release-set root
+and cannot override hardware identity.
+The matched profile's boot-default recovery gate is applied automatically. If
+the gate is closed, provision activates Pluto through the common supervisor for
+the current boot only, so `pluto run` works immediately while stock remains the
+next-boot default.
 
-If you are building Pluto itself from source, prepare all supported release
-payloads before running this step. The internal target-specific assembly
-commands and safety gates are in the [engineering playbook](../AGENTS.md);
-they are release-maintainer mechanics, not a second device workflow.
+If you are building Pluto itself from source, run
+`melos run build:device-release` first. It prepares both supported slices from
+one clean revision. Internal target compilers remain release-maintainer
+mechanics, not a second device workflow.
 
 Useful variants are also model-neutral:
 

@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: SSH target for the connected Paper Pro Move
+        description: SSH target for the connected supported reMarkable
         required: true
         default: root@10.11.99.1
       provision:
-        description: Provision and select the release launcher at boot
+        description: Provision and activate the release launcher safely
         required: true
         type: boolean
         default: false
@@ -26,17 +26,13 @@ jobs:
           echo "$HOME/.pluto/bin" >> "$GITHUB_PATH"
           echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
           echo "$HOME/.pluto/sdk/$FLUTTER_VERSION/bin" >> "$GITHUB_PATH"
-      - name: Build the AArch64 embedder
-        run: melos run build:embedder:device
-      - name: Assemble the standard release-AOT payload
-        run: melos run build:device-payload -- --standard
+      - name: Assemble the universal release-AOT set
+        run: melos run build:device-release
       - name: Audit the connected device
         run: pluto provision --device "${{ inputs.device }}" --status
-      - name: Provision the release-AOT payload
+      - name: Provision the matching release-AOT slice
         if: ${{ inputs.provision }}
-        run: >-
-          pluto provision --device "${{ inputs.device }}"
-          --payload-dir "$GITHUB_WORKSPACE/build/pluto-payload"
+        run: pluto provision --device "${{ inputs.device }}"
       - name: Smoke every standard release-AOT app
         if: ${{ inputs.provision }}
         run: >-

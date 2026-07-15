@@ -294,6 +294,125 @@ void main() {
     expect(harness.err.toString(), contains('profile, not release'));
   });
 
+  test('build package --published emits both exact release slices', () async {
+    final _CommandHarness harness = _CommandHarness();
+    addTearDown(harness.dispose);
+    final Directory layouts = Directory('${harness.temp.path}/published')
+      ..createSync();
+    for (final PlutoTargetPlatform target in PlutoTargetPlatform.values) {
+      _writeLayout(
+        '${layouts.path}/${target.cliName}',
+        appId: 'dev.example.published',
+        mode: PlutoBuildMode.release,
+        target: target,
+      );
+    }
+    final String output = '${harness.temp.path}/out/published.plap';
+
+    final int? exitCode =
+        await buildCommandRunner(environment: harness.environment).run(<String>[
+          'build',
+          'package',
+          '--published',
+          '--no-live',
+          '--from-layout',
+          layouts.path,
+          '--compression',
+          'none',
+          '-o',
+          output,
+        ]);
+
+    expect(exitCode, ExitCodes.ok, reason: harness.err.toString());
+    final PlapArchive archive = await PlapArchive.read(output);
+    expect(archive.appId, 'dev.example.published');
+    expect(archive.slices.keys, <String>{'linux-arm', 'linux-arm64'});
+  });
+
+  test('published package rejects a missing target layout', () async {
+    final _CommandHarness harness = _CommandHarness();
+    addTearDown(harness.dispose);
+    final Directory layouts = Directory('${harness.temp.path}/missing')
+      ..createSync();
+    _writeLayout(
+      '${layouts.path}/linux-arm64',
+      appId: 'dev.example.published',
+      mode: PlutoBuildMode.release,
+    );
+    final String output = '${harness.temp.path}/out/missing.plap';
+
+    final int? exitCode =
+        await buildCommandRunner(environment: harness.environment).run(<String>[
+          'build',
+          'package',
+          '--published',
+          '--no-live',
+          '--from-layout',
+          layouts.path,
+          '--compression',
+          'none',
+          '-o',
+          output,
+        ]);
+
+    expect(exitCode, ExitCodes.usage);
+    expect(harness.err.toString(), contains('missing the linux-arm layout'));
+    expect(File(output).existsSync(), isFalse);
+  });
+
+  test('published package rejects contradictory target slices', () async {
+    final _CommandHarness harness = _CommandHarness();
+    addTearDown(harness.dispose);
+    final Directory layouts = Directory('${harness.temp.path}/contradictory')
+      ..createSync();
+    _writeLayout(
+      '${layouts.path}/linux-arm64',
+      appId: 'dev.example.published',
+      mode: PlutoBuildMode.release,
+    );
+    _writeLayout(
+      '${layouts.path}/linux-arm',
+      appId: 'dev.example.published',
+      mode: PlutoBuildMode.release,
+      target: PlutoTargetPlatform.linuxArm64,
+    );
+
+    final int? exitCode =
+        await buildCommandRunner(environment: harness.environment).run(<String>[
+          'build',
+          'package',
+          '--published',
+          '--no-live',
+          '--from-layout',
+          layouts.path,
+          '--compression',
+          'none',
+          '-o',
+          '${harness.temp.path}/out/contradictory.plap',
+        ]);
+
+    expect(exitCode, ExitCodes.failure);
+    expect(harness.err.toString(), contains('not linux-arm'));
+  });
+
+  test('published package refuses device or target overrides', () async {
+    final _CommandHarness harness = _CommandHarness();
+    addTearDown(harness.dispose);
+
+    final int? exitCode =
+        await buildCommandRunner(environment: harness.environment).run(<String>[
+          'build',
+          'package',
+          '--published',
+          '--target-platform',
+          'linux-arm',
+          '--no-live',
+        ]);
+
+    expect(exitCode, ExitCodes.usage);
+    expect(harness.err.toString(), contains('already builds both targets'));
+  });
+
   test('profile app defaults to a mode-named output directory', () async {
     final _CommandHarness harness = _CommandHarness();
     addTearDown(harness.dispose);
@@ -514,6 +633,28 @@ void main() {
       ),
       isTrue,
     );
+  });
+
+  test('install rejects a package missing the probed target slice', () async {
+    final _CommandHarness harness = _CommandHarness(
+      reachable: true,
+      execHandler: _rm2ExecHandler,
+    );
+    addTearDown(harness.dispose);
+    final File package = await _writePackageForMode(
+      harness.temp,
+      appId: 'dev.example.arm64-only',
+      mode: PlutoBuildMode.release,
+    );
+
+    final int? exitCode = await buildCommandRunner(
+      environment: harness.environment,
+    ).run(<String>['install', '-d', '10.11.99.1', package.path]);
+
+    expect(exitCode, ExitCodes.failure);
+    expect(harness.err.toString(), contains('no linux-arm slice'));
+    expect(harness.transports.single.uploads, isEmpty);
+    expect(harness.transports.single.directoryUploads, isEmpty);
   });
 
   test('install --profile explicitly installs a profile AOT package', () async {
@@ -780,7 +921,7 @@ void main() {
   });
 
   test(
-    'provision stages the canonical layout and installs boot-first',
+    'provision stages the canonical layout and enforces Move boot policy',
     () async {
       final _CommandHarness harness = _CommandHarness(
         reachable: true,
@@ -788,17 +929,18 @@ void main() {
       );
       addTearDown(harness.dispose);
       final String payload = '${harness.temp.path}/payload';
-      _writeProvisionRuntime(payload);
+      final String slice = _writeProvisionRuntime(payload);
       _writeLayout(
-        '$payload/apps/dev.pluto.launcher',
+        '$slice/apps/dev.pluto.launcher',
         appId: 'dev.pluto.launcher',
         mode: PlutoBuildMode.release,
       );
       _writeLayout(
-        '$payload/apps/dev.example.counter',
+        '$slice/apps/dev.example.counter',
         appId: 'dev.example.counter',
         mode: PlutoBuildMode.profile,
       );
+      _sealReleaseSet(harness, payload);
 
       final int? exitCode =
           await buildCommandRunner(environment: harness.environment).run(
@@ -806,6 +948,7 @@ void main() {
           );
 
       expect(exitCode, ExitCodes.ok, reason: harness.err.toString());
+      expect(harness.out.toString(), contains('boot-default recovery gate'));
       final FakeTransport transport = harness.transports.single;
       expect(
         transport.uploads.any(
@@ -894,39 +1037,92 @@ void main() {
         transport.commands.any(
           (String c) =>
               c.contains('pluto-boot-install.sh') &&
-              c.contains(' install') &&
+              c.contains(' uninstall') &&
               c.contains("PLUTO_ROOT='/home/root/pluto'"),
         ),
         isTrue,
-        reason: 'boot-first configured against the canonical root',
+        reason: 'the profile gate automatically preserves stock boot',
       );
+      expect(
+        transport.commands.any(
+          (String command) =>
+              command.contains(
+                "sh '/home/root/pluto/bin/pluto-session-once.sh' start",
+              ) &&
+              command.contains("PLUTO_RUN_DIR='/run/pluto'"),
+        ),
+        isTrue,
+        reason: 'normal Move provisioning must be immediately runnable',
+      );
+      expect(harness.out.toString(), contains('active for this boot'));
     },
   );
 
-  test('provision refuses an arm64 layout on RM2 before writes', () async {
+  test(
+    'provision never fills a release slice from checkout build output',
+    () async {
+      final _CommandHarness harness = _CommandHarness(
+        reachable: true,
+        execHandler: _moveExecHandler,
+      );
+      addTearDown(harness.dispose);
+      final String payload = '${harness.temp.path}/payload';
+      final String slice = _writeProvisionRuntime(payload);
+      File('$slice/bin/pluto-controlctl').deleteSync();
+      File('${harness.temp.path}/embedder/build/device-arm64/pluto-controlctl')
+        ..createSync(recursive: true)
+        ..writeAsBytesSync(<int>[99]);
+      _writeLayout(
+        '$slice/apps/dev.pluto.launcher',
+        appId: 'dev.pluto.launcher',
+        mode: PlutoBuildMode.release,
+      );
+      _sealReleaseSet(harness, payload);
+
+      final int? exitCode =
+          await buildCommandRunner(environment: harness.environment).run(
+            <String>['provision', '--payload-dir', payload, '-d', '10.11.99.1'],
+          );
+
+      expect(exitCode, ExitCodes.usage);
+      expect(harness.err.toString(), contains('$slice/bin/pluto-controlctl'));
+      expect(
+        RegExp(
+          RegExp.escape('$slice/bin/pluto-controlctl'),
+        ).allMatches(harness.err.toString()),
+        hasLength(1),
+        reason: 'one missing integrity-checked file has one actionable error',
+      );
+      expect(harness.transports.single.uploads, isEmpty);
+      expect(harness.transports.single.directoryUploads, isEmpty);
+    },
+  );
+
+  test('provision refuses a release missing the probed target slice', () async {
     final _CommandHarness harness = _CommandHarness(
       reachable: true,
       execHandler: _rm2ExecHandler,
     );
     addTearDown(harness.dispose);
     final String payload = '${harness.temp.path}/payload';
-    _writeProvisionRuntime(payload);
+    final String slice = _writeProvisionRuntime(payload);
     _writeLayout(
-      '$payload/apps/dev.pluto.launcher',
+      '$slice/apps/dev.pluto.launcher',
       appId: 'dev.pluto.launcher',
       mode: PlutoBuildMode.release,
     );
+    _sealReleaseSet(harness, payload);
+    Directory('$payload/targets/linux-arm').deleteSync(recursive: true);
 
     final int? exitCode = await buildCommandRunner(
       environment: harness.environment,
     ).run(<String>['provision', '--payload-dir', payload, '-d', '10.11.99.1']);
 
-    expect(exitCode, ExitCodes.usage);
+    expect(exitCode, ExitCodes.failure);
     expect(
       harness.err.toString(),
-      contains('does not match the connected device'),
+      contains('missing or not a regular directory'),
     );
-    expect(harness.err.toString(), contains('expected linux-arm'));
     final FakeTransport transport = harness.transports.single;
     expect(transport.uploads, isEmpty);
     expect(transport.directoryUploads, isEmpty);
@@ -947,19 +1143,20 @@ void main() {
     );
     addTearDown(harness.dispose);
     final String payload = '${harness.temp.path}/payload';
-    _writeArmProvisionRuntime(payload);
+    final String slice = _writeArmProvisionRuntime(payload);
     _writeLayout(
-      '$payload/launcher',
+      '$slice/launcher',
       appId: 'dev.pluto.launcher',
       mode: PlutoBuildMode.release,
       target: PlutoTargetPlatform.linuxArm,
     );
     _writeLayout(
-      '$payload/apps/dev.pluto.codex',
+      '$slice/apps/dev.pluto.codex',
       appId: 'dev.pluto.codex',
       mode: PlutoBuildMode.release,
       target: PlutoTargetPlatform.linuxArm,
     );
+    _sealReleaseSet(harness, payload);
 
     final int? exitCode = await buildCommandRunner(
       environment: harness.environment,
@@ -1010,7 +1207,7 @@ void main() {
   });
 
   test(
-    'provision rejects missing or tampered Codex before device I/O',
+    'provision rejects missing or tampered Codex before device writes',
     () async {
       for (final String failure in <String>['missing', 'tampered']) {
         final _CommandHarness harness = _CommandHarness(
@@ -1019,25 +1216,26 @@ void main() {
         );
         addTearDown(harness.dispose);
         final String payload = '${harness.temp.path}/payload';
-        _writeArmProvisionRuntime(payload);
+        final String slice = _writeArmProvisionRuntime(payload);
         _writeLayout(
-          '$payload/launcher',
+          '$slice/launcher',
           appId: 'dev.pluto.launcher',
           mode: PlutoBuildMode.release,
           target: PlutoTargetPlatform.linuxArm,
         );
         _writeLayout(
-          '$payload/apps/dev.pluto.codex',
+          '$slice/apps/dev.pluto.codex',
           appId: 'dev.pluto.codex',
           mode: PlutoBuildMode.release,
           target: PlutoTargetPlatform.linuxArm,
         );
-        final File codex = File('$payload/bin/codex');
+        final File codex = File('$slice/bin/codex');
         if (failure == 'missing') {
           codex.deleteSync();
         } else {
           codex.writeAsBytesSync(<int>[...codex.readAsBytesSync(), 0]);
         }
+        _sealReleaseSet(harness, payload);
 
         final int? exitCode =
             await buildCommandRunner(environment: harness.environment).run(
@@ -1051,7 +1249,6 @@ void main() {
             );
 
         expect(exitCode, ExitCodes.usage, reason: failure);
-        expect(harness.transports.single.commands, isEmpty, reason: failure);
         expect(harness.transports.single.uploads, isEmpty, reason: failure);
         expect(
           harness.transports.single.directoryUploads,
@@ -1063,10 +1260,14 @@ void main() {
   );
 
   test('provision without a launcher payload fails host-side', () async {
-    final _CommandHarness harness = _CommandHarness(reachable: true);
+    final _CommandHarness harness = _CommandHarness(
+      reachable: true,
+      execHandler: _moveExecHandler,
+    );
     addTearDown(harness.dispose);
     final String payload = '${harness.temp.path}/payload';
     _writeProvisionRuntime(payload);
+    _sealReleaseSet(harness, payload);
 
     final int? exitCode = await buildCommandRunner(
       environment: harness.environment,
@@ -1075,27 +1276,29 @@ void main() {
     expect(exitCode, ExitCodes.usage);
     expect(harness.err.toString(), contains('launcher'));
     for (final FakeTransport transport in harness.transports) {
-      expect(
-        transport.commands,
-        isEmpty,
-        reason: 'must fail before touching the device',
-      );
       expect(transport.uploads, isEmpty);
     }
   });
 
   test(
-    'provision rejects a mismatched release engine before device I/O',
+    'provision rejects a mismatched release engine before device writes',
     () async {
-      final _CommandHarness harness = _CommandHarness(reachable: true);
+      final _CommandHarness harness = _CommandHarness(
+        reachable: true,
+        execHandler: _moveExecHandler,
+      );
       addTearDown(harness.dispose);
       final String payload = '${harness.temp.path}/payload';
-      _writeProvisionRuntime(payload, releaseBytes: <int>[9]);
+      final String slice = _writeProvisionRuntime(
+        payload,
+        releaseBytes: <int>[9],
+      );
       _writeLayout(
-        '$payload/apps/dev.pluto.launcher',
+        '$slice/apps/dev.pluto.launcher',
         appId: 'dev.pluto.launcher',
         mode: PlutoBuildMode.release,
       );
+      _sealReleaseSet(harness, payload);
 
       final int? exitCode =
           await buildCommandRunner(environment: harness.environment).run(
@@ -1104,16 +1307,19 @@ void main() {
 
       expect(exitCode, ExitCodes.usage);
       expect(harness.err.toString(), contains('engine checksum mismatch'));
-      expect(harness.transports.single.commands, isEmpty);
       expect(harness.transports.single.uploads, isEmpty);
     },
   );
 
   test('provision rejects the ambiguous legacy top-level engine', () async {
-    final _CommandHarness harness = _CommandHarness(reachable: true);
+    final _CommandHarness harness = _CommandHarness(
+      reachable: true,
+      execHandler: _moveExecHandler,
+    );
     addTearDown(harness.dispose);
     final String payload = '${harness.temp.path}/payload';
     _writeProvisionRuntime(payload, legacyRelease: true);
+    _sealReleaseSet(harness, payload);
 
     final int? exitCode = await buildCommandRunner(
       environment: harness.environment,
@@ -1121,20 +1327,23 @@ void main() {
 
     expect(exitCode, ExitCodes.usage);
     expect(harness.err.toString(), contains('Ambiguous legacy engine'));
-    expect(harness.transports.single.commands, isEmpty);
     expect(harness.transports.single.uploads, isEmpty);
   });
 
   test('provision requires explicit --debug for a JIT engine', () async {
-    final _CommandHarness harness = _CommandHarness(reachable: true);
+    final _CommandHarness harness = _CommandHarness(
+      reachable: true,
+      execHandler: _moveExecHandler,
+    );
     addTearDown(harness.dispose);
     final String payload = '${harness.temp.path}/payload';
-    _writeProvisionRuntime(payload, includeDebug: true);
+    final String slice = _writeProvisionRuntime(payload, includeDebug: true);
     _writeLayout(
-      '$payload/apps/dev.pluto.launcher',
+      '$slice/apps/dev.pluto.launcher',
       appId: 'dev.pluto.launcher',
       mode: PlutoBuildMode.release,
     );
+    _sealReleaseSet(harness, payload);
 
     final int? exitCode = await buildCommandRunner(
       environment: harness.environment,
@@ -1142,7 +1351,6 @@ void main() {
 
     expect(exitCode, ExitCodes.usage);
     expect(harness.err.toString(), contains('requires explicit'));
-    expect(harness.transports.single.commands, isEmpty);
     expect(harness.transports.single.uploads, isEmpty);
   });
 
@@ -1197,6 +1405,14 @@ final class _CommandHarness {
     pins.createSync(recursive: true);
     File('${pins.path}/flutter.version').writeAsStringSync('3.44.4');
     File('${pins.path}/engine.version').writeAsStringSync(_engineHash);
+    File('${pins.path}/arm-sdk.pin').writeAsStringSync('''
+schema=1
+name=test-arm-sdk
+sha256=${'b' * 64}
+gcc_version=11.5.0
+gcc_machine=arm-remarkable-linux-gnueabi
+regular_files=1
+''');
     File(
       '${pins.path}/supported_os.json',
     ).writeAsStringSync('{"supportedOsBuilds":["20260629074044"]}');
@@ -1343,14 +1559,17 @@ void _writeLayout(
 List<int> _aotElf(PlutoBuildMode mode) =>
     mode == PlutoBuildMode.release ? releaseAotElf() : profileAotElf();
 
-void _writeProvisionRuntime(
-  String payload, {
+String _writeProvisionRuntime(
+  String releaseRoot, {
   List<int> releaseBytes = const <int>[2],
   bool legacyRelease = false,
   bool includeDebug = false,
+  PlutoTargetPlatform target = PlutoTargetPlatform.linuxArm64,
 }) {
+  final String payload = '$releaseRoot/targets/${target.cliName}';
   for (final String script in <String>[
     'pluto-session.sh',
+    'pluto-session-once.sh',
     'pluto-boot-confirm.sh',
     'pluto-power-key-watch.sh',
     'pluto-boot-install.sh',
@@ -1369,6 +1588,9 @@ void _writeProvisionRuntime(
   File('$payload/share/device-profiles.sh')
     ..createSync(recursive: true)
     ..writeAsStringSync('# generated device profiles\n');
+  File(
+    '$payload/share/release-revision',
+  ).writeAsStringSync('0123456789abcdef0123456789abcdef01234567\n');
   final String releasePath = legacyRelease
       ? '$payload/libflutter_engine.so'
       : '$payload/engine/release/libflutter_engine.so';
@@ -1383,12 +1605,65 @@ void _writeProvisionRuntime(
       ..createSync(recursive: true)
       ..writeAsBytesSync(<int>[4]);
   }
+  return payload;
 }
 
-void _writeArmProvisionRuntime(String payload) {
-  _writeProvisionRuntime(payload, releaseBytes: const <int>[6]);
+String _writeArmProvisionRuntime(String releaseRoot) {
+  final String payload = _writeProvisionRuntime(
+    releaseRoot,
+    releaseBytes: const <int>[6],
+    target: PlutoTargetPlatform.linuxArm,
+  );
   final Uint8List codex = _testCodexBinary();
   File('$payload/bin/codex').writeAsBytesSync(codex);
+  return payload;
+}
+
+void _sealReleaseSet(_CommandHarness harness, String releaseRoot) {
+  final ReleaseSetPins pins = ReleaseSetPins.read(harness.pins.path);
+  final Directory targets = Directory('$releaseRoot/targets');
+  for (final String target in ReleaseSetManifest.requiredTargets) {
+    final File receipt = File('${targets.path}/$target/share/release-revision');
+    if (!receipt.existsSync()) {
+      receipt
+        ..createSync(recursive: true)
+        ..writeAsStringSync('0123456789abcdef0123456789abcdef01234567\n');
+    }
+  }
+  final Map<String, Object?> targetRecords = <String, Object?>{};
+  for (final FileSystemEntity entity in targets.listSync()) {
+    if (entity is! Directory) {
+      continue;
+    }
+    final String target = entity.uri.pathSegments
+        .where((String segment) => segment.isNotEmpty)
+        .last;
+    final Map<String, String> files = <String, String>{};
+    for (final FileSystemEntity file in entity.listSync(recursive: true)) {
+      if (file is! File) {
+        continue;
+      }
+      final String prefix = '${entity.path}${Platform.pathSeparator}';
+      final String relative = file.path
+          .substring(prefix.length)
+          .replaceAll(Platform.pathSeparator, '/');
+      files[relative] = sha256Bytes(file.readAsBytesSync());
+    }
+    targetRecords[target] = <String, Object?>{
+      'files': <String, String>{
+        for (final String path in files.keys.toList()..sort())
+          path: files[path]!,
+      },
+      'treeSha256': sha256Tree(files),
+    };
+  }
+  File('$releaseRoot/${ReleaseSetManifest.fileName}').writeAsStringSync(
+    jsonEncode(<String, Object?>{
+      'gitRevision': '0123456789abcdef0123456789abcdef01234567',
+      'pins': pins.toJson(),
+      'targets': targetRecords,
+    }),
+  );
 }
 
 void _writePinnedEngineArtifact({
