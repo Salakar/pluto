@@ -124,13 +124,6 @@ final class ProvisionCommand extends PlutoCommand {
         selection.target,
       );
       final String payloadDir = releaseSlice.directory;
-      if (File('$payloadDir/libflutter_engine.so').existsSync()) {
-        usageException(
-          'Ambiguous legacy engine rejected: '
-          '$payloadDir/libflutter_engine.so. Use the checksum-verified '
-          'engine/release/libflutter_engine.so path.',
-        );
-      }
       final List<PayloadApp> apps = _collectApps(payloadDir, pins);
       final bool requestedBootDefault =
           !(argResults!['no-boot-default'] as bool);

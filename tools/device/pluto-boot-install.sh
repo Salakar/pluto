@@ -200,8 +200,7 @@ require_payload() {
   [ -x "$ROOT/bin/pluto-session.sh" ] || return 1
   [ -x "$ROOT/bin/pluto-boot-confirm.sh" ] || return 1
   [ -d "$ROOT/launcher/bundle" ] || return 1
-  { [ -f "$ROOT/launcher/bundle/lib/app.so" ] ||
-    [ -f "$ROOT/launcher/bundle/app.so" ]; } || return 1
+  [ -f "$ROOT/launcher/bundle/lib/app.so" ] || return 1
   [ ! -f "$ROOT/launcher/bundle/flutter_assets/kernel_blob.bin" ] || return 1
   if [ -f "$ROOT/launcher/install.json" ]; then
     grep -q '"buildMode"[[:space:]]*:[[:space:]]*"release"' \

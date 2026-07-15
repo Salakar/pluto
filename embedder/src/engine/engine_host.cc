@@ -244,15 +244,7 @@ void EngineHost::resolve_paths() {
     config_.assets_path = join_path(config_.bundle_path, "flutter_assets");
   }
   if (config_.aot_elf_path.empty() && !config_.bundle_path.empty()) {
-    const std::string canonical_aot =
-        join_path(config_.bundle_path, "lib/app.so");
-    const std::string legacy_aot = join_path(config_.bundle_path, "app.so");
-    // New packages always use bundle/lib/app.so. Keep reading the former
-    // bundle/app.so layout so already-installed bundles remain launchable,
-    // but prefer the canonical file when both happen to be present.
-    config_.aot_elf_path =
-        file_exists(canonical_aot) || !file_exists(legacy_aot) ? canonical_aot
-                                                               : legacy_aot;
+    config_.aot_elf_path = join_path(config_.bundle_path, "lib/app.so");
   }
   if (config_.engine_path.empty()) {
     config_.engine_path = "third_party/engine/linux-arm64/libflutter_engine.so";

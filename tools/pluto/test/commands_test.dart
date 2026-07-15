@@ -1311,25 +1311,6 @@ void main() {
     },
   );
 
-  test('provision rejects the ambiguous legacy top-level engine', () async {
-    final _CommandHarness harness = _CommandHarness(
-      reachable: true,
-      execHandler: _moveExecHandler,
-    );
-    addTearDown(harness.dispose);
-    final String payload = '${harness.temp.path}/payload';
-    _writeProvisionRuntime(payload, legacyRelease: true);
-    _sealReleaseSet(harness, payload);
-
-    final int? exitCode = await buildCommandRunner(
-      environment: harness.environment,
-    ).run(<String>['provision', '--payload-dir', payload, '-d', '10.11.99.1']);
-
-    expect(exitCode, ExitCodes.usage);
-    expect(harness.err.toString(), contains('Ambiguous legacy engine'));
-    expect(harness.transports.single.uploads, isEmpty);
-  });
-
   test('provision requires explicit --debug for a JIT engine', () async {
     final _CommandHarness harness = _CommandHarness(
       reachable: true,
@@ -1562,7 +1543,6 @@ List<int> _aotElf(PlutoBuildMode mode) =>
 String _writeProvisionRuntime(
   String releaseRoot, {
   List<int> releaseBytes = const <int>[2],
-  bool legacyRelease = false,
   bool includeDebug = false,
   PlutoTargetPlatform target = PlutoTargetPlatform.linuxArm64,
 }) {
@@ -1591,10 +1571,7 @@ String _writeProvisionRuntime(
   File(
     '$payload/share/release-revision',
   ).writeAsStringSync('0123456789abcdef0123456789abcdef01234567\n');
-  final String releasePath = legacyRelease
-      ? '$payload/libflutter_engine.so'
-      : '$payload/engine/release/libflutter_engine.so';
-  File(releasePath)
+  File('$payload/engine/release/libflutter_engine.so')
     ..createSync(recursive: true)
     ..writeAsBytesSync(releaseBytes);
   File('$payload/engine/profile/libflutter_engine.so')

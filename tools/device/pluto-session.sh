@@ -800,8 +800,6 @@ launch_app() {
   aot_elf=""
   if [ -f "$dir/bundle/lib/app.so" ]; then
     aot_elf="$dir/bundle/lib/app.so"
-  elif [ -f "$dir/bundle/app.so" ]; then
-    aot_elf="$dir/bundle/app.so"
   fi
   if [ -n "$aot_elf" ]; then
     mode=release

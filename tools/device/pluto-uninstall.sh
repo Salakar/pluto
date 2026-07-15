@@ -105,10 +105,10 @@ restore_boot_slots() {
     return 0
   fi
 
-  # A legacy or damaged runtime may lack the installer. Restore stock on the
-  # live slot, but report failure so the runtime remains available to any
-  # inactive-slot override. Deleting it would turn the next slot flip into a
-  # boot with no display service.
+  # A damaged runtime may lack the installer. Restore stock on the live slot,
+  # but report failure so the runtime remains available to any inactive-slot
+  # override. Deleting it would turn the next slot flip into a boot with no
+  # display service.
   fallback_restore_live_boot || true
   return 1
 }

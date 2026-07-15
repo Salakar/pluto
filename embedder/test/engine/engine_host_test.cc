@@ -273,26 +273,15 @@ TEST(EngineHostConfig, RejectsRelativeHealthFileBeforeStartup) {
             "path");
 }
 
-TEST(EngineHostPaths, PrefersCanonicalAotElf) {
+TEST(EngineHostPaths, UsesCanonicalAotElf) {
   TempBundle bundle("canonical");
   bundle.touch("lib/app.so");
-  bundle.touch("app.so");
   auto host = make_host(bundle.path());
   std::string error;
 
   EXPECT_FALSE(host.initialize(&error));
   EXPECT_EQ(host.config().aot_elf_path,
             (bundle.path() / "lib/app.so").string());
-}
-
-TEST(EngineHostPaths, AcceptsLegacyAotElfWhenCanonicalIsAbsent) {
-  TempBundle bundle("legacy");
-  bundle.touch("app.so");
-  auto host = make_host(bundle.path());
-  std::string error;
-
-  EXPECT_FALSE(host.initialize(&error));
-  EXPECT_EQ(host.config().aot_elf_path, (bundle.path() / "app.so").string());
 }
 
 TEST(EngineHostPaths, MissingAotElfDefaultsToCanonicalLayout) {
