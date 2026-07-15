@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:pluto_manifest/pluto_manifest.dart';
 
 import '../artifacts/checksums.dart';
+import '../artifacts/host_metadata.dart';
 import '../errors.dart';
 import 'release_pipeline.dart';
 import 'tar_writer.dart';
@@ -603,6 +604,11 @@ void _validateLayoutPath(String path) {
       )) {
     throw ArtifactVerificationException(
       message: 'Unsafe package layout path: $path.',
+    );
+  }
+  if (isHostMetadataPath(path)) {
+    throw ArtifactVerificationException(
+      message: 'Package layout contains forbidden host metadata: $path.',
     );
   }
 }

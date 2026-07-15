@@ -7,6 +7,14 @@ import '../errors.dart';
 import '../process.dart';
 import 'device_transport.dart';
 
+/// Host environment for the tar half of a directory upload.
+///
+/// macOS tar otherwise synthesizes AppleDouble `._*` entries for extended
+/// attributes. Those files are host metadata, not part of a Pluto payload.
+Map<String, String> directoryUploadTarEnvironment(
+  Map<String, String> hostEnvironment,
+) => <String, String>{...hostEnvironment, 'COPYFILE_DISABLE': '1'};
+
 /// OpenSSH-client transport tuned for Dropbear devices.
 final class DropbearTransport implements DeviceTransport {
   /// Creates a Dropbear transport.
@@ -155,7 +163,7 @@ final class DropbearTransport implements DeviceTransport {
       '-cf',
       '-',
       '.',
-    ]);
+    ], environment: directoryUploadTarEnvironment(Platform.environment));
     final Process ssh = await Process.start('ssh', <String>[
       ..._baseSshArgs(const Duration(seconds: 30)),
       endpoint.sshTarget,

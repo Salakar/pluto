@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:pluto_manifest/pluto_manifest.dart';
 
 import '../artifacts/checksums.dart';
+import '../artifacts/host_metadata.dart';
 import '../errors.dart';
 import 'release_pipeline.dart';
 import 'tar_writer.dart';
@@ -668,6 +669,11 @@ void _validateTarPath(String path, {required bool directory}) {
       )) {
     throw ArtifactVerificationException(
       message: 'Unsafe .plap package path: $path.',
+    );
+  }
+  if (isHostMetadataPath(normalized)) {
+    throw ArtifactVerificationException(
+      message: 'Package contains forbidden host metadata: $path.',
     );
   }
 }

@@ -468,6 +468,64 @@ void main() {
     );
   });
 
+  test('builder rejects host metadata anywhere in a slice', () async {
+    for (final String path in <String>[
+      'bundle/flutter_assets/.DS_Store',
+      'bundle/flutter_assets/.AppleDouble/resource',
+      'bundle/flutter_assets/._AssetManifest.bin',
+    ]) {
+      await expectLater(
+        const PlapPackageBuilder(compressor: NoopCompressor()).build(
+          source: MemoryPackageSource(<PackageEntry>[
+            ..._releaseEntries(PlutoTargetPlatform.linuxArm64),
+            PackageEntry(path: path, bytes: Uint8List.fromList(<int>[1])),
+          ]),
+          metadata: const PackageMetadata(
+            flutterVersion: '3.44.4',
+            engineCommit: _engine,
+            plutoVersion: '0.1.0',
+          ),
+        ),
+        throwsA(
+          isA<ArtifactVerificationException>().having(
+            (ArtifactVerificationException error) => error.message,
+            'message',
+            allOf(contains('forbidden host metadata'), contains(path)),
+          ),
+        ),
+        reason: path,
+      );
+    }
+  });
+
+  test('reader rejects host metadata from a crafted package', () async {
+    const String path =
+        'targets/linux-arm64/bundle/flutter_assets/._AssetManifest.bin';
+    final Uint8List crafted = _canonicalTar(<PackageEntry>[
+      PackageEntry(path: 'manifest.json', bytes: _manifest()),
+      ..._canonicalSliceEntries(
+        PlutoTargetPlatform.linuxArm64,
+        const PackageMetadata(
+          flutterVersion: '3.44.4',
+          engineCommit: _engine,
+          plutoVersion: '0.1.0',
+        ),
+      ),
+      PackageEntry(path: path, bytes: Uint8List.fromList(<int>[1])),
+    ]);
+
+    await expectLater(
+      PlapArchive.read(_writeBytes(crafted, 'host-metadata').path),
+      throwsA(
+        isA<ArtifactVerificationException>().having(
+          (ArtifactVerificationException error) => error.message,
+          'message',
+          allOf(contains('forbidden host metadata'), contains(path)),
+        ),
+      ),
+    );
+  });
+
   test('arm64 debug package is canonical and install-ready', () async {
     const PackageMetadata metadata = PackageMetadata(
       flutterVersion: '3.44.4',

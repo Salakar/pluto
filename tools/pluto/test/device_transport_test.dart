@@ -1,4 +1,5 @@
 import 'package:pluto_cli/src/ssh/device_transport.dart';
+import 'package:pluto_cli/src/ssh/dropbear_transport.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -47,5 +48,14 @@ void main() {
         throwsFormatException,
       );
     });
+  });
+
+  test('directory uploads disable macOS AppleDouble synthesis', () {
+    final Map<String, String> environment = directoryUploadTarEnvironment(
+      const <String, String>{'PATH': '/usr/bin:/bin', 'COPYFILE_DISABLE': '0'},
+    );
+
+    expect(environment['PATH'], '/usr/bin:/bin');
+    expect(environment['COPYFILE_DISABLE'], '1');
   });
 }

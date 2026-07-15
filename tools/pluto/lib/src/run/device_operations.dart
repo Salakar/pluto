@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../artifacts/checksums.dart';
+import '../artifacts/host_metadata.dart';
 import '../build/plap_reader.dart';
 import '../device/device_probe.dart';
 import '../device/remarkable_device.dart';
@@ -279,6 +280,7 @@ final class LiveDeviceOperations {
   }
 
   _PreparedPayloadApp _prepareApp(PayloadApp app, {String? manifestPath}) {
+    _rejectHostMetadata(app);
     final File manifest = File(
       manifestPath ?? '${app.bundleDir}/../manifest.json',
     );
@@ -354,6 +356,32 @@ final class LiveDeviceOperations {
       manifestBytes: manifestBytes,
       layoutFiles: List<_PreparedLayoutFile>.unmodifiable(layoutFiles),
     );
+  }
+
+  void _rejectHostMetadata(PayloadApp app) {
+    final Directory bundle = Directory(app.bundleDir);
+    try {
+      for (final FileSystemEntity entity in bundle.listSync(
+        recursive: true,
+        followLinks: false,
+      )) {
+        final String relative = entity.path
+            .substring(bundle.path.length)
+            .replaceAll('\\', '/');
+        if (isHostMetadataPath(relative)) {
+          throw DeviceOperationException(
+            'bundle for ${app.appId} contains host metadata',
+            'Remove $relative before provisioning. Pluto payloads cannot '
+                'contain .DS_Store, .AppleDouble, or AppleDouble ._* files.',
+          );
+        }
+      }
+    } on FileSystemException catch (error) {
+      throw DeviceOperationException(
+        'could not inspect bundle for ${app.appId}',
+        error.message,
+      );
+    }
   }
 
   bool _isSafeLayoutPath(String value) {
@@ -537,7 +565,20 @@ final class LiveDeviceOperations {
       '/home/root/.pluto-uninstall-* /home/root/.pluto-restart-* '
       '/run/pluto/integration-provision.lock; '
       'rm -f /home/root/.pluto-xochitl-restart-ledger* '
-      '/run/pluto/appload-control.sock /tmp/qtfb.sock*; '
+      '/run/pluto/appload-control.sock /tmp/qtfb.sock* '
+      '${_q('$deviceRoot/bin/pluto-apploadctl')}; '
+      'if [ -d ${_q(deviceRoot)} ]; then '
+      'find ${_q(deviceRoot)} -type f -name ${_q('._*')} '
+      '-exec rm -f {} \\; 2>/dev/null || true; '
+      'find ${_q(deviceRoot)} -type f -name ${_q('.DS_Store')} '
+      '-exec rm -f {} \\; 2>/dev/null || true; '
+      'find ${_q(deviceRoot)} -type d -name ${_q('.AppleDouble')} '
+      '-prune -exec rm -rf {} \\; 2>/dev/null || true; '
+      'for pattern in ${_q('._*')} ${_q('.DS_Store')} '
+      '${_q('.AppleDouble')}; do '
+      'found=\$(find ${_q(deviceRoot)} -name "\$pattern" '
+      '-print -quit 2>/dev/null || true); '
+      '[ -z "\$found" ] || exit 1; done; fi; '
       'systemctl daemon-reload 2>/dev/null || true; '
       'for forbidden in /home/root/xovi /home/root/pluto-arm '
       '/home/root/.pluto-xovi-* /home/root/.pluto-integration-* '
@@ -545,10 +586,11 @@ final class LiveDeviceOperations {
       '/home/root/.pluto-uninstall-* /home/root/.pluto-restart-* '
       '/home/root/.pluto-xochitl-restart-ledger* '
       '/run/pluto/integration-provision.lock '
-      '/run/pluto/appload-control.sock /tmp/qtfb.sock*; do '
+      '/run/pluto/appload-control.sock /tmp/qtfb.sock* '
+      '${_q('$deviceRoot/bin/pluto-apploadctl')}; do '
       '[ ! -e "\$forbidden" ] && [ ! -L "\$forbidden" ] || exit 1; '
       'done',
-      failure: 'could not remove retired display integration artifacts',
+      failure: 'could not remove retired display and host metadata artifacts',
     );
   }
 

@@ -558,6 +558,29 @@ void main() {
             command.contains('/tmp/qtfb.sock'),
       );
       expect(
+        retiredCleanup,
+        allOf(
+          contains("'$root/bin/pluto-apploadctl'; if"),
+          contains("'$root/bin/pluto-apploadctl'; do"),
+          contains("-name '._*'"),
+          contains("-name '.DS_Store'"),
+          contains("-name '.AppleDouble'"),
+        ),
+        reason:
+            'the unpublished control binary and host metadata are removed '
+            'and their absence is asserted',
+      );
+      final ProcessResult shellSyntax = await Process.run('sh', <String>[
+        '-n',
+        '-c',
+        retiredCleanup,
+      ]);
+      expect(
+        shellSyntax.exitCode,
+        0,
+        reason: 'cleanup command must parse: ${shellSyntax.stderr}',
+      );
+      expect(
         transport.events.indexOf('exec:$retiredCleanup'),
         lessThan(
           transport.events.indexWhere(
@@ -568,6 +591,48 @@ void main() {
       );
     },
   );
+
+  test('provision rejects AppleDouble metadata before device I/O', () async {
+    final Directory temp = Directory.systemTemp.createTempSync('pluto_meta');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    final Directory bundle = Directory('${temp.path}/launcher/bundle')
+      ..createSync(recursive: true);
+    File('${bundle.parent.path}/manifest.json').writeAsStringSync(
+      '{"id":"dev.pluto.launcher","runtime":'
+      '{"type":"flutter-aot","appElf":"lib/app.so",'
+      '"assets":"flutter_assets"}}',
+    );
+    File('${bundle.path}/flutter_assets/._AssetManifest.bin')
+      ..createSync(recursive: true)
+      ..writeAsBytesSync(<int>[1]);
+    final FakeTransport transport = _moveTransport('h');
+
+    await expectLater(
+      LiveDeviceOperations(transport).provision(
+        runtime: const <PayloadFile>[],
+        apps: <PayloadApp>[
+          PayloadApp(
+            appId: LiveDeviceOperations.launcherAppId,
+            bundleDir: bundle.path,
+            buildMode: 'release',
+            engineFlavor: 'release',
+            target: 'linux-arm64',
+          ),
+        ],
+        payloadTarget: 'linux-arm64',
+      ),
+      throwsA(
+        isA<DeviceOperationException>().having(
+          (DeviceOperationException error) => error.message,
+          'message',
+          contains('contains host metadata'),
+        ),
+      ),
+    );
+    expect(transport.commands, isEmpty);
+    expect(transport.uploads, isEmpty);
+    expect(transport.directoryUploads, isEmpty);
+  });
 
   test(
     'provision without bootDefault removes an existing override last',

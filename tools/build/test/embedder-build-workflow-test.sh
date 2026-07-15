@@ -30,6 +30,15 @@ bash -n \
   "$ROOT/tools/build/embedder-device-arm-container.sh" \
   "$ROOT/tools/build/verify-device-elf.sh"
 
+grep -q 'reject_host_metadata "$layout"' "$PAYLOAD_SCRIPT" ||
+  fail "release layouts are not checked for host metadata"
+grep -q 'reject_host_metadata "$PAYLOAD"' "$PAYLOAD_SCRIPT" ||
+  fail "the assembled payload is not checked for host metadata"
+for forbidden_metadata in '.DS_Store' '.AppleDouble' '._*'; do
+  grep -Fq -- "$forbidden_metadata" "$PAYLOAD_SCRIPT" ||
+    fail "payload metadata gate is missing $forbidden_metadata"
+done
+
 [[ -f "$CONTROL_CLIENT_SOURCE" ]] || fail "generic control client source is missing"
 if grep -q '^#define DEFAULT_SOCKET' "$CONTROL_CLIENT_SOURCE"; then
   fail "generic control client still has an implicit socket default"

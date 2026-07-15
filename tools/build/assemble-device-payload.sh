@@ -243,6 +243,16 @@ require_target_elf() {
     "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
 }
 
+reject_host_metadata() {
+  local tree="$1"
+  local forbidden
+  forbidden="$(find "$tree" \
+    \( -name '.DS_Store' -o -name '.AppleDouble' -o -name '._*' \) \
+    -print -quit)"
+  [[ -z "$forbidden" ]] ||
+    die "payload contains forbidden host metadata: $forbidden"
+}
+
 sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -291,6 +301,7 @@ verify_release_layout() {
   local app_elf="$layout/bundle/lib/app.so"
   local kernel
 
+  reject_host_metadata "$layout"
   [[ -s "$metadata" ]] || die "release layout has no build-metadata.json: $layout"
   [[ -s "$manifest" ]] || die "release layout has no manifest.json: $layout"
   [[ -d "$layout/bundle/flutter_assets" ]] ||
@@ -453,6 +464,7 @@ for ((index = 0; index < APP_COUNT; index += 1)); do
 done
 
 if ((DRY_RUN == 0)); then
+  reject_host_metadata "$PAYLOAD"
   forbidden_kernel="$(find "$PAYLOAD" -type f -name kernel_blob.bin -print -quit)"
   [[ -z "$forbidden_kernel" ]] ||
     die "assembled payload contains forbidden JIT kernel: $forbidden_kernel"
