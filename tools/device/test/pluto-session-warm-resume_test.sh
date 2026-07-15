@@ -81,6 +81,8 @@ marker="$PLUTO_RUN_DIR/hibernated/$$"
 count_file="$PLUTO_TEST_STARTS/$PLUTO_APP_ID"
 count=$(cat "$count_file" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$count_file"
+printf '%s\n' "$PLUTO_LOG_ACTIVATION" > \
+  "$PLUTO_TEST_STARTS/$PLUTO_APP_ID.log-activation"
 printf '%s %s\n' "$PLUTO_APP_ID" "$*" >> "$PLUTO_TEST_INVOCATIONS"
 hibernate() {
   if [ -f "$PLUTO_TEST_STARTS/$PLUTO_APP_ID.never-hibernate" ]; then
@@ -133,6 +135,14 @@ wait_for_value "$TMP/starts/dev.pluto.launcher" 1 ||
   fail "launcher test process did not finish installing signal handlers"
 wait_for_file "$TMP/starts/dev.pluto.launcher.ready" ||
   fail "launcher test process did not install signal handlers"
+launcher_log_activation=$(cat "$TMP/starts/dev.pluto.launcher.log-activation")
+case "$launcher_log_activation" in
+  ''|*[!A-Za-z0-9_.-]*) fail "launcher received an unsafe log activation" ;;
+esac
+grep -Fqx \
+  "pluto-log-activation app_id=dev.pluto.launcher token=$launcher_log_activation" \
+  "$ROOT/logs/dev.pluto.launcher.log" ||
+  fail "launcher log is not bounded by its process activation token"
 
 printf 'dev.example.paper\n' > "$CTL/launch"
 for _ in $(seq 1 120); do

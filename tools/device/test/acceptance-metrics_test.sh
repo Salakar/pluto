@@ -97,7 +97,9 @@ write_proc() {
   printf 'Name:\tfixture\nState:\t%s (fixture)\nVmRSS:\t12000 kB\nVmHWM:\t14000 kB\nThreads:\t3\n' \
     "$state" > "$proc/status"
   printf '%s\000' $cmdline > "$proc/cmdline"
-  printf 'PLUTO_APP_ID=%s\000' "$app_id" > "$proc/environ"
+  log_activation="activation-$pid"
+  printf 'PLUTO_APP_ID=%s\000PLUTO_LOG_ACTIVATION=%s\000' \
+    "$app_id" "$log_activation" > "$proc/environ"
   ln -s /dev/null "$proc/fd/0"
   if [[ "$app_id" == none ]]; then
     ln -s /bin/sh "$proc/exe"
@@ -106,6 +108,8 @@ write_proc() {
   else
     log="$FIXTURE/home/root/pluto/logs/$app_id.log"
     : > "$log"
+    printf 'pluto-log-activation app_id=%s token=%s\n' \
+      "$app_id" "$log_activation" >> "$log"
     ln -s "$FIXTURE/home/root/pluto/bin/pluto-embedder" "$proc/exe"
     ln -s "$log" "$proc/fd/1"
     ln -s "$log" "$proc/fd/2"
@@ -274,11 +278,51 @@ chmod 600 "$FIXTURE/run/pluto/health.accept.launch"
 
 : > "$TMP/rm1.log"
 cp "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log" "$TMP/rm1.log"
-: > "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log"
+printf 'pluto-log-activation app_id=dev.pluto.ink token=activation-201\n' \
+  > "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log"
 if run_collect "$TMP/no-telemetry" >/dev/null 2>&1; then
   fail 'missing RM1 telemetry was accepted'
 fi
 [[ ! -e "$TMP/no-telemetry" ]] || fail 'failed telemetry run published a partial bundle'
+cp "$TMP/rm1.log" "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log"
+
+# Old good telemetry cannot satisfy the current live process. Conversely, an
+# old fatal line before the current process-bound marker cannot poison a clean
+# current activation.
+cat > "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log" <<'EOF'
+pluto-log-activation app_id=dev.pluto.ink token=retired-activation
+mxcfb: damage telemetry updates=99 requested_px=99 driven_px=99 amplified=0 full=0 regional_full=0 legacy_full_px_avoided=0 max_amp_milli=1000
+pluto-log-activation app_id=dev.pluto.ink token=activation-201
+EOF
+if run_collect "$TMP/stale-good-only" >/dev/null 2>&1; then
+  fail 'stale good telemetry before the current activation caused a false pass'
+fi
+[[ ! -e "$TMP/stale-good-only" ]] || fail 'stale-good rejection published a partial bundle'
+
+cat > "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log" <<'EOF'
+pluto-log-activation app_id=dev.pluto.ink token=retired-activation
+presenter completion exceeded deadline
+mxcfb: update rejected
+pluto-log-activation app_id=dev.pluto.ink token=activation-201
+mxcfb: damage telemetry updates=7 requested_px=1000 driven_px=1200 amplified=2 full=1 regional_full=1 legacy_full_px_avoided=500 max_amp_milli=1500
+EOF
+OUT_STALE_FAULT="$TMP/stale-fault-before-current"
+run_collect "$OUT_STALE_FAULT" >/dev/null
+grep -q '^telemetry.presenter_fatal_count=0$' \
+  "$OUT_STALE_FAULT/device-evidence.txt" ||
+  fail 'stale fatal telemetry before the current activation caused a false fail'
+grep -q '^telemetry.rm1.rejection_count=0$' \
+  "$OUT_STALE_FAULT/device-evidence.txt" ||
+  fail 'stale rejection before the current activation was counted'
+
+# A newer boundary proves the PID no longer owns the tail of the log, even if
+# its stale environment token and descriptor still exist.
+printf 'pluto-log-activation app_id=dev.pluto.ink token=newer-process\n' \
+  >> "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log"
+if run_collect "$TMP/replaced-log-owner" >/dev/null 2>&1; then
+  fail 'a live PID whose activation marker was superseded was accepted'
+fi
+[[ ! -e "$TMP/replaced-log-owner" ]] || fail 'replaced-log rejection published a partial bundle'
 cp "$TMP/rm1.log" "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log"
 
 sed 's/) T /) S /' "$FIXTURE/proc/201/stat" > "$TMP/stat"

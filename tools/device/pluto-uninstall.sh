@@ -3,6 +3,8 @@
 set -eu
 
 ROOT="${PLUTO_ROOT:-/home/root/pluto}"
+RELEASES_ROOT="${PLUTO_RELEASES_ROOT:-${ROOT}.releases}"
+DATA_ROOT="${PLUTO_DATA_ROOT:-${ROOT}.data}"
 HOME_ROOT="${PLUTO_HOME_ROOT:-/home/root}"
 SYSTEM_ROOT="${PLUTO_SYSTEM_ROOT:-}"
 SYSTEMCTL="${PLUTO_SYSTEMCTL:-systemctl}"
@@ -41,6 +43,40 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 printf 'Pluto uninstall started at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+safe_token() {
+  case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; *) return 0 ;; esac
+}
+
+validate_owned_layout() {
+  [ -L "$ROOT" ] || return 1
+  active_release="$(readlink "$ROOT" 2>/dev/null)" || return 1
+  case "$active_release" in "$RELEASES_ROOT"/*) ;; *) return 1 ;; esac
+  release_name=${active_release#"$RELEASES_ROOT"/}
+  safe_token "$release_name" || return 1
+  case "$release_name" in */*) return 1 ;; esac
+  [ -d "$active_release" ] && [ ! -L "$active_release" ] || return 1
+  [ -f "$active_release/.pluto-release-owned" ] &&
+    [ ! -L "$active_release/.pluto-release-owned" ] || return 1
+  [ "$(cat "$active_release/.pluto-release-owned" 2>/dev/null)" = \
+    "$release_name" ] || return 1
+  [ -d "$RELEASES_ROOT" ] && [ ! -L "$RELEASES_ROOT" ] || return 1
+  [ -d "$DATA_ROOT" ] && [ ! -L "$DATA_ROOT" ] || return 1
+  for mutable in appdata logs state staging shared; do
+    [ -d "$DATA_ROOT/$mutable" ] && [ ! -L "$DATA_ROOT/$mutable" ] ||
+      return 1
+    [ -L "$active_release/$mutable" ] || return 1
+    [ "$(readlink "$active_release/$mutable" 2>/dev/null)" = \
+      "$DATA_ROOT/$mutable" ] || return 1
+  done
+}
+
+if [ "$DRY_RUN" -eq 0 ]; then
+  validate_owned_layout || {
+    printf 'ERROR: Pluto root/store/data ownership is not exact; refusing destructive uninstall\n' >&2
+    exit 1
+  }
+fi
 
 # A recovery-gated profile can be running through the runtime-only current-boot
 # service. Retire that supervisor before replacing boot policy or deleting its
@@ -120,21 +156,42 @@ if ! restore_boot_slots; then
   exit 1
 fi
 
-run mkdir -p "$ROOT/state"
+run mkdir -p "$DATA_ROOT/state"
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '+ printf disabled > %s/state/boot-mode\n' "$ROOT"
+  printf '+ printf disabled > %s/state/boot-mode\n' "$DATA_ROOT"
 else
-  printf '%s\n' disabled > "$ROOT/state/boot-mode"
+  printf '%s\n' disabled > "$DATA_ROOT/state/boot-mode"
 fi
 
-if [ "$KEEP_DATA" -eq 1 ] && [ -d "$ROOT" ]; then
+if [ "$KEEP_DATA" -eq 1 ] && [ -d "$DATA_ROOT" ]; then
   backup="$HOME_ROOT/pluto-data-backup-$(date +%Y%m%d%H%M%S)"
   run mkdir -p "$backup"
-  [ ! -d "$ROOT/appdata" ] || run mv "$ROOT/appdata" "$backup/appdata"
-  [ ! -d "$ROOT/shared" ] || run mv "$ROOT/shared" "$backup/shared"
+  [ ! -d "$DATA_ROOT/appdata" ] || run mv "$DATA_ROOT/appdata" "$backup/appdata"
+  [ ! -d "$DATA_ROOT/shared" ] || run mv "$DATA_ROOT/shared" "$backup/shared"
 fi
 
-run rm -rf "$ROOT"
+run rm -f "$ROOT"
+
+# Delete only release directories carrying their exact per-release ownership
+# receipt. Unknown siblings are preserved rather than guessed to be Pluto's.
+for release in "$RELEASES_ROOT"/* "$RELEASES_ROOT"/.candidate-*; do
+  [ -d "$release" ] && [ ! -L "$release" ] || continue
+  name=${release#"$RELEASES_ROOT"/}
+  owner=$(cat "$release/.pluto-release-owned" 2>/dev/null || true)
+  safe_token "$owner" || continue
+  case "$name" in
+    "$owner"|.candidate-"$owner") run rm -rf "$release" ;;
+  esac
+done
+run rmdir "$RELEASES_ROOT" 2>/dev/null || true
+
+# These five directories are the mutable roots referenced by every validated
+# release. Remove those exact paths, then remove the container only if no
+# unknown sibling remains.
+for mutable in appdata logs state staging shared; do
+  run rm -rf "$DATA_ROOT/$mutable"
+done
+run rmdir "$DATA_ROOT" 2>/dev/null || true
 
 # pluto-boot-install.sh completed the stock handoff before runtime deletion.
 # Verify that service instead of spending another xochitl restart allowance.

@@ -86,6 +86,11 @@ file_uid() {
   "$STAT" -c '%u' "$1" 2>/dev/null || "$STAT" -f '%u' "$1" 2>/dev/null
 }
 
+file_identity() {
+  "$STAT" -L -c '%d:%i' "$1" 2>/dev/null ||
+    "$STAT" -L -f '%d:%i' "$1" 2>/dev/null
+}
+
 require_regular() {
   [ -f "$1" ] && [ ! -L "$1" ] || fail "required regular file missing: $(logical_path "$1")"
 }
@@ -342,11 +347,38 @@ validate_process_log_binding() {
   expected="$ROOT/logs/$app_id.log"
   actual_expected=$(real_path "$expected")
   require_regular "$actual_expected"
+  expected_identity=$(file_identity "$actual_expected") || return 1
+  case "$expected_identity" in ''|*[!0-9:]*) return 1 ;; esac
   for descriptor in 1 2; do
-    target=$(readlink "$(proc_dir "$pid")/fd/$descriptor" 2>/dev/null) || return 1
-    logical=$(logical_path "$target")
-    [ "$logical" = "$expected" ] || return 1
+    descriptor_identity=$(file_identity "$(proc_dir "$pid")/fd/$descriptor") ||
+      return 1
+    [ "$descriptor_identity" = "$expected_identity" ] || return 1
   done
+  LOG_ACTIVATION=$(proc_env_value "$pid" PLUTO_LOG_ACTIVATION=) || return 1
+  case "$LOG_ACTIVATION" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+  marker="pluto-log-activation app_id=$app_id token=$LOG_ACTIVATION"
+  marker_records=$(grep -nF -x "$marker" "$actual_expected" 2>/dev/null || true)
+  [ -n "$marker_records" ] && single_line "$marker_records" || return 1
+  marker_line=${marker_records%%:*}
+  is_uint "$marker_line" || return 1
+  last_boundary=$(grep -n '^pluto-log-activation ' "$actual_expected" 2>/dev/null |
+    tail -n 1 || true)
+  [ "$last_boundary" = "$marker_line:$marker" ] || return 1
+  LOG_ACTIVATION_LINE=$marker_line
+}
+
+active_log_lines() {
+  record=$1
+  app_id=${record%%:*}
+  remainder=${record#*:}
+  pid=${remainder%%:*}
+  token=${remainder#*:}
+  logfile=$(real_path "$ROOT/logs/$app_id.log")
+  marker="pluto-log-activation app_id=$app_id token=$token"
+  awk -v marker="$marker" '
+    found { print }
+    $0 == marker { found = 1; next }
+  ' "$logfile"
 }
 
 last_active_log_line() {
@@ -354,8 +386,7 @@ last_active_log_line() {
   found=
   for record in $ACTIVE_LOG_LIST; do
     app_id=${record%%:*}
-    logfile=$(real_path "$ROOT/logs/$app_id.log")
-    line=$(grep -F "$prefix" "$logfile" 2>/dev/null | tail -n 1 || true)
+    line=$(active_log_lines "$record" | grep -F "$prefix" | tail -n 1 || true)
     [ -z "$line" ] || found=$line
   done
   [ -n "$found" ] || return 1
@@ -368,8 +399,7 @@ active_log_match_count() {
   total=0
   for record in $ACTIVE_LOG_LIST; do
     app_id=${record%%:*}
-    logfile=$(real_path "$ROOT/logs/$app_id.log")
-    count=$(grep -E -c "$pattern" "$logfile" 2>/dev/null || true)
+    count=$(active_log_lines "$record" | grep -E -c "$pattern" || true)
     is_uint "$count" || return 1
     total=$((total + count))
   done
@@ -543,11 +573,12 @@ set -- $FOREGROUND_FIELDS
 FOREGROUND_START=$4
 [ "$FOREGROUND_START" -ge "$SUPERVISOR_START" ] || fail 'foreground predates its supervisor activation'
 validate_process_log_binding "$FOREGROUND_APP" "$FOREGROUND_PID" || fail 'foreground stdout/stderr are not bound to its exact app log'
-ACTIVE_LOG_LIST="$FOREGROUND_APP:$FOREGROUND_PID"
+ACTIVE_LOG_LIST="$FOREGROUND_APP:$FOREGROUND_PID:$LOG_ACTIVATION"
 printf 'process.foreground.pid=%s\n' "$FOREGROUND_PID"
 printf 'process.foreground.app_id=%s\n' "$FOREGROUND_APP"
 printf 'process.foreground.start_ticks=%s\n' "$FOREGROUND_START"
 printf 'process.foreground.cmdline=%s\n' "$FOREGROUND_CMD"
+printf 'process.foreground.log_activation=%s\n' "$LOG_ACTIVATION"
 printf 'health.path=%s\n' "$HEALTH_LOGICAL"
 printf 'health.seq_start=%s\n' "$HEALTH_SEQ_START"
 printf 'health.mono_ms_start=%s\n' "$HEALTH_MONO_START"
@@ -571,7 +602,10 @@ for pid_file in "$(real_path "$RUN_DIR/warm-apps")"/*.pid; do
   start_ticks=$4
   [ "$start_ticks" -ge "$SUPERVISOR_START" ] || fail "warm process predates its supervisor activation: $app_id"
   validate_process_log_binding "$app_id" "$pid" || fail "warm stdout/stderr are not bound to its exact app log: $app_id"
-  case " $ACTIVE_LOG_LIST " in *" $app_id:$pid "*) ;; *) ACTIVE_LOG_LIST="$ACTIVE_LOG_LIST $app_id:$pid" ;; esac
+  case " $ACTIVE_LOG_LIST " in
+    *" $app_id:$pid:"*) ;;
+    *) ACTIVE_LOG_LIST="$ACTIVE_LOG_LIST $app_id:$pid:$LOG_ACTIVATION" ;;
+  esac
   WARM_REGISTRY_COUNT=$((WARM_REGISTRY_COUNT + 1))
   if [ "$pid" != "$FOREGROUND_PID" ]; then
     [ "$state" = T ] || fail "non-foreground warm process is not SIGSTOPped: $app_id state=$state"
@@ -579,6 +613,8 @@ for pid_file in "$(real_path "$RUN_DIR/warm-apps")"/*.pid; do
     WARM_LIST="$WARM_LIST $app_id:$pid"
     printf 'process.warm.app_id=%s pid=%s state=%s cmdline=%s\n' \
       "$app_id" "$pid" "$state" "$(proc_cmdline "$pid")"
+    printf 'process.warm.log_activation=%s app_id=%s pid=%s\n' \
+      "$LOG_ACTIVATION" "$app_id" "$pid"
   fi
 done
 [ "$WARM_STOPPED_COUNT" -ge 1 ] || fail 'acceptance run has no stopped warm app to measure'

@@ -950,109 +950,95 @@ void main() {
       expect(exitCode, ExitCodes.ok, reason: harness.err.toString());
       expect(harness.out.toString(), contains('boot-default recovery gate'));
       final FakeTransport transport = harness.transports.single;
+      final Set<String> candidateRoots = transport.uploads
+          .map(
+            (FakeUpload upload) => RegExp(
+              r'^(/home/root/pluto\.releases/\.candidate-[^/]+)/',
+            ).firstMatch(upload.remotePath)?.group(1),
+          )
+          .whereType<String>()
+          .toSet();
+      expect(candidateRoots, hasLength(1));
+      final String stage = candidateRoots.single;
+      final String nonce = stage.split('.candidate-').last;
+      final String candidate = '/home/root/pluto.releases/$nonce';
       expect(
         transport.uploads.any(
           (FakeUpload u) =>
-              u.remotePath.startsWith(
-                '/home/root/pluto/bin/'
-                '.pluto-session.sh.pluto-new-',
-              ) &&
-              !u.executable,
+              u.remotePath == '$stage/bin/pluto-session.sh' && u.executable,
         ),
         isTrue,
-        reason: 'supervisor uploaded to a same-filesystem sibling first',
-      );
-      expect(
-        transport.uploads.any(
-          (FakeUpload u) =>
-              u.remotePath.startsWith(
-                '/home/root/pluto/bin/'
-                '.pluto-power-key-watch.sh.pluto-new-',
-              ) &&
-              !u.executable,
-        ),
-        isTrue,
-        reason: 'power-key watcher uploaded without truncating the live file',
+        reason: 'the supervisor belongs to the isolated complete release',
       );
       expect(
         transport.uploads.any(
           (FakeUpload u) =>
-              u.remotePath.startsWith(
-                '/home/root/pluto/bin/.pluto-embedder.pluto-new-',
-              ) &&
-              !u.executable,
+              u.remotePath == '$stage/bin/pluto-power-key-watch.sh' &&
+              u.executable,
+        ),
+        isTrue,
+        reason: 'the watcher is staged without touching the active release',
+      );
+      expect(
+        transport.uploads.any(
+          (FakeUpload u) =>
+              u.remotePath == '$stage/bin/pluto-embedder' && u.executable,
         ),
         isTrue,
       );
       expect(
         transport.uploads.any(
-          (FakeUpload u) => u.remotePath.startsWith(
-            '/home/root/pluto/engine/profile/'
-            '.libflutter_engine.so.pluto-new-',
-          ),
+          (FakeUpload u) =>
+              u.remotePath == '$stage/engine/profile/libflutter_engine.so',
         ),
         isTrue,
       );
       expect(
         transport.uploads.any(
-          (FakeUpload u) => u.remotePath.startsWith(
-            '/home/root/pluto/engine/release/'
-            '.libflutter_engine.so.pluto-new-',
-          ),
+          (FakeUpload u) =>
+              u.remotePath == '$stage/engine/release/libflutter_engine.so',
         ),
         isTrue,
       );
       expect(
         transport.directoryUploads.any(
-          ((String, String) r) =>
-              r.$2.startsWith('/home/root/pluto/.launcher.pluto-new-') &&
-              r.$2.endsWith('/bundle'),
+          ((String, String) r) => r.$2 == '$stage/launcher/bundle',
         ),
         isTrue,
-        reason: 'launcher is complete in a sibling before its directory swap',
+        reason: 'launcher is complete before the whole release is activated',
       );
       expect(
         transport.uploads.any(
           (FakeUpload upload) =>
-              upload.remotePath.startsWith(
-                '/home/root/pluto/.launcher.pluto-new-',
-              ) &&
-              upload.remotePath.endsWith('/assets/pluto/icon.png'),
+              upload.remotePath == '$stage/launcher/assets/pluto/icon.png',
         ),
         isTrue,
         reason: 'manifest-declared root assets are staged with the launcher',
       );
       final FakeUpload counterInstall = transport.uploads.singleWhere(
         (FakeUpload upload) =>
-            upload.remotePath.startsWith(
-              '/home/root/pluto/apps/'
-              '.dev.example.counter.pluto-new-',
-            ) &&
-            upload.remotePath.endsWith('/install.json'),
+            upload.remotePath == '$stage/apps/dev.example.counter/install.json',
       );
       final String installJson = utf8.decode(counterInstall.bytes);
       expect(installJson, contains('"buildMode": "profile"'));
       expect(installJson, contains('"engineFlavor": "profile"'));
       expect(
-        transport.commands.any(
-          (String c) =>
-              c.contains('pluto-boot-install.sh') &&
-              c.contains(' uninstall') &&
-              c.contains("PLUTO_ROOT='/home/root/pluto'"),
+        transport.commands.where(
+          (String command) =>
+              command.contains('$candidate/bin/pluto-release-activate.sh') &&
+              command.contains("activate '$candidate' 'transient'"),
         ),
-        isTrue,
-        reason: 'the profile gate automatically preserves stock boot',
+        hasLength(1),
+        reason:
+            'one transaction preserves stock boot and starts the new release',
       );
       expect(
-        transport.commands.any(
-          (String command) =>
-              command.contains(
-                "sh '/home/root/pluto/bin/pluto-session-once.sh' start",
-              ) &&
-              command.contains("PLUTO_RUN_DIR='/run/pluto'"),
+        transport.uploads.any(
+          (FakeUpload upload) =>
+              upload.remotePath.startsWith('/home/root/pluto/'),
         ),
-        isTrue,
-        reason: 'normal Move provisioning must be immediately runnable',
+        isFalse,
+        reason: 'provisioning never mutates the active release in place',
       );
       expect(harness.out.toString(), contains('active for this boot'));
     },
@@ -1165,22 +1151,30 @@ void main() {
     expect(exitCode, ExitCodes.ok, reason: harness.err.toString());
     expect(harness.out.toString(), contains('Pluto provisioned'));
     final FakeTransport transport = harness.transports.single;
+    final Set<String> candidateRoots = transport.uploads
+        .map(
+          (FakeUpload upload) => RegExp(
+            r'^(/home/root/pluto\.releases/\.candidate-[^/]+)/',
+          ).firstMatch(upload.remotePath)?.group(1),
+        )
+        .whereType<String>()
+        .toSet();
+    expect(candidateRoots, hasLength(1));
+    final String stage = candidateRoots.single;
+    final String nonce = stage.split('.candidate-').last;
+    final String candidate = '/home/root/pluto.releases/$nonce';
     expect(
       transport.uploads.any(
         (FakeUpload upload) =>
-            upload.remotePath.startsWith(
-              '/home/root/pluto/.launcher.pluto-new-',
-            ) &&
-            upload.remotePath.endsWith('/install.json'),
+            upload.remotePath == '$stage/launcher/install.json',
       ),
       isTrue,
-      reason: 'the launcher uses the common native transaction',
+      reason: 'the launcher is part of the same complete release candidate',
     );
     expect(
       transport.uploads.any(
-        (FakeUpload upload) => upload.remotePath.startsWith(
-          '/home/root/pluto/bin/.pluto-controlctl.pluto-new-',
-        ),
+        (FakeUpload upload) =>
+            upload.remotePath == '$stage/bin/pluto-controlctl',
       ),
       isTrue,
       reason: 'the matching control client is part of the target runtime',
@@ -1188,9 +1182,7 @@ void main() {
     expect(
       transport.uploads.any(
         (FakeUpload upload) =>
-            upload.remotePath.startsWith(
-              '/home/root/pluto/bin/.codex.pluto-new-',
-            ) &&
+            upload.remotePath == '$stage/bin/codex' &&
             upload.bytes.length == _testCodexBinary().length,
       ),
       isTrue,
@@ -1199,10 +1191,11 @@ void main() {
     expect(
       transport.commands.any(
         (String command) =>
-            command.contains('pluto-boot-install.sh') &&
-            command.contains(' install'),
+            command.contains('$candidate/bin/pluto-release-activate.sh') &&
+            command.contains("activate '$candidate' 'persistent'"),
       ),
       isTrue,
+      reason: 'the complete ARM release is activated through one commit',
     );
   });
 
@@ -1555,6 +1548,7 @@ String _writeProvisionRuntime(
     'pluto-boot-install.sh',
     'pluto-app-control.sh',
     'pluto-install-transaction.sh',
+    'pluto-release-activate.sh',
     'pluto-uninstall.sh',
   ]) {
     File('$payload/$script')

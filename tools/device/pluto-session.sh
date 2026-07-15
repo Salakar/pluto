@@ -877,6 +877,20 @@ launch_app() {
     set -- "$@" --hibernate
   fi
 
+  # Bind the append-only app log to this exact live process. The marker token
+  # is also inherited in /proc/<pid>/environ, so diagnostics can ignore stale
+  # telemetry and faults from every earlier activation without trusting wall
+  # clocks or an app id alone.
+  log_activation="$(runtime_nonce)" || {
+    log "could not allocate a log activation token for '$id'"
+    return 74
+  }
+  printf 'pluto-log-activation app_id=%s token=%s\n' \
+    "$id" "$log_activation" >> "$ROOT/logs/$id.log" || {
+    log "could not publish the log activation boundary for '$id'"
+    return 74
+  }
+
   # Run in the background so one power-key watcher can be paired with this
   # exact embedder pid. The standby launcher is deliberately unpaired: its
   # second power press belongs exclusively to the kernel wake path.
@@ -885,9 +899,10 @@ launch_app() {
   PLUTO_DATA_DIR="$ROOT/appdata" \
   PLUTO_CONFIG_DIR="$ROOT/state/launcher-config" \
   PLUTO_APP_ID="$id" \
+  PLUTO_LOG_ACTIVATION="$log_activation" \
   PAPER_CODEX_BIN="$paper_codex_bin" \
   PATH="$app_path" \
-    "$@" >"$ROOT/logs/$id.log" 2>&1 &
+    "$@" >>"$ROOT/logs/$id.log" 2>&1 &
   app_pid=$!
   ln -sf "$ROOT/logs/$id.log" "$ROOT/logs/current.log"
   APP_PID="$app_pid"

@@ -72,6 +72,7 @@ final class ProvisionCommand extends PlutoCommand {
     'pluto-boot-install.sh',
     'pluto-app-control.sh',
     'pluto-install-transaction.sh',
+    'pluto-release-activate.sh',
     'pluto-uninstall.sh',
   ];
 

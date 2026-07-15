@@ -282,6 +282,16 @@ Uint8List _buildMetadataBytes({
   ),
 );
 
+PayloadFile _releaseActivator() => PayloadFile(
+  localPath: '${Directory.current.path}/../device/pluto-release-activate.sh',
+  remoteRelative: 'bin/pluto-release-activate.sh',
+  executable: true,
+);
+
+List<PayloadFile> _runtimeWithActivator([
+  List<PayloadFile> files = const <PayloadFile>[],
+]) => <PayloadFile>[...files, _releaseActivator()];
+
 void main() {
   test(
     'provision stages canonical layout and enforces profile boot policy',
@@ -334,7 +344,7 @@ void main() {
       final LiveDeviceOperations ops = LiveDeviceOperations(transport);
 
       final DeviceOperationResult result = await ops.provision(
-        runtime: <PayloadFile>[
+        runtime: _runtimeWithActivator(<PayloadFile>[
           PayloadFile(
             localPath: embedder.path,
             remoteRelative: 'bin/pluto-embedder',
@@ -344,7 +354,7 @@ void main() {
             localPath: engine.path,
             remoteRelative: 'engine/debug/libflutter_engine.so',
           ),
-        ],
+        ]),
         apps: <PayloadApp>[
           PayloadApp(
             appId: LiveDeviceOperations.launcherAppId,
@@ -366,227 +376,125 @@ void main() {
 
       expect(result.ok, isTrue);
       final FakeUpload embedderUpload = fake.uploads.singleWhere(
-        (FakeUpload upload) => upload.remotePath.startsWith(
-          '$root/bin/.pluto-embedder.pluto-new-',
-        ),
+        (FakeUpload upload) =>
+            upload.remotePath.endsWith('/bin/pluto-embedder'),
       );
-      expect(embedderUpload.executable, isFalse);
-      final String embedderCommit = fake.commands.singleWhere(
-        (String command) =>
-            command.contains("chmod 0755 '${embedderUpload.remotePath}'") &&
-            command.contains(
-              "mv -f '${embedderUpload.remotePath}' "
-              "'$root/bin/pluto-embedder'",
-            ),
+      final String stage = embedderUpload.remotePath.substring(
+        0,
+        embedderUpload.remotePath.length - '/bin/pluto-embedder'.length,
       );
-      expect(
-        transport.events.indexOf('upload-file:${embedderUpload.remotePath}'),
-        lessThan(transport.events.indexOf('exec:$embedderCommit')),
-        reason: 'the complete executable is uploaded before the atomic rename',
-      );
+      expect(stage, startsWith('$root.releases/.candidate-'));
+      expect(embedderUpload.executable, isTrue);
       expect(
         fake.uploads.any(
-          (FakeUpload upload) =>
-              upload.remotePath == '$root/bin/pluto-embedder',
+          (FakeUpload upload) => upload.remotePath.startsWith('$root/'),
         ),
         isFalse,
-        reason: 'the live executable must never be an upload target',
-      );
-
-      final FakeUpload engineUpload = fake.uploads.singleWhere(
-        (FakeUpload upload) => upload.remotePath.startsWith(
-          '$root/engine/debug/.libflutter_engine.so.pluto-new-',
-        ),
-      );
-      expect(
-        fake.commands.any(
-          (String command) =>
-              command.contains("chmod 0644 '${engineUpload.remotePath}'") &&
-              command.contains(
-                "mv -f '${engineUpload.remotePath}' "
-                "'$root/engine/debug/libflutter_engine.so'",
-              ),
-        ),
-        isTrue,
-        reason: 'the explicit hot-reload engine is atomically installed',
-      );
-
-      final (String, String) launcherUpload = fake.directoryUploads.singleWhere(
-        ((String, String) upload) =>
-            upload.$2.startsWith('$root/.launcher.pluto-new-') &&
-            upload.$2.endsWith('/bundle'),
-      );
-      final String launcherStage = launcherUpload.$2.substring(
-        0,
-        launcherUpload.$2.length - '/bundle'.length,
-      );
-      final String launcherBackup = launcherStage.replaceFirst(
-        '.pluto-new-',
-        '.pluto-old-',
+        reason: 'no upload may target any path visible through the live link',
       );
       expect(
         fake.uploads.map((FakeUpload upload) => upload.remotePath),
         containsAll(<String>[
-          '$launcherStage/manifest.json',
-          '$launcherStage/build-metadata.json',
-          '$launcherStage/install.json',
-          '$launcherStage/assets/pluto/icon.png',
-          '$launcherStage/assets/pluto/icon-mono.png',
+          '$stage/bin/pluto-embedder',
+          '$stage/bin/pluto-release-activate.sh',
+          '$stage/engine/debug/libflutter_engine.so',
+        ]),
+      );
+      final (String, String) launcherUpload = fake.directoryUploads.singleWhere(
+        ((String, String) upload) => upload.$2 == '$stage/launcher/bundle',
+      );
+      final (String, String) appUpload = fake.directoryUploads.singleWhere(
+        ((String, String) upload) =>
+            upload.$2 == '$stage/apps/dev.example.counter/bundle',
+      );
+      expect(<String>[
+        launcherUpload.$2,
+        appUpload.$2,
+      ], everyElement(startsWith(stage)));
+      expect(
+        fake.uploads.map((FakeUpload upload) => upload.remotePath),
+        containsAll(<String>[
+          '$stage/launcher/manifest.json',
+          '$stage/launcher/build-metadata.json',
+          '$stage/launcher/install.json',
+          '$stage/launcher/assets/pluto/icon.png',
+          '$stage/launcher/assets/pluto/icon-mono.png',
+          '$stage/apps/dev.example.counter/manifest.json',
+          '$stage/apps/dev.example.counter/build-metadata.json',
+          '$stage/apps/dev.example.counter/install.json',
+          '$stage/apps/dev.example.counter/assets/pluto/icon.png',
         ]),
       );
       expect(
         fake.uploads
             .singleWhere(
               (FakeUpload upload) =>
-                  upload.remotePath == '$launcherStage/build-metadata.json',
+                  upload.remotePath == '$stage/launcher/build-metadata.json',
             )
             .bytes,
         orderedEquals(launcherMetadata),
-        reason: 'launcher build metadata is staged byte-for-byte',
-      );
-      final String launcherValidation = fake.commands.singleWhere(
-        (String command) =>
-            command.contains("[ -d '$launcherStage/bundle' ]") &&
-            command.contains("[ -f '$launcherStage/assets/pluto/icon.png' ]") &&
-            command.contains(
-              "[ -f '$launcherStage/assets/pluto/icon-mono.png' ]",
-            ),
-      );
-      final String launcherSwap = fake.commands.singleWhere(
-        (String command) =>
-            command.contains("mv '$root/launcher' '$launcherBackup'") &&
-            command.contains("mv '$launcherStage' '$root/launcher'") &&
-            command.contains("mv '$launcherBackup' '$root/launcher'"),
-      );
-      expect(
-        transport.events.indexOf('upload-dir:${launcherUpload.$2}'),
-        lessThan(transport.events.indexOf('exec:$launcherValidation')),
-        reason: 'the complete launcher directory precedes validation',
-      );
-      expect(
-        transport.events.indexOf('exec:$launcherValidation'),
-        lessThan(transport.events.indexOf('exec:$launcherSwap')),
-        reason: 'the complete staged launcher is validated before the swap',
-      );
-      expect(
-        launcherSwap,
-        isNot(contains("rm -rf '$root/launcher'")),
-        reason: 'the live launcher is renamed, never deleted before upload',
-      );
-
-      final (String, String) appUpload = fake.directoryUploads.singleWhere(
-        ((String, String) upload) =>
-            upload.$2.startsWith(
-              '$root/apps/.dev.example.counter.pluto-new-',
-            ) &&
-            upload.$2.endsWith('/bundle'),
-      );
-      final String appStage = appUpload.$2.substring(
-        0,
-        appUpload.$2.length - '/bundle'.length,
-      );
-      final String appBackup = appStage.replaceFirst(
-        '.pluto-new-',
-        '.pluto-old-',
-      );
-      final String appSwap = fake.commands.singleWhere(
-        (String command) =>
-            command.contains(
-              "mv '$root/apps/dev.example.counter' '$appBackup'",
-            ) &&
-            command.contains(
-              "mv '$appStage' '$root/apps/dev.example.counter'",
-            ) &&
-            command.contains(
-              "mv '$appBackup' '$root/apps/dev.example.counter'",
-            ),
-      );
-      expect(
-        transport.events.indexOf('upload-dir:${appUpload.$2}'),
-        lessThan(transport.events.indexOf('exec:$appSwap')),
-        reason: 'the complete app directory precedes the swap',
-      );
-      expect(
-        appSwap,
-        isNot(contains("rm -rf '$root/apps/dev.example.counter'")),
-        reason: 'the live app remains available until the staged swap',
-      );
-      expect(
-        fake.uploads.any(
-          (FakeUpload upload) => upload.remotePath == '$appStage/install.json',
-        ),
-        isTrue,
-        reason: 'the staged app is complete before it becomes live',
       );
       expect(
         fake.uploads
             .singleWhere(
               (FakeUpload upload) =>
-                  upload.remotePath == '$appStage/build-metadata.json',
+                  upload.remotePath ==
+                  '$stage/apps/dev.example.counter/build-metadata.json',
             )
             .bytes,
         orderedEquals(appMetadata),
-        reason: 'app build metadata is staged byte-for-byte',
       );
       expect(
-        fake.uploads
-            .singleWhere(
-              (FakeUpload upload) =>
-                  upload.remotePath == '$appStage/assets/pluto/icon.png',
-            )
-            .bytes,
-        <int>[14, 15],
-        reason: 'declared layout assets retain their root-relative paths',
-      );
-      final FakeUpload installRecord = fake.uploads.singleWhere(
-        (FakeUpload upload) => upload.remotePath == '$appStage/install.json',
-      );
-      expect(
-        utf8.decode(installRecord.bytes),
+        utf8.decode(
+          fake.uploads
+              .singleWhere(
+                (FakeUpload upload) =>
+                    upload.remotePath ==
+                    '$stage/apps/dev.example.counter/install.json',
+              )
+              .bytes,
+        ),
         contains('"buildMode": "debug"'),
       );
-      expect(
-        fake.uploads.any(
-          (FakeUpload upload) => upload.remotePath == '$appStage/manifest.json',
-        ),
-        isTrue,
-        reason: 'the source manifest is part of the staged transaction',
-      );
-      expect(
-        fake.commands.any(
-          (String c) =>
-              c.contains('pluto-boot-install.sh') &&
-              c.contains(' uninstall') &&
-              c.contains("PLUTO_ROOT='$root'"),
-        ),
-        isTrue,
-        reason: 'Move cannot bypass its generated boot recovery gate',
-      );
-      final String oneShot = fake.commands.singleWhere(
+      final String prepare = fake.commands.singleWhere(
         (String command) =>
-            command.contains("sh '$root/bin/pluto-session-once.sh' start"),
+            command.contains("ln -s '$root.data/appdata'") &&
+            command.contains("'$stage/appdata'"),
+      );
+      final String publish = fake.commands.singleWhere(
+        (String command) =>
+            command.contains("mv '$stage'") &&
+            command.contains("'$root.releases/") &&
+            command.contains('nonregular='),
+      );
+      final RegExpMatch candidateMatch = RegExp(
+        "mv '${RegExp.escape(stage)}' '([^']+)'",
+      ).firstMatch(publish)!;
+      final String candidate = candidateMatch.group(1)!;
+      expect(candidate, startsWith('$root.releases/'));
+      expect(candidate, isNot(contains('/.candidate-')));
+      final String activate = fake.commands.singleWhere(
+        (String command) =>
+            command.contains("sh '$candidate/bin/pluto-release-activate.sh'") &&
+            command.contains("activate '$candidate' 'transient'"),
       );
       expect(
-        oneShot,
-        contains("PLUTO_RUN_DIR='${LiveDeviceOperations.defaultRunDir}'"),
-        reason: 'Move is activated through the common supervisor for this boot',
+        transport.events.indexOf('exec:$prepare'),
+        lessThan(
+          transport.events.indexOf('upload-file:${embedderUpload.remotePath}'),
+        ),
+      );
+      expect(
+        transport.events.indexOf('upload-dir:${appUpload.$2}'),
+        lessThan(transport.events.indexOf('exec:$publish')),
+        reason: 'every app is complete before the candidate is published',
+      );
+      expect(
+        transport.events.indexOf('exec:$publish'),
+        lessThan(transport.events.indexOf('exec:$activate')),
+        reason: 'one whole-release activation follows complete validation',
       );
       expect(result.message, contains('active for this boot'));
-      final int bootPolicy = transport.events.indexWhere(
-        (String event) =>
-            event.startsWith('exec:') &&
-            event.contains('pluto-boot-install.sh') &&
-            event.contains(' uninstall'),
-      );
-      expect(
-        bootPolicy,
-        greaterThan(transport.events.indexOf('exec:$appSwap')),
-      );
-      expect(
-        transport.events.indexOf('exec:$oneShot'),
-        greaterThan(bootPolicy),
-        reason: 'current-boot activation happens only after stock boot is safe',
-      );
     },
   );
 
@@ -607,7 +515,7 @@ void main() {
 
     await expectLater(
       LiveDeviceOperations(transport).provision(
-        runtime: const <PayloadFile>[],
+        runtime: _runtimeWithActivator(),
         apps: <PayloadApp>[
           PayloadApp(
             appId: LiveDeviceOperations.launcherAppId,
@@ -643,45 +551,44 @@ void main() {
       final _RecordingTransport transport = _RecordingTransport(fake);
       final LiveDeviceOperations ops = LiveDeviceOperations(transport);
       final DeviceOperationResult result = await ops.provision(
-        runtime: <PayloadFile>[
+        runtime: _runtimeWithActivator(<PayloadFile>[
           PayloadFile(
             localPath: bootInstaller.path,
             remoteRelative: 'bin/pluto-boot-install.sh',
             executable: true,
           ),
-        ],
+        ]),
         apps: const <PayloadApp>[],
         payloadTarget: 'linux-arm64',
         bootDefault: false,
       );
       expect(result.ok, isTrue);
       final FakeUpload upload = fake.uploads.singleWhere(
-        (FakeUpload item) => item.remotePath.startsWith(
-          '$root/bin/.pluto-boot-install.sh.pluto-new-',
-        ),
+        (FakeUpload item) =>
+            item.remotePath.endsWith('/bin/pluto-boot-install.sh'),
       );
-      final String atomicCommit = fake.commands.singleWhere(
+      expect(upload.remotePath, startsWith('$root.releases/.candidate-'));
+      final String publish = fake.commands.singleWhere(
         (String command) =>
-            command.contains("chmod 0755 '${upload.remotePath}'") &&
-            command.contains(
-              "mv -f '${upload.remotePath}' "
-              "'$root/bin/pluto-boot-install.sh'",
-            ),
+            command.contains('nonregular=') &&
+            command.contains('mv ') &&
+            command.contains('$root.releases/'),
       );
-      final String uninstall = fake.commands.singleWhere(
+      final String activate = fake.commands.singleWhere(
         (String command) =>
-            command.contains('pluto-boot-install.sh') &&
-            command.contains(' uninstall'),
+            command.contains('pluto-release-activate.sh') &&
+            command.contains(" 'stock'"),
       );
       expect(
-        transport.events.indexOf('exec:$atomicCommit'),
-        lessThan(transport.events.indexOf('exec:$uninstall')),
-        reason: 'the newly staged installer removes the existing override last',
+        transport.events.indexOf('upload-file:${upload.remotePath}'),
+        lessThan(transport.events.indexOf('exec:$publish')),
+        reason:
+            'the boot helper is invisible until the complete release exists',
       );
       expect(
-        fake.commands.last,
-        contains('pluto-boot-install.sh'),
-        reason: '--no-boot-default actively restores the stock boot default',
+        transport.events.indexOf('exec:$publish'),
+        lessThan(transport.events.indexOf('exec:$activate')),
+        reason: '--no-boot-default is committed by the whole-release helper',
       );
       expect(
         fake.commands.where(
@@ -707,13 +614,13 @@ void main() {
 
     await expectLater(
       LiveDeviceOperations(transport).provision(
-        runtime: <PayloadFile>[
+        runtime: _runtimeWithActivator(<PayloadFile>[
           PayloadFile(
             localPath: embedder.path,
             remoteRelative: 'bin/pluto-embedder',
             executable: true,
           ),
-        ],
+        ]),
         apps: const <PayloadApp>[],
         payloadTarget: 'linux-arm64',
       ),
@@ -722,9 +629,9 @@ void main() {
 
     expect(
       transport.events.any(
-        (String event) => event.startsWith(
-          'upload-file:$root/bin/.pluto-embedder.pluto-new-',
-        ),
+        (String event) =>
+            event.startsWith('upload-file:$root.releases/.candidate-') &&
+            event.endsWith('/bin/pluto-embedder'),
       ),
       isTrue,
       reason: 'the failed upload targeted only a same-directory sibling',
@@ -733,8 +640,8 @@ void main() {
     expect(
       fake.commands.any(
         (String command) =>
-            command.contains('mv -f') &&
-            command.contains("'$root/bin/pluto-embedder'"),
+            command.contains('pluto-release-activate.sh') &&
+            command.contains(' activate '),
       ),
       isFalse,
       reason: 'the live target remains untouched when upload does not finish',
@@ -772,13 +679,13 @@ void main() {
 
       await expectLater(
         LiveDeviceOperations(transport).provision(
-          runtime: <PayloadFile>[
+          runtime: _runtimeWithActivator(<PayloadFile>[
             PayloadFile(
               localPath: runtime.path,
               remoteRelative: 'bin/pluto-embedder',
               executable: true,
             ),
-          ],
+          ]),
           apps: <PayloadApp>[
             PayloadApp(
               appId: 'dev.example.icon',
@@ -825,7 +732,7 @@ void main() {
 
       await expectLater(
         LiveDeviceOperations(transport).provision(
-          runtime: const <PayloadFile>[],
+          runtime: _runtimeWithActivator(),
           apps: <PayloadApp>[
             PayloadApp(
               appId: 'dev.example.notes',
@@ -870,7 +777,7 @@ void main() {
 
       final DeviceOperationResult result = await LiveDeviceOperations(transport)
           .provision(
-            runtime: const <PayloadFile>[],
+            runtime: _runtimeWithActivator(),
             apps: const <PayloadApp>[],
             payloadTarget: fixture.target,
             bootDefault: false,
@@ -896,7 +803,7 @@ void main() {
 
         await expectLater(
           LiveDeviceOperations(transport).provision(
-            runtime: const <PayloadFile>[],
+            runtime: _runtimeWithActivator(),
             apps: const <PayloadApp>[],
             payloadTarget: 'linux-arm64',
           ),
@@ -954,7 +861,7 @@ void main() {
 
       await expectLater(
         LiveDeviceOperations(transport).provision(
-          runtime: const <PayloadFile>[],
+          runtime: _runtimeWithActivator(),
           apps: const <PayloadApp>[],
           payloadTarget: fixture.target,
         ),
@@ -992,7 +899,7 @@ void main() {
 
       await expectLater(
         LiveDeviceOperations(transport).provision(
-          runtime: const <PayloadFile>[],
+          runtime: _runtimeWithActivator(),
           apps: const <PayloadApp>[],
           payloadTarget: 'linux-arm',
         ),
@@ -1026,7 +933,7 @@ void main() {
 
     await expectLater(
       LiveDeviceOperations(transport).provision(
-        runtime: const <PayloadFile>[],
+        runtime: _runtimeWithActivator(),
         apps: const <PayloadApp>[],
         payloadTarget: 'linux-arm64',
       ),
@@ -1077,264 +984,6 @@ void main() {
   );
 
   test(
-    'release-only provision scrubs stale JIT without touching AOT data',
-    () async {
-      final FakeTransport transport = _moveTransport('h');
-
-      await LiveDeviceOperations(transport).provision(
-        runtime: const <PayloadFile>[],
-        apps: const <PayloadApp>[],
-        payloadTarget: 'linux-arm64',
-      );
-
-      final String cleanup = transport.commands.singleWhere(
-        (String command) => command.contains('flutter-kernel'),
-      );
-      expect(cleanup, contains("'$root/engine'/.*.pluto-new-*"));
-      expect(cleanup, contains("'$root/engine'/.*.pluto-old-*"));
-      expect(cleanup, contains("'$root/apps'/.*.pluto-new-*"));
-      expect(cleanup, contains("'$root/apps'/.*.pluto-old-*"));
-      expect(cleanup, contains("'$root'/.launcher.pluto-new-*"));
-      expect(cleanup, contains("'$root'/.launcher.pluto-old-*"));
-      expect(cleanup, contains(r'"$flavor_dir"/.*.pluto-new-*'));
-      expect(cleanup, contains(r'"$flavor_dir"/.*.pluto-old-*'));
-      expect(cleanup, contains("for engine in '$root/engine'/*"));
-      expect(cleanup, contains(r'case "$flavor" in release|profile'));
-      expect(cleanup, contains(r'mv "$engine" "$stale"'));
-      expect(cleanup, contains('"(buildMode|engineFlavor)"'));
-      expect(cleanup, contains('"flutter-kernel"'));
-      expect(cleanup, contains(r'$d/bundle/flutter_assets/kernel_blob.bin'));
-      expect(cleanup, contains(r'mv "$d" "$stale"'));
-      expect(cleanup, contains('$root/state/default-app'));
-      expect(cleanup, contains('$root/state/apps-changed'));
-      expect(cleanup, isNot(contains('$root/appdata')));
-      expect(
-        cleanup,
-        isNot(contains("rm -rf '$root/apps'")),
-        reason: 'only positively identified debug app directories are removed',
-      );
-      expect(
-        transport.commands.indexOf(cleanup),
-        lessThan(
-          transport.commands.indexWhere(
-            (String command) =>
-                command.contains('pluto-boot-install.sh') &&
-                command.contains(' uninstall'),
-          ),
-        ),
-        reason: 'stale JIT state cannot survive into final boot policy',
-      );
-    },
-  );
-
-  test(
-    'release-only cleanup preserves appdata and unselected AOT apps',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync('pluto_jit');
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final String deviceRoot = '${temp.path}/pluto';
-
-      void write(String relative, String contents) {
-        File('$deviceRoot/$relative')
-          ..createSync(recursive: true)
-          ..writeAsStringSync(contents);
-      }
-
-      write('engine/debug/libflutter_engine.so', 'jit-engine');
-      write('state/default-app', 'dev.example.debug-record\n');
-      write(
-        'apps/dev.example.debug-record/install.json',
-        '{"buildMode":"debug","engineFlavor":"debug"}',
-      );
-      write(
-        'apps/dev.example.debug-manifest/manifest.json',
-        '{"runtime":{"type":"flutter-kernel"}}',
-      );
-      write(
-        'apps/dev.example.kernel/bundle/flutter_assets/kernel_blob.bin',
-        'kernel',
-      );
-      write(
-        'apps/dev.example.release/install.json',
-        '{"buildMode":"release","engineFlavor":"release"}',
-      );
-      write(
-        'apps/dev.example.release/manifest.json',
-        '{"runtime":{"type":"flutter-aot"}}',
-      );
-      write('apps/dev.example.release/bundle/lib/app.so', 'release');
-      write('apps/dev.example.unrecorded-aot/bundle/lib/app.so', 'aot');
-      for (final String appId in <String>[
-        'dev.example.debug-record',
-        'dev.example.debug-manifest',
-        'dev.example.kernel',
-        'dev.example.release',
-        'dev.example.unrecorded-aot',
-      ]) {
-        write('appdata/$appId/keep', 'user data');
-      }
-
-      final FakeTransport transport = _moveTransport('local');
-      await LiveDeviceOperations(transport, deviceRoot: deviceRoot).provision(
-        runtime: const <PayloadFile>[],
-        apps: const <PayloadApp>[],
-        payloadTarget: 'linux-arm64',
-      );
-      final String cleanup = transport.commands.singleWhere(
-        (String command) => command.contains('flutter-kernel'),
-      );
-
-      final ProcessResult result = await Process.run('sh', <String>[
-        '-c',
-        cleanup,
-      ]);
-      expect(result.exitCode, 0, reason: '${result.stderr}');
-      expect(Directory('$deviceRoot/engine/debug').existsSync(), isFalse);
-      for (final String appId in <String>[
-        'dev.example.debug-record',
-        'dev.example.debug-manifest',
-        'dev.example.kernel',
-      ]) {
-        expect(
-          Directory('$deviceRoot/apps/$appId').existsSync(),
-          isFalse,
-          reason: '$appId is stale JIT state',
-        );
-      }
-      for (final String appId in <String>[
-        'dev.example.release',
-        'dev.example.unrecorded-aot',
-      ]) {
-        expect(
-          Directory('$deviceRoot/apps/$appId').existsSync(),
-          isTrue,
-          reason: '$appId is an unselected AOT app and must survive',
-        );
-      }
-      expect(File('$deviceRoot/state/default-app').existsSync(), isFalse);
-      expect(File('$deviceRoot/state/apps-changed').existsSync(), isTrue);
-      for (final FileSystemEntity data in Directory(
-        '$deviceRoot/appdata',
-      ).listSync()) {
-        expect(File('${data.path}/keep').readAsStringSync(), 'user data');
-      }
-    },
-  );
-
-  test(
-    'release-only cleanup removes only hidden transaction remnants',
-    () async {
-      final Directory temp = Directory.systemTemp.createTempSync(
-        'pluto_hidden_transactions',
-      );
-      addTearDown(() => temp.deleteSync(recursive: true));
-      final String deviceRoot = '${temp.path}/pluto';
-
-      void write(String relative, String contents) {
-        File('$deviceRoot/$relative')
-          ..createSync(recursive: true)
-          ..writeAsStringSync(contents);
-      }
-
-      write('engine/release/libflutter_engine.so', 'release');
-      write('engine/profile/libflutter_engine.so', 'profile');
-      write('engine/.debug.pluto-new-interrupted/libflutter_engine.so', 'jit');
-      write(
-        'engine/.current.pluto-old-interrupted/libflutter_engine.so',
-        'jit',
-      );
-      write(
-        'engine/release/.libflutter_engine.so.pluto-new-interrupted',
-        'partial-release',
-      );
-      write(
-        'engine/profile/.libflutter_engine.so.pluto-old-interrupted',
-        'old-profile',
-      );
-      write('apps/dev.example.release/bundle/lib/app.so', 'release');
-      write(
-        'apps/dev.example.release/install.json',
-        '{"buildMode":"release","engineFlavor":"release"}',
-      );
-      write('launcher/bundle/lib/app.so', 'release-launcher');
-      write(
-        'apps/.dev.example.jit.pluto-new-interrupted/'
-            'bundle/flutter_assets/kernel_blob.bin',
-        'kernel',
-      );
-      write(
-        'apps/.dev.example.jit.pluto-old-interrupted/install.json',
-        '{"buildMode":"debug","engineFlavor":"debug"}',
-      );
-      write(
-        '.launcher.pluto-new-interrupted/'
-            'bundle/flutter_assets/kernel_blob.bin',
-        'kernel',
-      );
-      write(
-        '.launcher.pluto-old-interrupted/'
-            'bundle/flutter_assets/kernel_blob.bin',
-        'kernel',
-      );
-      write('engine/.unrelated-hidden/keep', 'keep');
-      write('apps/.unrelated-hidden/keep', 'keep');
-      write('.unrelated-hidden/keep', 'keep');
-      write('state/.session.pluto-new-keep', 'keep');
-      write('appdata/.user.pluto-old-keep/documents/keep', 'keep');
-
-      final FakeTransport transport = _moveTransport('local');
-      await LiveDeviceOperations(transport, deviceRoot: deviceRoot).provision(
-        runtime: const <PayloadFile>[],
-        apps: const <PayloadApp>[],
-        payloadTarget: 'linux-arm64',
-      );
-      final String cleanup = transport.commands.singleWhere(
-        (String command) => command.contains('flutter-kernel'),
-      );
-
-      final ProcessResult result = await Process.run('sh', <String>[
-        '-c',
-        cleanup,
-      ]);
-      expect(result.exitCode, 0, reason: '${result.stderr}');
-
-      for (final String removed in <String>[
-        'engine/.debug.pluto-new-interrupted',
-        'engine/.current.pluto-old-interrupted',
-        'engine/release/.libflutter_engine.so.pluto-new-interrupted',
-        'engine/profile/.libflutter_engine.so.pluto-old-interrupted',
-        'apps/.dev.example.jit.pluto-new-interrupted',
-        'apps/.dev.example.jit.pluto-old-interrupted',
-        '.launcher.pluto-new-interrupted',
-        '.launcher.pluto-old-interrupted',
-      ]) {
-        expect(
-          FileSystemEntity.typeSync('$deviceRoot/$removed'),
-          FileSystemEntityType.notFound,
-          reason: '$removed is an interrupted transaction remnant',
-        );
-      }
-      for (final String preserved in <String>[
-        'engine/release/libflutter_engine.so',
-        'engine/profile/libflutter_engine.so',
-        'apps/dev.example.release/bundle/lib/app.so',
-        'launcher/bundle/lib/app.so',
-        'engine/.unrelated-hidden/keep',
-        'apps/.unrelated-hidden/keep',
-        '.unrelated-hidden/keep',
-        'state/.session.pluto-new-keep',
-        'appdata/.user.pluto-old-keep/documents/keep',
-      ]) {
-        expect(
-          File('$deviceRoot/$preserved').readAsStringSync(),
-          isNotEmpty,
-          reason: '$preserved is current AOT or unrelated hidden state',
-        );
-      }
-    },
-  );
-
-  test(
     'release-only provision rejects a debug app before device I/O',
     () async {
       final FakeTransport transport = FakeTransport(
@@ -1343,7 +992,7 @@ void main() {
 
       await expectLater(
         LiveDeviceOperations(transport).provision(
-          runtime: const <PayloadFile>[],
+          runtime: _runtimeWithActivator(),
           apps: const <PayloadApp>[
             PayloadApp(
               appId: 'dev.example.debug',
@@ -1445,34 +1094,18 @@ void main() {
       ),
       isTrue,
     );
-    expect(
-      transport.commands.any((String c) => c.contains('zz-pluto.conf')),
-      isTrue,
-      reason: 'last-resort cleanup removes only the live-slot drop-in',
-    );
     final String command = transport.commands.singleWhere(
       (String command) => command.contains('pluto-uninstall.sh'),
     );
-    final int bootFallback = command.indexOf(
-      "elif [ -x '$root/bin/pluto-boot-install.sh' ]",
-    );
-    final int safeUninstall = command.indexOf(
-      "sh '$root/bin/pluto-boot-install.sh' uninstall",
-    );
-    final int deleteRuntime = command.indexOf("rm -rf '$root'");
-    expect(bootFallback, greaterThanOrEqualTo(0));
-    expect(safeUninstall, greaterThan(bootFallback));
     expect(
-      deleteRuntime,
-      greaterThan(safeUninstall),
-      reason: 'runtime deletion follows the authoritative A/B-safe uninstall',
+      command,
+      isNot(anyOf(contains('zz-pluto.conf'), contains("rm -rf '$root'"))),
+      reason: 'the host has no partial-layout destructive fallback',
     );
     expect(
       command,
-      contains(
-        'runtime preserved because a peer-slot boot override may remain',
-      ),
-      reason: 'missing authoritative scripts must fail without deleting ROOT',
+      contains('owned release/store/data preserved'),
+      reason: 'missing authoritative script fails without partial deletion',
     );
   });
 

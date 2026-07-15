@@ -96,6 +96,13 @@ final class _PreparedLayoutFile {
   final Uint8List bytes;
 }
 
+final class _PreparedPayloadFile {
+  const _PreparedPayloadFile({required this.file, required this.bytes});
+
+  final PayloadFile file;
+  final Uint8List bytes;
+}
+
 const String _buildMetadataFileName = 'build-metadata.json';
 
 final class _PreparedPayloadApp {
@@ -214,6 +221,10 @@ final class LiveDeviceOperations {
 
   String get _oneShotSession => '$deviceRoot/bin/pluto-session-once.sh';
 
+  String get _releaseStore => '$deviceRoot.releases';
+
+  String get _dataRoot => '$deviceRoot.data';
+
   String get _transaction => '$deviceRoot/bin/pluto-install-transaction.sh';
 
   String get _appControl => '$deviceRoot/bin/pluto-app-control.sh';
@@ -274,25 +285,82 @@ final class LiveDeviceOperations {
     );
   }
 
-  Future<void> _uploadFile(PayloadFile file) async {
-    final Uint8List bytes = Uint8List.fromList(
-      File(file.localPath).readAsBytesSync(),
-    );
-    final String target = '$deviceRoot/${file.remoteRelative}';
-    final int separator = target.lastIndexOf('/');
-    final String parent = target.substring(0, separator);
-    final String basename = target.substring(separator + 1);
-    final String staged = '$parent/.$basename.pluto-new-${_nextNonce()}';
+  List<_PreparedPayloadFile> _prepareRuntime(List<PayloadFile> runtime) {
+    final Set<String> paths = <String>{};
+    final List<_PreparedPayloadFile> prepared = <_PreparedPayloadFile>[];
+    for (final PayloadFile file in runtime) {
+      if (!_isSafeLayoutPath(file.remoteRelative) ||
+          !const <String>{
+            'bin',
+            'engine',
+            'share',
+          }.contains(file.remoteRelative.split('/').first)) {
+        throw DeviceOperationException(
+          'unsafe runtime path: ${file.remoteRelative}',
+          'Runtime files must use a unique relative path below bin, engine, '
+              'or share.',
+        );
+      }
+      if (!paths.add(file.remoteRelative)) {
+        throw DeviceOperationException(
+          'duplicate runtime path: ${file.remoteRelative}',
+          'A complete release cannot contain two files at one destination.',
+        );
+      }
+      if (FileSystemEntity.typeSync(file.localPath, followLinks: false) !=
+          FileSystemEntityType.file) {
+        throw DeviceOperationException(
+          'missing regular runtime file: ${file.localPath}',
+          'Provision only complete, regular release inputs.',
+        );
+      }
+      try {
+        prepared.add(
+          _PreparedPayloadFile(
+            file: file,
+            bytes: Uint8List.fromList(File(file.localPath).readAsBytesSync()),
+          ),
+        );
+      } on FileSystemException catch (error) {
+        throw DeviceOperationException(
+          'could not read runtime file: ${file.localPath}',
+          error.message,
+        );
+      }
+    }
+    if (!paths.contains('bin/pluto-release-activate.sh')) {
+      throw const DeviceOperationException(
+        'release activation helper is missing',
+        'Every provisionable release must include '
+            'bin/pluto-release-activate.sh so the runtime and all apps become '
+            'visible through one atomic commit.',
+      );
+    }
+    return List<_PreparedPayloadFile>.unmodifiable(prepared);
+  }
+
+  Future<void> _uploadReleaseFile(
+    _PreparedPayloadFile prepared, {
+    required String releaseRoot,
+  }) async {
+    final PayloadFile file = prepared.file;
+    final String target = '$releaseRoot/${file.remoteRelative}';
+    final String parent = target.substring(0, target.lastIndexOf('/'));
     await _run(
       'mkdir -p ${_q(parent)}',
-      failure: 'could not prepare ${file.remoteRelative}',
+      failure: 'could not prepare ${file.remoteRelative} in the candidate',
     );
-    await transport.uploadFileBytes(bytes: bytes, remotePath: staged);
+    await transport.uploadFileBytes(
+      bytes: prepared.bytes,
+      remotePath: target,
+      executable: file.executable,
+    );
     final String mode = file.executable ? '0755' : '0644';
     await _run(
-      '[ ! -d ${_q(target)} ] && chmod $mode ${_q(staged)} && '
-      'mv -f ${_q(staged)} ${_q(target)}',
-      failure: 'could not atomically install ${file.remoteRelative}',
+      '[ -f ${_q(target)} ] && [ ! -L ${_q(target)} ] && '
+      'chmod $mode ${_q(target)}',
+      failure:
+          'could not validate candidate runtime file ${file.remoteRelative}',
     );
   }
 
@@ -529,54 +597,52 @@ final class LiveDeviceOperations {
     );
   }
 
-  Future<void> _removeStaleDebugState() async {
-    final String nonce = _nextNonce();
-    final String engineRoot = '$deviceRoot/engine';
-    final String appsRoot = '$deviceRoot/apps';
+  Future<void> _uploadReleaseApp(
+    _PreparedPayloadApp prepared, {
+    required String releaseRoot,
+  }) async {
+    final PayloadApp app = prepared.app;
+    final String remote = app.appId == launcherAppId
+        ? '$releaseRoot/launcher'
+        : '$releaseRoot/apps/${app.appId}';
     await _run(
-      'for remnant in '
-      '${_q(engineRoot)}/.*.pluto-new-* '
-      '${_q(engineRoot)}/.*.pluto-old-* '
-      '${_q(appsRoot)}/.*.pluto-new-* '
-      '${_q(appsRoot)}/.*.pluto-old-* '
-      '${_q(deviceRoot)}/.launcher.pluto-new-* '
-      '${_q(deviceRoot)}/.launcher.pluto-old-*; do '
-      '[ -e "\$remnant" ] || [ -L "\$remnant" ] || continue; '
-      'rm -rf "\$remnant" || exit 1; done; '
-      'for flavor in release profile; do '
-      'flavor_dir=${_q(engineRoot)}/\$flavor; '
-      '[ -d "\$flavor_dir" ] && [ ! -L "\$flavor_dir" ] || continue; '
-      'for remnant in "\$flavor_dir"/.*.pluto-new-* '
-      '"\$flavor_dir"/.*.pluto-old-*; do '
-      '[ -e "\$remnant" ] || [ -L "\$remnant" ] || continue; '
-      'rm -rf "\$remnant" || exit 1; done; done; '
-      'for engine in ${_q(engineRoot)}/*; do '
-      '[ -e "\$engine" ] || [ -L "\$engine" ] || continue; '
-      'flavor=\${engine##*/}; '
-      'case "\$flavor" in release|profile) continue ;; esac; '
-      'stale=${_q(engineRoot)}/.\$flavor.pluto-old-$nonce; '
-      'rm -rf "\$stale" && mv "\$engine" "\$stale" && '
-      'rm -rf "\$stale" || exit 1; done; '
-      'default_app=\$(cat ${_q('$deviceRoot/state/default-app')} '
-      '2>/dev/null || true); removed=0; '
-      'for d in ${_q('$deviceRoot/apps')}/*; do '
-      '[ -d "\$d" ] || continue; is_debug=0; '
-      "grep -Eq '\"(buildMode|engineFlavor)\"[[:space:]]*:"
-      "[[:space:]]*\"debug\"' \"\$d/install.json\" 2>/dev/null && "
-      'is_debug=1; '
-      "grep -Eq '\"type\"[[:space:]]*:[[:space:]]*"
-      "\"flutter-kernel\"' \"\$d/manifest.json\" "
-      '2>/dev/null && is_debug=1; '
-      '[ ! -f "\$d/bundle/flutter_assets/kernel_blob.bin" ] || is_debug=1; '
-      '[ "\$is_debug" = 1 ] || continue; app_id=\${d##*/}; '
-      'stale=${_q('$deviceRoot/apps')}/.\$app_id.pluto-old-$nonce; '
-      'rm -rf "\$stale" && mv "\$d" "\$stale" && rm -rf "\$stale" '
-      '|| exit 1; '
-      'if [ "\$default_app" = "\$app_id" ]; then '
-      'rm -f ${_q('$deviceRoot/state/default-app')}; fi; removed=1; done; '
-      '[ "\$removed" != 1 ] || '
-      'touch ${_q('$deviceRoot/state/apps-changed')}',
-      failure: 'could not remove stale debug runtime state',
+      'mkdir -p ${_q(remote)}',
+      failure: 'could not prepare ${app.appId} in the candidate release',
+    );
+    await transport.uploadDirectory(
+      localPath: app.bundleDir,
+      remotePath: '$remote/bundle',
+    );
+    await transport.uploadFileBytes(
+      bytes: prepared.manifestBytes,
+      remotePath: '$remote/manifest.json',
+    );
+    for (final _PreparedLayoutFile file in prepared.layoutFiles) {
+      await transport.uploadFileBytes(
+        bytes: file.bytes,
+        remotePath: '$remote/${file.relativePath}',
+      );
+    }
+    await transport.uploadFileBytes(
+      bytes: _installRecord(
+        app.appId,
+        'provision',
+        buildMode: app.buildMode,
+        engineFlavor: app.engineFlavor,
+      ),
+      remotePath: '$remote/install.json',
+    );
+    final List<String> requiredPaths = <String>[
+      '$remote/bundle',
+      '$remote/manifest.json',
+      '$remote/install.json',
+      for (final _PreparedLayoutFile file in prepared.layoutFiles)
+        '$remote/${file.relativePath}',
+    ];
+    await _run(
+      '[ -d ${_q(requiredPaths.first)} ] && '
+      '${requiredPaths.skip(1).map((String path) => '[ -f ${_q(path)} ] && [ ! -L ${_q(path)} ]').join(' && ')}',
+      failure: 'candidate payload validation failed for ${app.appId}',
     );
   }
 
@@ -588,6 +654,7 @@ final class LiveDeviceOperations {
     bool bootDefault = true,
   }) async {
     _validatePayloadIdentity(payloadTarget, apps);
+    final List<_PreparedPayloadFile> preparedRuntime = _prepareRuntime(runtime);
     final bool hasDebugEngine = runtime.any(
       (PayloadFile file) =>
           file.remoteRelative == 'engine/debug/libflutter_engine.so' ||
@@ -620,56 +687,54 @@ final class LiveDeviceOperations {
         bootDefault && device.profile!.runtime.recovery.bootDefaultEnabled;
     final bool activateForCurrentBoot =
         bootDefault && !device.profile!.runtime.recovery.bootDefaultEnabled;
-    if (activateForCurrentBoot) {
-      // Re-provisioning must not replace binaries beneath an active transient
-      // supervisor. Stop the old runtime-only session first; its stop path
-      // restores stock while the new integrity-checked release is installed.
-      await _run(
-        'if systemctl is-active --quiet pluto-session-once.service; then '
-        'if [ -x ${_q(_oneShotSession)} ]; then '
-        'PLUTO_ROOT=${_q(deviceRoot)} PLUTO_RUN_DIR=${_q(runDir)} '
-        'sh ${_q(_oneShotSession)} stop; '
-        'else systemctl stop pluto-session-once.service && '
-        'systemctl reset-failed xochitl.service 2>/dev/null || true; '
-        'systemctl start xochitl.service; fi; fi',
-        failure: 'could not retire the active current-boot Pluto session',
-      );
-    }
-    final List<String> layout = <String>[
-      'bin',
-      'engine',
-      'engine/profile',
-      'engine/release',
-      'launcher',
-      'apps',
-      'appdata',
-      'logs',
-      'state',
-      'staging',
-    ];
+    final String nonce = _nextNonce();
+    final String stage = '$_releaseStore/.candidate-$nonce';
+    final String candidate = '$_releaseStore/$nonce';
     await _run(
-      'mkdir -p ${layout.map((String d) => _q('$deviceRoot/$d')).join(' ')}',
-      failure: 'could not create $deviceRoot layout',
+      'if [ -e ${_q(deviceRoot)} ] && [ ! -L ${_q(deviceRoot)} ]; then '
+      'echo ${_q('$deviceRoot is a retired non-transactional layout')} >&2; '
+      'exit 78; fi',
+      failure:
+          'the unpublished non-transactional runtime must be uninstalled first',
     );
-    for (final PayloadFile file in runtime) {
-      await _uploadFile(file);
-    }
-    // The provisioned marker `pluto devices --probe` looks for.
     await _run(
-      'date -u +%Y-%m-%dT%H:%M:%SZ > ${_q('$deviceRoot/VERSION')}',
-      failure: 'could not write $deviceRoot/VERSION',
+      'mkdir -p ${_q(_releaseStore)} '
+      '${<String>['appdata', 'logs', 'state', 'staging', 'shared'].map((String directory) => _q('$_dataRoot/$directory')).join(' ')} && '
+      'rm -rf ${_q(stage)} ${_q(candidate)} && '
+      'mkdir -p ${<String>['bin', 'engine', 'engine/profile', 'engine/release', 'launcher', 'apps'].map((String directory) => _q('$stage/$directory')).join(' ')} && '
+      "printf '%s\\n' ${_q(nonce)} > ${_q('$stage/.pluto-release-owned')} && "
+      '${<String>['appdata', 'logs', 'state', 'staging', 'shared'].map((String directory) => 'ln -s ${_q('$_dataRoot/$directory')} ${_q('$stage/$directory')}').join(' && ')}',
+      failure: 'could not create the isolated candidate release layout',
     );
+    for (final _PreparedPayloadFile file in preparedRuntime) {
+      await _uploadReleaseFile(file, releaseRoot: stage);
+    }
     for (final _PreparedPayloadApp app in preparedApps) {
-      await _stageApp(app, source: 'provision');
+      await _uploadReleaseApp(app, releaseRoot: stage);
     }
-    if (!hasDebugEngine) {
-      await _removeStaleDebugState();
-    }
+    await _run(
+      'date -u +%Y-%m-%dT%H:%M:%SZ > ${_q('$stage/VERSION')} && '
+      'nonregular=\$(find ${<String>['bin', 'engine', 'share', 'launcher', 'apps'].map((String directory) => _q('$stage/$directory')).join(' ')} '
+      '! -type d ! -type f -print -quit 2>/dev/null); '
+      '[ -z "\$nonregular" ] && mv ${_q(stage)} ${_q(candidate)}',
+      failure: 'the complete candidate release failed final validation',
+    );
+    final String activationMode = effectiveBootDefault
+        ? 'persistent'
+        : activateForCurrentBoot
+        ? 'transient'
+        : 'stock';
+    await _run(
+      'PLUTO_ROOT_LINK=${_q(deviceRoot)} '
+      'PLUTO_RELEASES_ROOT=${_q(_releaseStore)} '
+      'PLUTO_DATA_ROOT=${_q(_dataRoot)} '
+      'PLUTO_RUN_DIR=${_q(runDir)} '
+      'sh ${_q('$candidate/bin/pluto-release-activate.sh')} '
+      'activate ${_q(candidate)} ${_q(activationMode)}',
+      failure:
+          'whole-release activation failed; the previous complete release was retained',
+    );
     if (effectiveBootDefault) {
-      await _run(
-        'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} install',
-        failure: 'boot-first install failed',
-      );
       return const DeviceOperationResult(
         ok: true,
         message:
@@ -679,16 +744,7 @@ final class LiveDeviceOperations {
             '`pluto provision --status` to inspect.',
       );
     }
-    await _run(
-      'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} uninstall',
-      failure: 'removing the Pluto boot override failed',
-    );
     if (activateForCurrentBoot) {
-      await _run(
-        'PLUTO_ROOT=${_q(deviceRoot)} PLUTO_RUN_DIR=${_q(runDir)} '
-        'sh ${_q(_oneShotSession)} start',
-        failure: 'starting the current-boot Pluto session failed',
-      );
       return const DeviceOperationResult(
         ok: true,
         message:
@@ -751,24 +807,9 @@ final class LiveDeviceOperations {
     await _run(
       'if [ -x ${_q(uninstaller)} ]; then '
       'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(uninstaller)} --yes; '
-      'elif [ -x ${_q(_bootInstall)} ]; then '
-      'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} uninstall || '
-      'exit \$?; '
-      'rm -rf ${_q(deviceRoot)} || exit 1; '
-      'systemctl reset-failed xochitl.service 2>/dev/null || true; '
-      'systemctl restart xochitl.service 2>/dev/null || true; '
       'else '
-      // Without an authoritative A/B-aware script, only clean the live-slot
-      // override. A peer-slot override may remain, so preserve the runtime and
-      // fail loudly instead of leaving that override pointing at deleted files.
-      'mount -o remount,rw / 2>/dev/null || true; '
-      'rm -f /usr/lib/systemd/system/xochitl.service.d/zz-pluto.conf '
-      '2>/dev/null || true; '
-      'rmdir /usr/lib/systemd/system/xochitl.service.d 2>/dev/null || true; '
-      'sync; mount -o remount,ro / 2>/dev/null; '
-      'systemctl daemon-reload 2>/dev/null || true; '
-      'echo "authoritative Pluto uninstall scripts are missing; '
-      'runtime preserved because a peer-slot boot override may remain" >&2; '
+      'echo "authoritative transactional Pluto uninstaller is missing; '
+      'owned release/store/data preserved" >&2; '
       'exit 1; fi',
       failure: 'system uninstall failed',
     );
