@@ -23,10 +23,9 @@ struct AbiPresentBridgeConfig {
   PlutoPixelFormat target_format = kPlutoPixelFormatRgb565;
   // PlutoDisplayInfo.is_color: the glass can develop chroma.
   bool panel_is_color = false;
-  // PlutoDisplayInfo.backend_quantizes_color: the backend (or its
-  // downstream compositor, e.g. xochitl under qtfb) maps RGB to the panel
-  // palette itself; settled color passes through as raw RGB instead of being
-  // palette-crushed here.
+  // PlutoDisplayInfo.backend_quantizes_color: the backend maps RGB to the
+  // panel palette itself; settled color passes through as raw RGB instead of
+  // being palette-crushed here.
   bool backend_quantizes_color = false;
 };
 
@@ -44,8 +43,8 @@ struct AbiPresentBridgeConfig {
 //       never at quantize/dispatch time.)
 //   full, mono panel        -> settled 16-gray from L_cur; PreDithered SET.
 //   full, color panel       -> backend_quantizes_color: raw RGB565 copied
-//       from the retained mirror; PreDithered UNSET (qtfb/xochitl must see
-//       raw RGB — pinned flag contract). Otherwise Gallery-3 palette dither
+//       from the retained mirror; PreDithered UNSET (the presenter must see
+//       raw RGB). Otherwise Gallery-3 palette dither
 //       from the mirror; PreDithered SET.
 //
 // Every conversion depends only on (pixel value, absolute panel coordinates),

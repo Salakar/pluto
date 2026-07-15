@@ -405,8 +405,8 @@ TEST(SettlePlannerTest, DistantRegionsNeverUnionFlash) {
   }
 }
 
-// Color develop sparkle is disabled: qtfb cannot carry its sparse mask and
-// turned every nominal 1/256 pass into a full rectangular PARTIAL update.
+// Color develop sparkle stays disabled until the presenter ABI can carry its
+// sparse per-pixel mask; rectangular damage would expand every sparse pass.
 TEST(SettlePlannerTest, ColorSettleNeverArmsDevelopSweep) {
   Harness h(/*panel_is_color=*/true);
   const PlutoRect rect{8, 8, 16, 16};

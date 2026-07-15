@@ -16,7 +16,7 @@ typedef enum PlutoStatus {
   kPlutoStatusUnsupported = 2, // capability not offered by this backend
   kPlutoStatusInvalidArgument = 3,
   kPlutoStatusDeviceLost =
-      4, // backend endpoint died (e.g. xochitl restarted)
+      4, // physical display endpoint became unavailable
   kPlutoStatusTimeout = 5,
   kPlutoStatusInternal = 6,
 } PlutoStatus;
@@ -94,10 +94,10 @@ typedef enum PlutoPresentFlags {
   kPlutoPresentFlagRequiredSettle = 1 << 16,
   // High-fidelity truth chase for real app-rendered pixels correlated with
   // pen hover/contact. With kPlutoRefreshFull, the damage rectangles MUST
-  // remain regional: in particular qtfb sends UPDATE_PARTIAL rather than
-  // escalating the class to UPDATE_ALL. Direct SWTCON already honors damage
-  // geometry. This flag contains no synthetic ink and creates no damage by
-  // itself; kPlutoPresentFlagInkPriority keeps its independent bit-0 ABI.
+  // remain regional rather than escalating to a whole-screen update. Native
+  // presenters honor that damage geometry. This flag contains no synthetic
+  // ink and creates no damage by itself; kPlutoPresentFlagInkPriority keeps
+  // its independent bit-0 ABI.
   kPlutoPresentFlagPenTruth = 1 << 17,
 } PlutoPresentFlags;
 
@@ -132,14 +132,14 @@ typedef struct PlutoDisplayInfo {
   // Reference completion latencies (ms) per class for scheduler pacing until
   // measured; backends fill from the research table or live measurement.
   int32_t nominal_latency_ms[4];
-  // Backend (or its downstream compositor, e.g. xochitl under qtfb) maps RGB
-  // content to the panel palette itself; the renderer then passes settled
-  // color through instead of palette-crushing it (doc 03 section 7.4).
+  // Backend maps RGB content to the panel palette itself; the renderer then
+  // passes settled color through instead of palette-crushing it (doc 03
+  // section 7.4).
   // Appended (not inserted) so struct_size versioning stays meaningful.
   bool backend_quantizes_color;
   // Backend/downstream compositor accepts overlapping regional updates with
   // newest-content supersession. This lets immediate pen truth follow a Fast
-  // preview without waiting on a synthetic completion fence (qtfb/Xochitl).
+  // preview without waiting on a synthetic completion fence.
   bool supports_overlap_supersession;
 } PlutoDisplayInfo;
 
@@ -153,8 +153,8 @@ typedef struct PlutoPresenter PlutoPresenter; // opaque, backend-owned
 
 typedef struct PlutoPresenterConfig {
   size_t struct_size;
-  const char *backend_name; // "qtfb" | "native" | "host-window" |
-                            // "host-headless" | "null" | NULL = auto-probe
+  const char *backend_name; // "native" | "host-window" | "host-headless" |
+                            // "null" | NULL = auto-probe
   const char
       *options; // backend-specific key=value CSV (documented per backend)
   PlutoPresentCompleteCallback on_complete; // may be NULL
@@ -259,9 +259,8 @@ typedef struct PlutoPresenterOps {
 
 // Registry (static; D9).
 const PlutoPresenterOps *pluto_presenter_by_name(const char *name);
-// Auto-probe ladder for on-device use: temporary qtfb development route,
-// followed by an immutable-profile-gated native backend. Host builds use the
-// host preview. The final native cut removes qtfb entirely.
+// On-device auto-probing selects the immutable-profile-gated native backend.
+// Host builds use the host preview.
 const PlutoPresenterOps *pluto_presenter_probe(void);
 
 #ifdef __cplusplus

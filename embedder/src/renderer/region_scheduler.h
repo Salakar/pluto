@@ -60,7 +60,7 @@ struct RegionSchedulerConfig {
   // waveform and the visible stroke becomes a row of dash islands.
   uint32_t pen_collision_tile_px = 32;
   // Exact-colour presenters claim whole PixelEngine tiles for mapped truth.
-  // Mono/qtfb backends do not, and retain their existing overlap-safe chase.
+  // Presenters without that constraint retain their overlap-safe chase.
   bool serialize_pen_truth_by_tile = false;
   uint32_t merge_gap_px = 16;
   std::array<uint8_t, k_refresh_class_count> max_rects = k_default_rect_caps;
@@ -91,8 +91,8 @@ struct RegionSchedulerConfig {
   uint16_t debt_promote_threshold = 2048;
   uint32_t debt_promote_min_gap_us = 250'000;
   // True only when the backend can actually honor Text as a non-flashing
-  // class. qtfb exposes only ALL/PARTIAL, so ordinary background Text must
-  // be treated as intrusive there; explicitly required repair is exempt.
+  // class. Ordinary background Text is intrusive otherwise; explicitly
+  // required repair is exempt.
   bool text_settle_nonintrusive = true;
   bool presenter_reports_completion = false;
   bool presenter_collision_safe = false;

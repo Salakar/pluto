@@ -1082,7 +1082,7 @@ TEST(RegionSchedulerPenDamageTest,
   scheduler.submit_pen_damage(pen, pen, kPlutoRefreshFull, 100);
   scheduler.tick(100);
 
-  // qtfb has no optical completion callback, but Xochitl accepts overlapping
+  // This presenter has no optical completion callback but accepts overlapping
   // regional updates with newest-content supersession. The one-second nominal
   // fence therefore remains bookkeeping and cannot delay the Full truth.
   ASSERT_EQ(presenter.calls.size(), 2u);
@@ -1860,7 +1860,7 @@ TEST(RegionSchedulerTest,
      InputGateSkipsIntrusiveFullButDispatchesExplicitlyRequiredTextRepair) {
   ScriptedPresenter presenter;
   RegionSchedulerConfig config = test_config();
-  config.text_settle_nonintrusive = false; // qtfb-style capability
+  config.text_settle_nonintrusive = false;
   RegionPresenterHooks hooks;
   hooks.user_data = &presenter;
   hooks.ready = &ScriptedPresenter::ready;

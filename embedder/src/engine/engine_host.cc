@@ -19,7 +19,6 @@
 #include <vector>
 
 #include "engine/pen_pointer_timestamp.h"
-#include "engine/qtfb_input_bridge.h"
 #include "input/evdev.h"
 #include "input/pen.h"
 #include "input/pen_ring.h"
@@ -27,7 +26,6 @@
 #include "input/transform.h"
 #include "presenter/host_preview.h"
 #include "presenter/png_encoder.h"
-#include "presenter/qtfb/qtfb_presenter.h"
 #include "sensors/iio.h"
 
 namespace pluto {
@@ -638,19 +636,12 @@ void EngineHost::start_foreground_services() {
       std::cerr << "direct-control: " << error << "\n";
     }
   }
-  if (qtfb_input_enabled_) {
-    if (!qtfb_input_thread_.joinable()) {
-      qtfb_input_stop_.store(false, std::memory_order_release);
-      qtfb_input_thread_ = std::thread(&EngineHost::qtfb_input_loop, this);
-    }
-  } else {
-    if (config_.enable_touch && !touch_thread_.joinable()) {
-      touch_stop_.store(false, std::memory_order_release);
-      touch_thread_ = std::thread(&EngineHost::touch_input_loop, this);
-    }
-    if (config_.enable_pen && ink_thread_ == nullptr) {
-      start_ink_thread();
-    }
+  if (config_.enable_touch && !touch_thread_.joinable()) {
+    touch_stop_.store(false, std::memory_order_release);
+    touch_thread_ = std::thread(&EngineHost::touch_input_loop, this);
+  }
+  if (config_.enable_pen && ink_thread_ == nullptr) {
+    start_ink_thread();
   }
   if (config_.enable_bezel_redraw && !bezel_redraw_thread_.joinable()) {
     bezel_redraw_stop_.store(false, std::memory_order_release);
@@ -661,10 +652,6 @@ void EngineHost::start_foreground_services() {
 void EngineHost::stop_foreground_services() {
   if (direct_control_server_ != nullptr) {
     direct_control_server_->stop();
-  }
-  qtfb_input_stop_.store(true, std::memory_order_release);
-  if (qtfb_input_thread_.joinable()) {
-    qtfb_input_thread_.join();
   }
   touch_stop_.store(true, std::memory_order_release);
   if (touch_thread_.joinable()) {
@@ -925,115 +912,6 @@ void EngineHost::touch_input_loop() {
   }
   source.grab(false);
   source.close();
-}
-
-void EngineHost::dispatch_qtfb_pointer_batch(const QtfbPointerBatch &batch) {
-  if (batch.event_count != 0 && engine_ != nullptr &&
-      engine_library_.loaded()) {
-    engine_library_.procs().SendPointerEvent(engine_, batch.events.data(),
-                                             batch.event_count);
-  }
-  // Raw contact state gates disruptive e-ink maintenance even when an input
-  // packet is not usable as a Flutter phase (for example, a repeated update).
-  if (frame_renderer_ != nullptr) {
-    frame_renderer_->set_touch_active(batch.touch_active);
-    frame_renderer_->set_pen_active(batch.pen_active);
-  }
-  vsync_pacer_.set_pen_proximity(batch.pen_active);
-}
-
-void EngineHost::dispatch_qtfb_key_batch(const QtfbKeyBatch &batch) {
-  if (engine_ == nullptr || !engine_library_.loaded()) {
-    return;
-  }
-  for (std::size_t index = 0; index < batch.event_count; ++index) {
-    const FlutterKeyEvent event = batch.events[index].flutter_event();
-    const FlutterEngineResult result =
-        engine_library_.procs().SendKeyEvent(engine_, &event, nullptr, nullptr);
-    if (result != kSuccess) {
-      std::cerr << "qtfb-input: FlutterEngineSendKeyEvent returned "
-                << static_cast<int>(result) << "\n";
-    }
-  }
-}
-
-void EngineHost::qtfb_input_loop() {
-  QtfbInputTranslator pointer_translator(config_.enable_touch,
-                                         config_.enable_pen);
-  QtfbKeyTranslator key_translator;
-  auto now_monotonic_us = [] {
-    struct timespec mono {};
-    clock_gettime(CLOCK_MONOTONIC, &mono);
-    return static_cast<std::size_t>(
-        static_cast<int64_t>(mono.tv_sec) * 1000000ll + mono.tv_nsec / 1000ll);
-  };
-  auto pause_ms = [](long milliseconds) {
-    timespec remaining{milliseconds / 1000,
-                       (milliseconds % 1000) * 1000 * 1000};
-    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
-    }
-  };
-
-  std::cerr << "qtfb-input: AppLoad cooperative pointer/key bridge active\n";
-  bool device_lost = false;
-  unsigned int consecutive_errors = 0;
-  while (!qtfb_input_stop_.load(std::memory_order_acquire)) {
-    qtfb::UserInputContents input{};
-    const PlutoStatus status = qtfb_receive_user_input(presenter_, &input);
-    if (status == kPlutoStatusOk) {
-      consecutive_errors = 0;
-      const std::size_t timestamp_us = now_monotonic_us();
-      const QtfbPointerBatch pointer_batch =
-          pointer_translator.consume(input, timestamp_us);
-      const QtfbKeyBatch key_batch =
-          key_translator.consume(input, timestamp_us);
-      dispatch_qtfb_pointer_batch(pointer_batch);
-      dispatch_qtfb_key_batch(key_batch);
-      if (pointer_batch.event_count == 0 && key_batch.event_count == 0) {
-        // Disabled, unknown, or out-of-sequence packets are still a valid
-        // server response. Bound a noisy peer even though there is nothing to
-        // deliver to Flutter.
-        pause_ms(1);
-      }
-      continue;
-    }
-    if (status == kPlutoStatusAgain) {
-      consecutive_errors = 0;
-      pause_ms(3); // non-blocking socket: bounded latency without busy-spin
-      continue;
-    }
-    if (status == kPlutoStatusUnsupported) {
-      // A non-input server packet was consumed. Yield before polling again so
-      // an unexpected packet stream cannot monopolize a core.
-      consecutive_errors = 0;
-      pause_ms(1);
-      continue;
-    }
-    if (status == kPlutoStatusDeviceLost) {
-      device_lost = true;
-      break;
-    }
-    if (consecutive_errors++ == 0) {
-      std::cerr << "qtfb-input: receive returned " << static_cast<int>(status)
-                << "\n";
-    }
-    if (consecutive_errors >= 20) {
-      device_lost = true;
-      break;
-    }
-    pause_ms(5);
-  }
-
-  const std::size_t cancel_timestamp_us = now_monotonic_us();
-  dispatch_qtfb_pointer_batch(
-      pointer_translator.cancel_all(cancel_timestamp_us));
-  dispatch_qtfb_key_batch(key_translator.cancel_all(cancel_timestamp_us));
-  if (device_lost && !qtfb_input_stop_.load(std::memory_order_acquire)) {
-    std::cerr << "qtfb-input: AppLoad connection lost; stopping app\n";
-    // The input thread cannot close its own presenter. Let the platform loop
-    // run the normal shutdown sequence after this reader has returned.
-    event_loop_.post_closure([this] { request_shutdown(); });
-  }
 }
 
 // Pen input + render hints: InkThread owns the device (poll-driven and
@@ -1745,17 +1623,6 @@ bool EngineHost::open_presenter(std::string *error) {
     }
     return false;
   }
-  const QtfbInputPolicy input_policy =
-      qtfb_input_policy(config_.presenter_name, std::getenv("QTFB_KEY"),
-                        config_.enable_touch, config_.enable_pen);
-  if (input_policy == QtfbInputPolicy::kRejectMissingKey) {
-    if (error != nullptr) {
-      *error = "startup step 4 failed: qtfb touch/pen input requires "
-               "QTFB_KEY; refusing unsafe evdev fallback";
-    }
-    presenter_ops_ = nullptr;
-    return false;
-  }
   PlutoPresenterConfig presenter_config{};
   presenter_config.struct_size = sizeof(presenter_config);
   presenter_config.backend_name = config_.presenter_name.c_str();
@@ -1794,11 +1661,6 @@ bool EngineHost::open_presenter(std::string *error) {
     }
     presenter_display_info_ = info;
     presenter_display_info_valid_ = true;
-  }
-  qtfb_input_enabled_ = input_policy == QtfbInputPolicy::kCooperative;
-  if (qtfb_input_enabled_) {
-    std::cerr << "qtfb-input: using AppLoad pointer/key input; evdev "
-                 "touch/pen disabled\n";
   }
   rebuild_channel_context();
   return true;

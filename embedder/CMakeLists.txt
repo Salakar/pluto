@@ -92,7 +92,6 @@ add_library(
     src/engine/device_identity.cc
     src/engine/engine_host.cc
     src/engine/engine_loader.cc
-    src/engine/qtfb_input_bridge.cc
     src/ffi/dart_dl.cc
     src/glass_handoff.cc
     src/presenter/host_preview.cc
@@ -105,8 +104,6 @@ add_library(
     src/presenter/native/rm2/rm2_waveform_program.cc
     src/presenter/native/rm2/wbf_decoder.cc
     src/presenter/png_encoder.cc
-    src/presenter/qtfb/qtfb_client.cc
-    src/presenter/qtfb/qtfb_presenter.cc
     src/presenter/registry.cc
     src/presenter/swtcon/admission_mailbox.cc
     src/presenter/swtcon/ct33_frontend.cc
@@ -452,7 +449,6 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
     test/engine/engine_host_test.cc
     test/engine/engine_loader_test.cc
     test/engine/lifecycle_test.cc
-    test/engine/qtfb_input_bridge_test.cc
     test/presenter/mxcfb_backend_test.cc
     test/presenter/mxcfb_device_test.cc
     test/presenter/png_encoder_test.cc
@@ -624,7 +620,6 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
     test/presenter/l0_trace_test.cc
     test/presenter/phase_emit_test.cc
     test/presenter/pixel_engine_test.cc
-    test/presenter/qtfb_presenter_test.cc
     test/presenter/scan_loop_test.cc
     test/presenter/sweep_kernels_test.cc
     test/presenter/swtcon_dc_ledger_test.cc

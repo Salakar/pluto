@@ -6,8 +6,8 @@
 //   * sub-Full and mono-Full content reaches the glass as settled 16-gray
 //     (the ledger's levels, no dispatch re-quantization), PreDithered SET;
 //   * color-panel Full with backend_quantizes_color passes RAW RGB from the
-//     mirror with PreDithered UNSET (the qtfb/xochitl contract — the backend
-//     maps RGB to the panel palette itself);
+//     mirror with PreDithered UNSET (the backend maps RGB to the panel palette
+//     itself);
 //   * color-panel Full without delegation lands on the Gallery-3 palette;
 //   * every conversion is rect-local deterministic (partial == full + crop);
 //   * an unsupported target format leaves the request untouched (the caller
@@ -149,8 +149,8 @@ TEST(AbiPresentBridgeTest, MonoPanelPresentsSettledGray16FromLedger) {
   }
 }
 
-// The qtfb contract: a delegated-color backend must receive raw RGB for the
-// Full-class color settle, with PreDithered UNSET.
+// A delegated-color backend must receive raw RGB for the Full-class color
+// settle, with PreDithered UNSET.
 TEST(AbiPresentBridgeTest, ColorPanelFullDelegatedPassesRawColorThrough) {
   constexpr uint32_t kW = 32;
   constexpr uint32_t kH = 32;
@@ -160,7 +160,7 @@ TEST(AbiPresentBridgeTest, ColorPanelFullDelegatedPassesRawColorThrough) {
 
   AbiPresentBridgeConfig config = bridge_config(kW, kH);
   config.panel_is_color = true;
-  config.backend_quantizes_color = true;  // qtfb: xochitl quantizes downstream
+  config.backend_quantizes_color = true;
   AbiPresentBridge bridge;
   bridge.configure(config);
   ASSERT_TRUE(bridge.valid());

@@ -27,9 +27,6 @@
 
 namespace pluto {
 
-struct QtfbPointerBatch;
-struct QtfbKeyBatch;
-
 enum class EngineMode {
   kDebug,
   kProfile,
@@ -173,9 +170,6 @@ private:
   bool publish_control_file(const std::string &leaf,
                             const std::string &content) const;
   void touch_input_loop();
-  void qtfb_input_loop();
-  void dispatch_qtfb_pointer_batch(const QtfbPointerBatch &batch);
-  void dispatch_qtfb_key_batch(const QtfbKeyBatch &batch);
   void start_ink_thread();
   // Ink-thread context: forwards one tracker output to Flutter (stylus
   // device 500, phase sequencing, CLOCK_MONOTONIC us), the pen ring and the
@@ -222,12 +216,6 @@ private:
   bool hibernated_ = false;
   std::thread touch_thread_;
   std::atomic<bool> touch_stop_{false};
-  // AppLoad owns the physical evdev devices in cooperative qtfb mode. This
-  // single reader consumes touch and pen packets from the presenter's socket
-  // instead, and is always joined before that presenter is closed.
-  std::thread qtfb_input_thread_;
-  std::atomic<bool> qtfb_input_stop_{false};
-  bool qtfb_input_enabled_ = false;
   // Read by the evdev thread so the physical bottom edge follows live
   // portrait/landscape changes without restarting the Flutter isolate.
   std::atomic<int32_t> input_rotation_{0};

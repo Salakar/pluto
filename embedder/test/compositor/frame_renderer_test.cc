@@ -2007,7 +2007,7 @@ TEST(FrameRendererTest, PreDitheredSetAndGray16OnMonoPanel) {
 // Color-panel contracts: sub-Full content reaches the glass
 // chroma-free with PreDithered set; the chroma-pending tiles settle as a
 // Full-class update whose delegated raw RGB keeps PreDithered UNSET
-// (backend_quantizes_color -- the qtfb path must receive raw RGB).
+// (backend_quantizes_color -- the presenter must receive raw RGB).
 struct ColorCapture {
   std::mutex mutex;
   struct Record {
@@ -2034,7 +2034,7 @@ const PlutoPresenterOps *color_capture_ops() {
       info.dpi = 264;
       info.preferred_format = kPlutoPixelFormatRgb565;
       info.is_color = true;
-      info.backend_quantizes_color = true; // qtfb shape
+      info.backend_quantizes_color = true;
       info.supports_overlap_supersession = true;
       info.rect_alignment = 8;
       for (int i = 0; i < 4; ++i) {

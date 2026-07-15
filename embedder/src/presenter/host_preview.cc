@@ -321,7 +321,7 @@ PlutoStatus presenter_wait_idle(PlutoPresenter *presenter,
     return kPlutoStatusOk;
   }
   // Completions are deferred; idle means the worker delivered them all.
-  // timeout_ms == 0 is a non-blocking poll, matching qtfb.
+  // timeout_ms == 0 is a non-blocking poll, matching the presenter contract.
   std::unique_lock<std::mutex> lock(presenter->completion_mutex);
   const bool idle = presenter->completion_cv.wait_for(
       lock, std::chrono::milliseconds(timeout_ms),
