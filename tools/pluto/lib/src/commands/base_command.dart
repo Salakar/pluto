@@ -62,11 +62,7 @@ abstract class PlutoCommand extends Command<int> {
     if (target == 'usb') {
       return const DeviceEndpoint(id: 'usb', host: '10.11.99.1');
     }
-    if (target.contains('@') ||
-        RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(target)) {
-      return DeviceEndpoint.parse(target, id: target);
-    }
-    return DeviceEndpoint(id: target, host: target);
+    return DeviceEndpoint.parse(target, id: target);
   }
 
   /// Runs [operation] and maps known exceptions to exit codes.

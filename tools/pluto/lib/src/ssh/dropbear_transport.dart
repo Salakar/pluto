@@ -249,6 +249,8 @@ final class DropbearTransport implements DeviceTransport {
       '-o',
       'ConnectTimeout=${timeout.inSeconds.clamp(1, 60)}',
       '-o',
+      'StrictHostKeyChecking=accept-new',
+      '-o',
       'ControlMaster=auto',
       '-o',
       'ControlPath=$controlPath',

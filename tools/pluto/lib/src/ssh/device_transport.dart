@@ -28,7 +28,7 @@ final class DeviceEndpoint {
   /// Optional private key path.
   final String? identityFile;
 
-  /// Parses `[user@]host`.
+  /// Parses `[user@]host[:port]` or `[user@][ipv6][:port]`.
   factory DeviceEndpoint.parse(
     String value, {
     String id = 'device',
@@ -36,25 +36,59 @@ final class DeviceEndpoint {
     String? identityFile,
   }) {
     final int separator = value.indexOf('@');
-    if (separator == -1) {
-      return DeviceEndpoint(
-        id: id,
-        host: value,
-        port: port,
-        identityFile: identityFile,
-      );
+    final String user = separator == -1
+        ? 'root'
+        : value.substring(0, separator);
+    final String address = separator == -1
+        ? value
+        : value.substring(separator + 1);
+    if (user.isEmpty || address.isEmpty) {
+      throw FormatException('Invalid SSH device endpoint: $value');
     }
+
+    String host = address;
+    int resolvedPort = port;
+    if (address.startsWith('[')) {
+      final int closingBracket = address.indexOf(']');
+      if (closingBracket <= 1) {
+        throw FormatException('Invalid SSH device endpoint: $value');
+      }
+      host = address.substring(1, closingBracket);
+      final String suffix = address.substring(closingBracket + 1);
+      if (suffix.isNotEmpty) {
+        if (!suffix.startsWith(':')) {
+          throw FormatException('Invalid SSH device endpoint: $value');
+        }
+        resolvedPort = _parsePort(suffix.substring(1), value);
+      }
+    } else if (':'.allMatches(address).length == 1) {
+      final int portSeparator = address.lastIndexOf(':');
+      host = address.substring(0, portSeparator);
+      resolvedPort = _parsePort(address.substring(portSeparator + 1), value);
+    }
+    if (host.isEmpty) {
+      throw FormatException('Invalid SSH device endpoint: $value');
+    }
+
     return DeviceEndpoint(
       id: id,
-      user: value.substring(0, separator),
-      host: value.substring(separator + 1),
-      port: port,
+      user: user,
+      host: host,
+      port: resolvedPort,
       identityFile: identityFile,
     );
   }
 
   /// `user@host` as accepted by OpenSSH.
   String get sshTarget => '$user@$host';
+}
+
+int _parsePort(String raw, String endpoint) {
+  final int? parsed = int.tryParse(raw);
+  if (parsed == null || parsed < 1 || parsed > 65535) {
+    throw FormatException('Invalid SSH port in device endpoint: $endpoint');
+  }
+  return parsed;
 }
 
 /// Handle for an active port forward.
