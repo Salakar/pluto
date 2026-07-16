@@ -41,6 +41,10 @@ enum class Rm2CpuFrequencyAcquireOutcome : std::uint8_t {
   // The thermal identity and temperature were both valid, but the measured
   // CPU temperature was at or above the fixed cutoff. Callers may retry later.
   kThermalHold,
+  // The exact thermal identity matched, but the kernel returned EAGAIN for the
+  // complete bounded sampling window. No frequency floor is retained; callers
+  // may retry without treating the display or policy as lost.
+  kTemperatureRetry,
   // Sensor identity/readability, policy, ownership, receipt, or restore fault.
   // Callers must fail closed rather than treating this as thermal backpressure.
   kFault,
@@ -71,6 +75,7 @@ private:
   enum class TemperatureState : std::uint8_t {
     kSafe,
     kAtOrAboveCutoff,
+    kRetryableUnavailable,
     kUnavailable,
   };
 

@@ -312,14 +312,19 @@ Rm2CpuFrequencyBurstLease::read_temperature(int *out_millidegrees,
       wait_for_temperature_read_retry();
     }
   }
-  if (!temperature_read || !parse_uint64(temperature.data(), &millidegrees) ||
-      millidegrees == 0 ||
+  if (!temperature_read) {
+    if (temperature_read_error == EAGAIN) {
+      set_error(error, "RM2 CPU temperature remained unavailable after "
+                       "bounded EAGAIN retries");
+      return TemperatureState::kRetryableUnavailable;
+    }
+    set_error(error, "RM2 CPU temperature is unavailable or malformed");
+    return TemperatureState::kUnavailable;
+  }
+  if (!parse_uint64(temperature.data(), &millidegrees) || millidegrees == 0 ||
       millidegrees >
           static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    set_error(error, temperature_read_error == EAGAIN
-                         ? "RM2 CPU temperature remained unavailable after "
-                           "bounded EAGAIN retries"
-                         : "RM2 CPU temperature is unavailable or malformed");
+    set_error(error, "RM2 CPU temperature is unavailable or malformed");
     return TemperatureState::kUnavailable;
   }
   if (out_millidegrees != nullptr) {
@@ -509,8 +514,11 @@ Rm2CpuFrequencyBurstLease::acquire(std::string *error) {
     if (active_ && !release(error)) {
       return Rm2CpuFrequencyAcquireOutcome::kFault;
     }
-    return initial_temperature == TemperatureState::kAtOrAboveCutoff
-               ? Rm2CpuFrequencyAcquireOutcome::kThermalHold
+    if (initial_temperature == TemperatureState::kAtOrAboveCutoff) {
+      return Rm2CpuFrequencyAcquireOutcome::kThermalHold;
+    }
+    return initial_temperature == TemperatureState::kRetryableUnavailable
+               ? Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry
                : Rm2CpuFrequencyAcquireOutcome::kFault;
   }
   if (active_) {
@@ -556,8 +564,11 @@ Rm2CpuFrequencyBurstLease::acquire(std::string *error) {
     if (!release(error)) {
       return Rm2CpuFrequencyAcquireOutcome::kFault;
     }
-    return raised_temperature == TemperatureState::kAtOrAboveCutoff
-               ? Rm2CpuFrequencyAcquireOutcome::kThermalHold
+    if (raised_temperature == TemperatureState::kAtOrAboveCutoff) {
+      return Rm2CpuFrequencyAcquireOutcome::kThermalHold;
+    }
+    return raised_temperature == TemperatureState::kRetryableUnavailable
+               ? Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry
                : Rm2CpuFrequencyAcquireOutcome::kFault;
   }
   return Rm2CpuFrequencyAcquireOutcome::kAcquired;

@@ -533,8 +533,21 @@ public:
     }
 
     std::string frequency_error;
-    const Rm2CpuFrequencyAcquireOutcome frequency_outcome =
+    Rm2CpuFrequencyAcquireOutcome frequency_outcome =
         acquire_cpu_frequency_floor(&frequency_error);
+    if (frequency_outcome == Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry) {
+      // The i.MX thermal driver can keep returning EAGAIN across one complete
+      // nominal sample period after a power-state transition. Retry once
+      // locally so a healthy panel does not consume the supervisor's bounded
+      // foreground-failure budget. No framebuffer mutation has happened and
+      // acquire() guarantees that no frequency floor remains held.
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 CPU temperature temporarily unavailable "
+                   "before start; retrying\n");
+      std::this_thread::sleep_for(cpu_thermal_retry_delay_);
+      frequency_error.clear();
+      frequency_outcome = acquire_cpu_frequency_floor(&frequency_error);
+    }
     if (frequency_outcome == Rm2CpuFrequencyAcquireOutcome::kThermalHold) {
       // No presenter exists yet to expose a live retry deadline. Returning
       // Again before framebuffer mutation deliberately hands retry/fallback to
@@ -544,6 +557,14 @@ public:
       std::fprintf(stderr,
                    "lcdif_tcon: RM2 frequency guard thermal hold before "
                    "start: %s\n",
+                   frequency_error.c_str());
+      waveforms_.clear();
+      return kPlutoStatusAgain;
+    }
+    if (frequency_outcome == Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 CPU temperature temporarily unavailable "
+                   "before start after bounded retry: %s\n",
                    frequency_error.c_str());
       waveforms_.clear();
       return kPlutoStatusAgain;
@@ -768,7 +789,19 @@ public:
         finish_failed_admission(kPlutoStatusDeviceLost, std::move(job));
         return kPlutoStatusDeviceLost;
       }
-      finish_thermal_hold_admission(std::move(job));
+      finish_thermal_backpressure_admission(std::move(job));
+      return kPlutoStatusAgain;
+    }
+    if (frequency_outcome == Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 CPU temperature temporarily unavailable "
+                   "before admission: %s\n",
+                   frequency_error.c_str());
+      if (device_->blank_powerdown() != kPlutoStatusOk) {
+        finish_failed_admission(kPlutoStatusDeviceLost, std::move(job));
+        return kPlutoStatusDeviceLost;
+      }
+      finish_thermal_backpressure_admission(std::move(job));
       return kPlutoStatusAgain;
     }
     if (frequency_outcome != Rm2CpuFrequencyAcquireOutcome::kAcquired) {
@@ -2069,7 +2102,7 @@ private:
     idle_cv_.notify_all();
   }
 
-  void finish_thermal_hold_admission(Job &&job) {
+  void finish_thermal_backpressure_admission(Job &&job) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     reusable_job_ = std::move(job);
     outstanding_ = false;

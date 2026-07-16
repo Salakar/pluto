@@ -39,8 +39,9 @@ struct Rm2HandoffOptions {
   // Host tests may inject isolated regular-file fixtures through this field.
   std::optional<Rm2CpuFrequencyLeasePaths> cpu_frequency_paths_for_testing{};
   std::chrono::milliseconds cpu_frequency_debounce_for_testing{50};
-  // A valid-hot CPU reading is transient backpressure, sampled at most once
-  // per second in production. Tests may shorten (but not disable) the hold.
+  // Thermal backpressure is retried at most once per second in production;
+  // this also bounds the one local startup retry after exhausted EAGAIN.
+  // Tests may shorten (but not disable) the delay.
   std::chrono::milliseconds cpu_thermal_retry_delay_for_testing{1000};
 };
 

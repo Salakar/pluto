@@ -32,6 +32,49 @@ struct TransientTemperatureReader {
   }
 };
 
+struct FailingTemperatureReader {
+  int error = EIO;
+  unsigned calls = 0;
+
+  static std::ptrdiff_t read(void *context, int, void *, std::size_t) {
+    auto *reader = static_cast<FailingTemperatureReader *>(context);
+    ++reader->calls;
+    errno = reader->error;
+    return -1;
+  }
+};
+
+struct PostRaiseTemperatureReader {
+  std::string minimum_path;
+  std::string receipt_path;
+  bool initial_sample_complete = false;
+  bool observed_raised_policy_and_receipt = false;
+  unsigned eagain_returns = 0;
+
+  static std::ptrdiff_t read(void *context, int fd, void *buffer,
+                             std::size_t capacity) {
+    auto *reader = static_cast<PostRaiseTemperatureReader *>(context);
+    if (!reader->initial_sample_complete) {
+      const std::ptrdiff_t count =
+          static_cast<std::ptrdiff_t>(::read(fd, buffer, capacity));
+      if (count == 0) {
+        reader->initial_sample_complete = true;
+      }
+      return count;
+    }
+    if (reader->eagain_returns == 0) {
+      std::ifstream minimum(reader->minimum_path, std::ios::binary);
+      const std::string value{std::istreambuf_iterator<char>(minimum),
+                              std::istreambuf_iterator<char>()};
+      reader->observed_raised_policy_and_receipt =
+          value == "1200000\n" && std::filesystem::exists(reader->receipt_path);
+    }
+    ++reader->eagain_returns;
+    errno = EAGAIN;
+    return -1;
+  }
+};
+
 class TemporaryPolicy final {
 public:
   TemporaryPolicy() {
@@ -292,7 +335,7 @@ TEST(Rm2CpuFrequencyBurstLease,
 }
 
 TEST(Rm2CpuFrequencyBurstLease,
-     ExhaustedTemperatureEagainRetriesRemainAFailClosedFault) {
+     ExhaustedTemperatureEagainRetriesBackpressureWithoutBoosting) {
   TemporaryPolicy fixture;
   ASSERT_TRUE(fixture.valid());
   auto paths = fixture.paths();
@@ -302,9 +345,106 @@ TEST(Rm2CpuFrequencyBurstLease,
   Rm2CpuFrequencyBurstLease lease(paths);
 
   std::string error;
-  EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kFault);
+  EXPECT_TRUE(lease.acquire(&error) ==
+              Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry);
   EXPECT_EQ(reader.eagain_returns, kRm2CpuTemperatureReadAttempts);
   EXPECT_NE(error.find("bounded EAGAIN retries"), std::string::npos);
+  EXPECT_FALSE(lease.active());
+  EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
+     ExhaustedTemperatureEagainRestoresAnActiveBurstBeforeRetry) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  auto paths = fixture.paths();
+  TransientTemperatureReader reader;
+  paths.temperature_read_for_testing = &TransientTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  ASSERT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kAcquired)
+      << error;
+  ASSERT_TRUE(lease.active());
+  ASSERT_TRUE(std::filesystem::exists(paths.receipt_path));
+  reader.remaining_eagain = kRm2CpuTemperatureReadAttempts;
+
+  EXPECT_TRUE(lease.acquire(&error) ==
+              Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry);
+  EXPECT_EQ(reader.eagain_returns, kRm2CpuTemperatureReadAttempts);
+  EXPECT_FALSE(lease.active());
+  EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
+     PostRaiseTemperatureEagainRestoresThePublishedBurstBeforeRetry) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  auto paths = fixture.paths();
+  PostRaiseTemperatureReader reader{
+      .minimum_path = paths.policy_path + "/scaling_min_freq",
+      .receipt_path = paths.receipt_path,
+  };
+  paths.temperature_read_for_testing = &PostRaiseTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) ==
+              Rm2CpuFrequencyAcquireOutcome::kTemperatureRetry);
+  EXPECT_TRUE(reader.initial_sample_complete);
+  EXPECT_TRUE(reader.observed_raised_policy_and_receipt);
+  EXPECT_EQ(reader.eagain_returns, kRm2CpuTemperatureReadAttempts);
+  EXPECT_NE(error.find("bounded EAGAIN retries"), std::string::npos);
+  EXPECT_FALSE(lease.active());
+  EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
+     TemperatureRetryCannotHideAnActiveBurstRestoreFailure) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  auto paths = fixture.paths();
+  TransientTemperatureReader reader;
+  paths.temperature_read_for_testing = &TransientTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  ASSERT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kAcquired)
+      << error;
+  fixture.write("scaling_governor", "performance\n");
+  reader.remaining_eagain = kRm2CpuTemperatureReadAttempts;
+
+  EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kFault);
+  EXPECT_TRUE(lease.active());
+  EXPECT_TRUE(std::filesystem::exists(paths.receipt_path));
+  EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
+
+  fixture.write("scaling_governor", "ondemand\n");
+  EXPECT_TRUE(lease.release(&error)) << error;
+  EXPECT_FALSE(lease.active());
+  EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
+     NonEagainTemperatureReadFailureRemainsAnImmediateFault) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  auto paths = fixture.paths();
+  FailingTemperatureReader reader;
+  paths.temperature_read_for_testing = &FailingTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kFault);
+  EXPECT_EQ(reader.calls, 1U);
+  EXPECT_NE(error.find("unavailable or malformed"), std::string::npos);
   EXPECT_FALSE(lease.active());
   EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
   EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
