@@ -20,7 +20,12 @@ CAMERA_DIR="${PLUTO_CAMERA_ACCEPTANCE_DIR:-}"
 CAMERA_RIG="${PLUTO_CAMERA_RIG:-}"
 SCREENSHOT_DIR="${PLUTO_LIFECYCLE_SCREENSHOT_DIR:-}"
 CYCLES="${PLUTO_LIFECYCLE_CYCLES:-20}"
-WAKE_SECONDS="${PLUTO_LIFECYCLE_WAKE_SECONDS:-18}"
+# A standby handoff can spend about 25 seconds in bounded renderer hibernate,
+# cold-fallback termination, standby startup, VPDD-idle, and quiesce waits.
+# Keep more than twice that envelope between marker publication and RTC wake.
+MIN_WAKE_SECONDS=60
+WAKE_SECONDS="${PLUTO_LIFECYCLE_WAKE_SECONDS:-$MIN_WAKE_SECONDS}"
+POST_WAKE_DWELL_SECONDS="${PLUTO_LIFECYCLE_POST_WAKE_DWELL_SECONDS:-3}"
 DOWN_TIMEOUT="${PLUTO_LIFECYCLE_DOWN_TIMEOUT:-45}"
 UP_TIMEOUT="${PLUTO_LIFECYCLE_UP_TIMEOUT:-120}"
 CRASH_TEST="${PLUTO_LIFECYCLE_CRASH_TEST:-1}"
@@ -49,8 +54,13 @@ is_positive_integer "$CYCLES" && ((CYCLES <= 100)) || {
   echo "release lifecycle smoke: PLUTO_LIFECYCLE_CYCLES must be in [1,100]" >&2
   exit 64
 }
-is_positive_integer "$WAKE_SECONDS" && ((WAKE_SECONDS >= 12 && WAKE_SECONDS <= 120)) || {
-  echo "release lifecycle smoke: wake seconds must be in [12,120]" >&2
+is_positive_integer "$WAKE_SECONDS" &&
+  ((WAKE_SECONDS >= MIN_WAKE_SECONDS && WAKE_SECONDS <= 120)) || {
+  echo "release lifecycle smoke: wake seconds must be in [$MIN_WAKE_SECONDS,120]" >&2
+  exit 64
+}
+is_nonnegative_decimal "$POST_WAKE_DWELL_SECONDS" || {
+  echo "release lifecycle smoke: invalid post-wake dwell: $POST_WAKE_DWELL_SECONDS" >&2
   exit 64
 }
 is_positive_integer "$DOWN_TIMEOUT" && ((DOWN_TIMEOUT <= 300)) || {
@@ -592,18 +602,54 @@ for ((cycle = 1; cycle <= CYCLES; cycle += 1)); do
   }
 
   receipt="$(remote "set -eu
-rtc=/sys/class/rtc/rtc0/wakealarm
-[ -f \"\$rtc\" ] && [ -w \"\$rtc\" ]
-now=\$(date +%s)
-alarm=\$((now + $WAKE_SECONDS))
-printf '0\\n' > \"\$rtc\"
-printf '%s\\n' \"\$alarm\" > \"\$rtc\"
-accepted=\$(cat \"\$rtc\")
-[ \"\$accepted\" = \"\$alarm\" ]
-tmp=/run/pluto/.standby.acceptance.\$\$
-printf 'release-lifecycle-cycle-%s\\n' '$cycle' > \"\$tmp\"
-mv \"\$tmp\" /run/pluto/standby
-printf 'alarm=%s\\n' \"\$accepted\"")" || {
+. /home/root/pluto/share/device-profiles.sh
+pluto_profile_probe
+[ \"\$PLUTO_PROFILE_ID\" = '$EXPECTED_PROFILE' ]
+rtc_dir=/sys/class/rtc/rtc0
+wakealarm=\$rtc_dir/wakealarm
+[ -r \"\$rtc_dir/since_epoch\" ]
+[ -f \"\$wakealarm\" ] && [ -w \"\$wakealarm\" ]
+marker_tmp=/run/pluto/.standby.acceptance.\$\$
+light_tmp=/run/pluto/.standby-frontlight.\$\$
+trap 'rm -f \"\$marker_tmp\" \"\$light_tmp\"' 0 1 2 15
+printf 'release-lifecycle-cycle-%s\\n' '$cycle' > \"\$marker_tmp\"
+printf '0\\n' > \"\$wakealarm\"
+cleared=\$(cat \"\$wakealarm\")
+[ -z \"\$cleared\" ]
+rtc_now=\$(cat \"\$rtc_dir/since_epoch\")
+system_now=\$(date +%s)
+case \"\$rtc_now\" in ''|*[!0-9]*) exit 65 ;; esac
+case \"\$system_now\" in ''|*[!0-9]*) exit 65 ;; esac
+printf '+%s\\n' '$WAKE_SECONDS' > \"\$wakealarm\"
+accepted=\$(cat \"\$wakealarm\")
+case \"\$accepted\" in ''|*[!0-9]*) exit 66 ;; esac
+rtc_after=\$(cat \"\$rtc_dir/since_epoch\")
+case \"\$rtc_after\" in ''|*[!0-9]*) exit 66 ;; esac
+arm_margin=\$((accepted - rtc_after))
+minimum_margin=$((WAKE_SECONDS - 2))
+[ \"\$arm_margin\" -ge \"\$minimum_margin\" ]
+[ \"\$arm_margin\" -le '$WAKE_SECONDS' ]
+frontlight=none
+if [ -n \"\$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS\" ]; then
+  light_raw=\$(cat \"\$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS\" 2>/dev/null || true)
+  case \"\$light_raw\" in ''|*[!0-9]*) exit 67 ;; esac
+  printf '%s\\n' \"\$light_raw\" > \"\$light_tmp\"
+  frontlight=\$light_raw
+fi
+pending=\$(cat \"\$wakealarm\")
+[ \"\$pending\" = \"\$accepted\" ]
+publish_rtc=\$(cat \"\$rtc_dir/since_epoch\")
+case \"\$publish_rtc\" in ''|*[!0-9]*) exit 68 ;; esac
+publish_margin=\$((accepted - publish_rtc))
+[ \"\$publish_margin\" -ge \"\$minimum_margin\" ]
+if [ -n \"\$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS\" ]; then
+  mv -f \"\$light_tmp\" /run/pluto/standby-frontlight
+fi
+mv -f \"\$marker_tmp\" /run/pluto/standby
+clock_delta=\$((system_now - rtc_now))
+printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin=%s publish_rtc=%s publish_margin=%s frontlight=%s\\n' \\
+  \"\$rtc_now\" \"\$system_now\" \"\$clock_delta\" \"\$accepted\" \\
+  \"\$arm_margin\" \"\$publish_rtc\" \"\$publish_margin\" \"\$frontlight\"")" || {
     echo "release lifecycle smoke: cycle $cycle could not arm RTC and request standby" >&2
     exit 77
   }
@@ -651,6 +697,9 @@ printf 'alarm=%s\\n' \"\$accepted\"")" || {
   }
   echo "release lifecycle smoke: PASS cycle=$cycle app=$STATE_APP_ID pid=$STATE_FOREGROUND_PID health_seq=$STATE_HEALTH_SEQ wake_receipts=$STATE_WAKE_COUNT"
   stage "lifecycle-wake-$cycle"
+  if ((cycle < CYCLES)); then
+    sleep "$POST_WAKE_DWELL_SECONDS"
+  fi
 done
 
 "$CLI" run --release --device "$DEVICE" "$EXPECTED_APP_ID"

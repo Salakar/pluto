@@ -79,6 +79,8 @@ ink_launch=$ink_launch
 home_launch=$home_launch
 home_seq=$home_seq
 home_mono=$home_mono
+frontlight_snapshot=$frontlight_snapshot
+standby_requests=$standby_requests
 STATE
 }
 if [[ "$app" == dev.pluto.ink ]]; then
@@ -107,6 +109,55 @@ esac
 save
 EOF
 chmod 0755 "$TMP/bin/pluto"
+
+cat > "$TMP/bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${SLEEP_LOG:-}" ]]; then
+  printf '%s\n' "$*" >> "$SLEEP_LOG"
+fi
+if [[ "${PLUTO_TEST_NO_SLEEP:-0}" == 1 ]]; then
+  exit 0
+fi
+exec /bin/sleep "$@"
+EOF
+chmod 0755 "$TMP/bin/sleep"
+
+cat > "$TMP/bin/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -z "${PUBLISH_LOG:-}" ]]; then
+  exec /bin/mv "$@"
+fi
+[[ -n "${PUBLISH_RUN_DIR:-}" && -n "${PUBLISH_EXPECT_FRONTLIGHT:-}" ]] ||
+  exit 66
+destination=${!#}
+case "$destination" in
+  "$PUBLISH_RUN_DIR/standby-frontlight")
+    [[ "$PUBLISH_EXPECT_FRONTLIGHT" != none ]] || exit 66
+    /bin/mv "$@" || exit 66
+    [[ -f "$destination" && ! -L "$destination" ]] || exit 66
+    [[ "$(cat "$destination")" == "$PUBLISH_EXPECT_FRONTLIGHT" ]] ||
+      exit 66
+    printf 'frontlight\n' >> "$PUBLISH_LOG" || exit 66
+    ;;
+  "$PUBLISH_RUN_DIR/standby")
+    if [[ "$PUBLISH_EXPECT_FRONTLIGHT" == none ]]; then
+      [[ ! -e "$PUBLISH_RUN_DIR/standby-frontlight" &&
+        ! -L "$PUBLISH_RUN_DIR/standby-frontlight" ]] || exit 66
+    else
+      [[ -f "$PUBLISH_RUN_DIR/standby-frontlight" &&
+        ! -L "$PUBLISH_RUN_DIR/standby-frontlight" ]] || exit 66
+      [[ "$(cat "$PUBLISH_RUN_DIR/standby-frontlight")" == \
+        "$PUBLISH_EXPECT_FRONTLIGHT" ]] || exit 66
+    fi
+    /bin/mv "$@" || exit 66
+    printf 'standby\n' >> "$PUBLISH_LOG" || exit 66
+    ;;
+  *) exec /bin/mv "$@" ;;
+esac
+EOF
+chmod 0755 "$TMP/bin/mv"
 
 cat > "$TMP/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
@@ -139,6 +190,8 @@ ink_launch=$ink_launch
 home_launch=$home_launch
 home_seq=$home_seq
 home_mono=$home_mono
+frontlight_snapshot=$frontlight_snapshot
+standby_requests=$standby_requests
 STATE
 }
 case "$command" in
@@ -206,9 +259,100 @@ case "$command" in
     save
     ;;
   *'wakealarm'*)
+    relative_write="printf '+%s\\n' '60' > \"\$wakealarm\""
+    clear_write="printf '0\\n' > \"\$wakealarm\""
+    frontlight_write='mv -f "$light_tmp" /run/pluto/standby-frontlight'
+    marker_write='mv -f "$marker_tmp" /run/pluto/standby'
+    publication_block='if [ -n "$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS" ]; then
+  mv -f "$light_tmp" /run/pluto/standby-frontlight
+fi
+mv -f "$marker_tmp" /run/pluto/standby'
+    marker_first_block='mv -f "$marker_tmp" /run/pluto/standby
+if [ -n "$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS" ]; then
+  mv -f "$light_tmp" /run/pluto/standby-frontlight
+fi'
+    printf '%s' "$command" | grep -F '. /home/root/pluto/share/device-profiles.sh' \
+      >/dev/null || exit 66
+    printf '%s' "$command" | grep -F 'pluto_profile_probe' >/dev/null || exit 66
+    printf '%s' "$command" | grep -F '[ -z "$cleared" ]' >/dev/null || exit 66
+    printf '%s' "$command" | grep -F 'cat "$rtc_dir/since_epoch"' \
+      >/dev/null || exit 66
+    printf '%s' "$command" | grep -F '[ "$pending" = "$accepted" ]' \
+      >/dev/null || exit 66
+    printf '%s' "$command" | grep -F \
+      '[ "$publish_margin" -ge "$minimum_margin" ]' >/dev/null || exit 66
+    printf '%s' "$command" | grep -F \
+      'mv -f "$light_tmp" /run/pluto/standby-frontlight' \
+      >/dev/null || exit 66
+    [[ "$command" == *"$relative_write"* ]] || exit 66
+    [[ "$command" != *'alarm=$((now +'* ]] || exit 66
+
+    case "${PUBLICATION_FIXTURE_MODE:-normal}" in
+      normal) ;;
+      missing-marker)
+        [[ "$command" == *"$marker_write"* ]] || exit 66
+        command=${command/"$marker_write"/:}
+        ;;
+      missing-frontlight)
+        [[ "$command" == *"$frontlight_write"* ]] || exit 66
+        command=${command/"$frontlight_write"/:}
+        ;;
+      marker-first)
+        [[ "$command" == *"$publication_block"* ]] || exit 66
+        command=${command/"$publication_block"/"$marker_first_block"}
+        ;;
+      *) exit 64 ;;
+    esac
+
+    rewritten=${command//\/home\/root\/pluto\/share\/device-profiles.sh/$STATE_DIR\/device-profiles.sh}
+    rewritten=${rewritten//\/sys\/class\/rtc\/rtc0/$STATE_DIR\/rtc0}
+    rewritten=${rewritten//\/run\/pluto/$STATE_DIR\/run}
+    case "${RTC_FIXTURE_MODE:-normal}" in
+      normal)
+        rewritten=${rewritten/"$clear_write"/": > \"\$wakealarm\""}
+        accepted_alarm=100060
+        ;;
+      expired)
+        rewritten=${rewritten/"$clear_write"/": > \"\$wakealarm\""}
+        accepted_alarm=99999
+        ;;
+      uncleared)
+        accepted_alarm=100060
+        ;;
+      *) exit 64 ;;
+    esac
+    replacement_write="printf '%s\\n' '$accepted_alarm' > \"\$wakealarm\""
+    rewritten=${rewritten/"$relative_write"/"$replacement_write"}
+    : > "$STATE_DIR/publish-order"
+    PUBLISH_LOG="$STATE_DIR/publish-order"
+    PUBLISH_RUN_DIR="$STATE_DIR/run"
+    if [[ "$profile" == move ]]; then
+      PUBLISH_EXPECT_FRONTLIGHT=913
+    else
+      PUBLISH_EXPECT_FRONTLIGHT=none
+    fi
+    export PUBLISH_LOG PUBLISH_RUN_DIR PUBLISH_EXPECT_FRONTLIGHT
+    receipt=$(/bin/sh -c "$rewritten") || exit 66
+    expected_marker="release-lifecycle-cycle-$((standby_requests + 1))"
+    [[ -f "$STATE_DIR/run/standby" && ! -L "$STATE_DIR/run/standby" ]] ||
+      exit 66
+    marker_content=$(cat "$STATE_DIR/run/standby") || exit 66
+    [[ "$marker_content" == "$expected_marker" ]] || exit 66
+    publish_order=$(tr '\n' ',' < "$STATE_DIR/publish-order") || exit 66
+    if [[ "$profile" == move ]]; then
+      [[ "$publish_order" == 'frontlight,standby,' ]] || exit 66
+    else
+      [[ "$publish_order" == 'standby,' ]] || exit 66
+    fi
+    if [[ -f "$STATE_DIR/run/standby-frontlight" ]]; then
+      frontlight_snapshot=$(cat "$STATE_DIR/run/standby-frontlight") || exit 66
+    else
+      frontlight_snapshot=none
+    fi
+    standby_requests=$((standby_requests + 1))
     suspended=1
     save
-    printf 'alarm=123456\n'
+    printf '%s\n' "$receipt"
     ;;
   true)
     if [[ "$suspended" == 1 ]]; then
@@ -272,8 +416,21 @@ cat > "$TMP/camera-binding.json" <<'JSON'
 JSON
 
 reset_state() {
-  local dir="$1"
-  mkdir -p "$dir"
+  local dir="$1" profile_id="${2:-rm1}" frontlight=''
+  mkdir -p "$dir/rtc0" "$dir/run"
+  if [[ "$profile_id" == move ]]; then
+    frontlight="$dir/frontlight"
+    printf '913\n' > "$frontlight"
+  fi
+  cat > "$dir/device-profiles.sh" <<EOF
+pluto_profile_probe() {
+  PLUTO_PROFILE_ID='$profile_id'
+  PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS='$frontlight'
+  export PLUTO_PROFILE_ID PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS
+}
+EOF
+  printf '100000\n' > "$dir/rtc0/since_epoch"
+  : > "$dir/rtc0/wakealarm"
   cat > "$dir/state" <<EOF
 unit=xochitl.service
 supervisor=100
@@ -284,7 +441,7 @@ seq=10
 mono=10000
 wakes=0
 revision=$REVISION
-profile=rm1
+profile=$profile_id
 suspended=0
 crashed=0
 pending_progress=0
@@ -298,6 +455,8 @@ home_start=3000
 home_launch=home-launch
 home_seq=20
 home_mono=20000
+frontlight_snapshot=unset
+standby_requests=0
 EOF
 }
 
@@ -305,11 +464,15 @@ run_smoke() {
   local mode="$1" dir="$2"
   STATE_DIR="$dir" FIXTURE_MODE="$mode" PATH="$TMP/bin:$PATH" \
   PNG_FIXTURE_DIR="$TMP/png" \
+  RTC_FIXTURE_MODE="${RTC_FIXTURE_MODE:-normal}" \
+  PUBLICATION_FIXTURE_MODE="${PUBLICATION_FIXTURE_MODE:-normal}" \
+  SLEEP_LOG="${SLEEP_LOG:-}" \
+  PLUTO_TEST_NO_SLEEP="${PLUTO_TEST_NO_SLEEP:-0}" \
   PLUTO_CLI=pluto \
   PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
-  PLUTO_ACCEPTANCE_PROFILE_ID=rm1 \
-  PLUTO_LIFECYCLE_CYCLES=1 \
-  PLUTO_LIFECYCLE_WAKE_SECONDS=12 \
+  PLUTO_ACCEPTANCE_PROFILE_ID="${ACCEPTANCE_PROFILE_ID:-rm1}" \
+  PLUTO_LIFECYCLE_CYCLES="${ACCEPTANCE_CYCLES:-1}" \
+  PLUTO_LIFECYCLE_WAKE_SECONDS=60 \
   PLUTO_LIFECYCLE_DOWN_TIMEOUT=2 \
   PLUTO_LIFECYCLE_UP_TIMEOUT=2 \
   PLUTO_LIFECYCLE_CRASH_SETTLE_SECONDS=0 \
@@ -320,10 +483,123 @@ run_smoke() {
     "$SMOKE" "${ACCEPTANCE_DEVICE:-root@fixture-device}"
 }
 
+if PLUTO_LIFECYCLE_WAKE_SECONDS=18 \
+  "$SMOKE" root@fixture-device >/dev/null 2>"$TMP/short-alarm.err"; then
+  fail 'legacy 18-second lifecycle alarm was accepted'
+fi
+grep -q 'wake seconds must be in \[60,120\]' "$TMP/short-alarm.err" ||
+  fail 'legacy alarm rejection did not report the safe minimum'
+
 reset_state "$TMP/pass"
 PLUTO_LIFECYCLE_CRASH_TEST=1 run_smoke normal "$TMP/pass" > "$TMP/pass.out"
 grep -q 'PASS cycles=1 crash_test=1' "$TMP/pass.out" ||
   fail 'same-process warm resume and crash recovery did not pass'
+grep -Eq \
+  'requested cleared=1 rtc_now=[0-9]+ system_now=[0-9]+ clock_delta=-?[0-9]+ accepted=[0-9]+ arm_margin=60 publish_rtc=[0-9]+ publish_margin=60 frontlight=none' \
+  "$TMP/pass.out" || fail 'RTC clock, accepted-alarm, and margin evidence was not emitted'
+. "$TMP/pass/state"
+[[ "$frontlight_snapshot" == none && "$standby_requests" == 1 &&
+  "$(tr '\n' ',' < "$TMP/pass/publish-order")" == 'standby,' &&
+  "$(cat "$TMP/pass/run/standby")" == 'release-lifecycle-cycle-1' ]] ||
+  fail 'RM1 lifecycle fixture did not publish the exact marker-only transaction'
+
+reset_state "$TMP/rm2" rm2
+ACCEPTANCE_PROFILE_ID=rm2 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/rm2" >/dev/null ||
+  fail 'RM2 lifecycle fixture no longer passes the common standby flow'
+. "$TMP/rm2/state"
+[[ "$frontlight_snapshot" == none && "$standby_requests" == 1 &&
+  "$(tr '\n' ',' < "$TMP/rm2/publish-order")" == 'standby,' &&
+  "$(cat "$TMP/rm2/run/standby")" == 'release-lifecycle-cycle-1' ]] ||
+  fail 'RM2 lifecycle fixture did not publish the exact marker-only transaction'
+
+reset_state "$TMP/move" move
+ACCEPTANCE_PROFILE_ID=move PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/move" > "$TMP/move.out" ||
+  fail 'Move lifecycle fixture no longer passes the common standby flow'
+grep -q 'frontlight=913' "$TMP/move.out" ||
+  fail 'Move lifecycle receipt omitted the profile-selected frontlight snapshot'
+. "$TMP/move/state"
+[[ "$frontlight_snapshot" == 913 && "$standby_requests" == 1 &&
+  "$(tr '\n' ',' < "$TMP/move/publish-order")" == \
+    'frontlight,standby,' &&
+  "$(cat "$TMP/move/run/standby")" == 'release-lifecycle-cycle-1' ]] ||
+  fail 'Move brightness was not visibly published before the exact standby marker'
+
+reset_state "$TMP/missing-marker"
+if PUBLICATION_FIXTURE_MODE=missing-marker PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/missing-marker" >/dev/null \
+    2>"$TMP/missing-marker.err"; then
+  fail 'missing final standby publication passed lifecycle acceptance'
+fi
+grep -q 'could not arm RTC and request standby' "$TMP/missing-marker.err" ||
+  fail 'missing standby publication did not fail the arming transaction'
+. "$TMP/missing-marker/state"
+[[ "$suspended" == 0 && "$standby_requests" == 0 &&
+  ! -e "$TMP/missing-marker/run/standby" ]] ||
+  fail 'fixture simulated suspend without an exact published standby marker'
+
+reset_state "$TMP/missing-frontlight" move
+if ACCEPTANCE_PROFILE_ID=move PUBLICATION_FIXTURE_MODE=missing-frontlight \
+  PLUTO_TEST_NO_SLEEP=1 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/missing-frontlight" >/dev/null \
+    2>"$TMP/missing-frontlight.err"; then
+  fail 'missing Move frontlight publication passed lifecycle acceptance'
+fi
+grep -q 'could not arm RTC and request standby' \
+  "$TMP/missing-frontlight.err" ||
+  fail 'missing Move frontlight publication did not fail before standby'
+. "$TMP/missing-frontlight/state"
+[[ "$suspended" == 0 && "$standby_requests" == 0 &&
+  ! -e "$TMP/missing-frontlight/run/standby" ]] ||
+  fail 'fixture suspended Move without a published frontlight snapshot'
+
+reset_state "$TMP/marker-first" move
+if ACCEPTANCE_PROFILE_ID=move PUBLICATION_FIXTURE_MODE=marker-first \
+  PLUTO_TEST_NO_SLEEP=1 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/marker-first" >/dev/null \
+    2>"$TMP/marker-first.err"; then
+  fail 'Move marker-first publication order passed lifecycle acceptance'
+fi
+grep -q 'could not arm RTC and request standby' "$TMP/marker-first.err" ||
+  fail 'Move marker-first order did not fail before standby publication'
+. "$TMP/marker-first/state"
+[[ "$suspended" == 0 && "$standby_requests" == 0 &&
+  ! -e "$TMP/marker-first/run/standby" &&
+  ! -e "$TMP/marker-first/run/standby-frontlight" ]] ||
+  fail 'fixture suspended before Move frontlight publication became visible'
+
+reset_state "$TMP/dwell"
+: > "$TMP/dwell-sleeps"
+SLEEP_LOG="$TMP/dwell-sleeps" PLUTO_TEST_NO_SLEEP=1 ACCEPTANCE_CYCLES=2 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 run_smoke normal "$TMP/dwell" >/dev/null ||
+  fail 'two-cycle lifecycle dwell fixture did not pass'
+[[ "$(grep -c '^3$' "$TMP/dwell-sleeps")" == 1 ]] ||
+  fail 'multi-cycle lifecycle flow did not dwell once between two wakes'
+
+reset_state "$TMP/expired"
+if RTC_FIXTURE_MODE=expired PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/expired" >/dev/null 2>"$TMP/expired.err"; then
+  fail 'expired RTC alarm passed lifecycle standby acceptance'
+fi
+grep -q 'could not arm RTC and request standby' "$TMP/expired.err" ||
+  fail 'expired RTC alarm did not fail at standby publication'
+[[ ! -e "$TMP/expired/run/standby" ]] ||
+  fail 'expired RTC alarm published a standby marker'
+. "$TMP/expired/state"
+[[ "$frontlight_snapshot" == unset ]] ||
+  fail 'expired RTC alarm published frontlight state'
+
+reset_state "$TMP/uncleared"
+if RTC_FIXTURE_MODE=uncleared PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/uncleared" >/dev/null 2>"$TMP/uncleared.err"; then
+  fail 'uncleared prior RTC alarm passed lifecycle standby acceptance'
+fi
+grep -q 'could not arm RTC and request standby' "$TMP/uncleared.err" ||
+  fail 'uncleared RTC alarm did not fail before standby publication'
+[[ ! -e "$TMP/uncleared/run/standby" ]] ||
+  fail 'uncleared RTC alarm published a standby marker'
 
 for camera_mismatch in '2|rm1' '3|rm2'; do
   IFS='|' read -r camera_rig camera_profile <<< "$camera_mismatch"
@@ -335,7 +611,7 @@ for camera_mismatch in '2|rm1' '3|rm2'; do
     PLUTO_CAMERA_CONFIG="$TMP/camera-binding.json" \
     PLUTO_CAMERA_RIG="$camera_rig" \
     PLUTO_CAMERA_ACCEPTANCE_DIR="$TMP/lifecycle-camera-$camera_rig-$camera_profile" \
-    PLUTO_LIFECYCLE_CYCLES=1 PLUTO_LIFECYCLE_WAKE_SECONDS=12 \
+    PLUTO_LIFECYCLE_CYCLES=1 PLUTO_LIFECYCLE_WAKE_SECONDS=60 \
     "$SMOKE" root@fixture-device >/dev/null 2>"$error_file"; then
     fail "lifecycle smoke accepted camera mismatch $camera_mismatch"
   fi
@@ -410,7 +686,7 @@ if STATE_DIR="$TMP/revision" FIXTURE_MODE=normal PATH="$TMP/bin:$PATH" \
   PLUTO_CLI=pluto \
   PLUTO_ACCEPTANCE_RELEASE_REVISION=ffffffffffffffffffffffffffffffffffffffff \
   PLUTO_ACCEPTANCE_PROFILE_ID=rm1 \
-  PLUTO_LIFECYCLE_CYCLES=1 PLUTO_LIFECYCLE_WAKE_SECONDS=12 \
+  PLUTO_LIFECYCLE_CYCLES=1 PLUTO_LIFECYCLE_WAKE_SECONDS=60 \
   PLUTO_LIFECYCLE_DOWN_TIMEOUT=2 PLUTO_LIFECYCLE_UP_TIMEOUT=2 \
   PLUTO_LIFECYCLE_CRASH_TEST=0 \
   "$SMOKE" root@fixture-device >/dev/null 2>&1; then
