@@ -400,16 +400,12 @@ proc_start_ticks() {
   printf '%s\n' "$1"
 }
 
-file_mode() {
-  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
-}
-
-file_mtime() {
-  stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null
-}
-
-file_uid() {
-  stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null
+# Health receipts are replaced atomically. Follow an already-open descriptor
+# so content and metadata always describe the same inode even when the
+# publisher renames the next generation over the watched pathname mid-read.
+file_metadata_follow() {
+  stat -Lc '%a %u %Y' "$1" 2>/dev/null ||
+    stat -Lf '%Lp %u %m' "$1" 2>/dev/null
 }
 
 read_renderer_health() {  # file expected_pid expected_start
@@ -417,16 +413,51 @@ read_renderer_health() {  # file expected_pid expected_start
   rh_pid=$2
   rh_start=$3
   [ -f "$rh_file" ] && [ ! -L "$rh_file" ] || return 1
-  [ "$(file_mode "$rh_file")" = 600 ] || return 1
-  if [ "${PLUTO_TESTING:-0}" != 1 ]; then
-    [ "$(file_uid "$rh_file")" = 0 ] || return 1
-  fi
   [ "$(proc_start_ticks "$rh_pid" 2>/dev/null)" = "$rh_start" ] ||
     return 1
-  rh_lines="$(wc -l < "$rh_file" 2>/dev/null | tr -d '[:space:]')" ||
+
+  # fd 9 is private to this short read and unused elsewhere in the supervisor.
+  # `/proc` is present on-device; `/dev/fd` keeps the shell contracts portable
+  # to the macOS host. stat must follow that descriptor symlink explicitly on
+  # BusyBox so it validates the opened regular file rather than the link.
+  exec 9< "$rh_file" || return 1
+  # `$$` remains the parent PID in the background boot-confirmer shell on
+  # BusyBox ash. `/proc/self` follows whichever process is performing the
+  # check, and fd 9 is inherited by the external stat command below.
+  rh_fd_path="/proc/self/fd/9"
+  [ -e "$rh_fd_path" ] || rh_fd_path=/dev/fd/9
+  if [ ! -f "$rh_fd_path" ]; then
+    exec 9<&-
     return 1
-  [ "$rh_lines" = 1 ] || return 1
-  rh_line="$(cat "$rh_file" 2>/dev/null)" || return 1
+  fi
+  rh_metadata="$(file_metadata_follow "$rh_fd_path")" || {
+    exec 9<&-
+    return 1
+  }
+  set -- $rh_metadata
+  if [ "$#" -ne 3 ]; then
+    exec 9<&-
+    return 1
+  fi
+  rh_mode=$1
+  rh_uid=$2
+  rh_mtime=$3
+  if [ "$rh_mode" != 600 ] ||
+     { [ "${PLUTO_TESTING:-0}" != 1 ] && [ "$rh_uid" != 0 ]; }; then
+    exec 9<&-
+    return 1
+  fi
+  if ! IFS= read -r rh_line <&9; then
+    exec 9<&-
+    return 1
+  fi
+  rh_extra=
+  if IFS= read -r rh_extra <&9 || [ -n "$rh_extra" ]; then
+    exec 9<&-
+    return 1
+  fi
+  exec 9<&-
+
   set -- $rh_line
   [ "$#" -eq 3 ] || return 1
   rh_pid_field=${1#pid=}
@@ -437,8 +468,7 @@ read_renderer_health() {  # file expected_pid expected_start
     return 1
   is_uint "$rh_seq" && is_uint "$rh_mono" || return 1
   [ "$rh_line" = "pid=$rh_pid seq=$rh_seq mono_ms=$rh_mono" ] || return 1
-  rh_mtime="$(file_mtime "$rh_file")" || return 1
-  is_uint "$rh_mtime" || return 1
+  is_uint "$rh_uid" && is_uint "$rh_mtime" || return 1
   HEALTH_READ_SEQ=$rh_seq
   HEALTH_READ_MONO=$rh_mono
   HEALTH_READ_MTIME=$rh_mtime
@@ -528,13 +558,40 @@ mark_boot_fatal() {  # reason ready health
     if [ -L "$fatal_health" ]; then
       fatal_health_state=symlink
     elif [ -f "$fatal_health" ]; then
-      fatal_health_state=regular
-      fatal_health_mode="$(file_mode "$fatal_health" 2>/dev/null || true)"
-      fatal_health_uid="$(file_uid "$fatal_health" 2>/dev/null || true)"
-      fatal_health_mtime="$(file_mtime "$fatal_health" 2>/dev/null || true)"
-      fatal_health_lines="$(wc -l < "$fatal_health" 2>/dev/null |
-        tr -d '[:space:]')"
-      fatal_health_record="$(sed -n '1p' "$fatal_health" 2>/dev/null || true)"
+      # Preserve one coherent generation. The renderer may atomically publish
+      # the next heartbeat while this diagnostic is being assembled, just as
+      # it can during the live health check above.
+      if exec 9< "$fatal_health"; then
+        fatal_fd_path=/proc/self/fd/9
+        [ -e "$fatal_fd_path" ] || fatal_fd_path=/dev/fd/9
+        fatal_metadata="$(file_metadata_follow "$fatal_fd_path")" ||
+          fatal_metadata=
+        set -- $fatal_metadata
+        if [ -f "$fatal_fd_path" ] && [ "$#" -eq 3 ]; then
+          fatal_health_state=regular
+          fatal_health_mode=$1
+          fatal_health_uid=$2
+          fatal_health_mtime=$3
+          fatal_health_lines=0
+          while :; do
+            fatal_line=
+            fatal_line_complete=0
+            IFS= read -r fatal_line <&9 && fatal_line_complete=1
+            if [ "$fatal_line_complete" -eq 0 ] && [ -z "$fatal_line" ]; then
+              break
+            fi
+            fatal_health_lines=$((fatal_health_lines + 1))
+            [ "$fatal_health_lines" -ne 1 ] ||
+              fatal_health_record=$fatal_line
+            [ "$fatal_line_complete" -eq 1 ] || break
+          done
+        else
+          fatal_health_state=unreadable
+        fi
+        exec 9<&-
+      else
+        fatal_health_state=unreadable
+      fi
     elif [ -e "$fatal_health" ]; then
       fatal_health_state=non-regular
     else

@@ -104,6 +104,44 @@ regular_files=1
     );
   });
 
+  test('byte reader stays bound to one manifest snapshot', () {
+    final ReleaseSetPins releasePins = ReleaseSetPins.read(pins.path);
+    ReleaseSetManifest.create(
+      root: release.path,
+      gitRevision: _revision,
+      pins: releasePins,
+    ).write();
+    final File manifest = File(
+      '${release.path}/${ReleaseSetManifest.fileName}',
+    );
+    final List<int> snapshot = manifest.readAsBytesSync();
+    final Map<String, Object?> replacement =
+        jsonDecode(manifest.readAsStringSync()) as Map<String, Object?>;
+    replacement['gitRevision'] = 'f' * 40;
+    manifest.writeAsStringSync(jsonEncode(replacement));
+
+    final ReleaseSetManifest parsed = ReleaseSetManifest.readBytes(
+      root: release.path,
+      manifestBytes: snapshot,
+      expectedPins: releasePins,
+    );
+
+    expect(parsed.gitRevision, _revision);
+    expect(
+      () => ReleaseSetManifest.read(
+        root: release.path,
+        expectedPins: releasePins,
+      ),
+      throwsA(
+        isA<ArtifactVerificationException>().having(
+          (ArtifactVerificationException error) => error.message,
+          'message',
+          contains('revision receipt does not match'),
+        ),
+      ),
+    );
+  });
+
   test('reader rejects a modified peer slice before target selection', () {
     final ReleaseSetPins releasePins = ReleaseSetPins.read(pins.path);
     ReleaseSetManifest.create(

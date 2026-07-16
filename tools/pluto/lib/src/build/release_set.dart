@@ -273,8 +273,38 @@ final class ReleaseSetManifest {
     required ReleaseSetPins expectedPins,
   }) {
     final String manifestPath = '$root/$fileName';
+    if (FileSystemEntity.typeSync(manifestPath, followLinks: false) !=
+        FileSystemEntityType.file) {
+      throw ArtifactVerificationException(
+        message: 'Missing regular release input: $manifestPath.',
+      );
+    }
+    return readBytes(
+      root: root,
+      manifestBytes: File(manifestPath).readAsBytesSync(),
+      expectedPins: expectedPins,
+    );
+  }
+
+  /// Decodes manifest [manifestBytes] and validates its exact shape and pins.
+  ///
+  /// Callers that must bind a proof digest to the parsed manifest can retain
+  /// one byte snapshot and pass it here without reopening [fileName].
+  static ReleaseSetManifest readBytes({
+    required String root,
+    required List<int> manifestBytes,
+    required ReleaseSetPins expectedPins,
+  }) {
+    final String manifestText;
+    try {
+      manifestText = utf8.decode(manifestBytes);
+    } on FormatException catch (error) {
+      throw ArtifactVerificationException(
+        message: '$fileName is not valid UTF-8: ${error.message}',
+      );
+    }
     final Map<String, Object?> document = _decodeJsonObject(
-      _readRegularText(manifestPath),
+      manifestText,
       description: fileName,
     );
     _requireExactKeys(document, const <String>{

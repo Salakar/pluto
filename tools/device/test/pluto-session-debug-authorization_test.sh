@@ -10,6 +10,7 @@ CTL="$TMP/run"
 MOVE_WAVEFORM=/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink
 MOVE_BASE_OPTIONS=exact_color=1,enable_rails=1,vcom=-0.62
 SESSION_PID=""
+REAL_STAT=$(command -v stat)
 
 cleanup() {
   [ -z "$SESSION_PID" ] || kill "$SESSION_PID" 2>/dev/null || true
@@ -67,6 +68,60 @@ cat > "$TMP/bin/systemctl" <<'SYSTEMCTL'
 #!/bin/sh
 exit 0
 SYSTEMCTL
+
+# Force the production race deterministically. Once boot confirmation is
+# published, let the monitor establish a baseline, then replace the watched
+# pathname during its next mtime query. The old reader had already read
+# generation N at that point and paired it with generation N+1's mtime; the
+# fixed reader has generation N open on fd 9, so both its metadata and content
+# remain bound to that one inode.
+cat > "$TMP/bin/stat" <<'STAT'
+#!/bin/sh
+mtime_query=0
+for arg in "$@"; do
+  case "$arg" in *%Y*|*%m*) mtime_query=1 ;; esac
+done
+if [ "${PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM:-0}" = 1 ] &&
+   [ "$mtime_query" -eq 1 ] &&
+   [ -s "$PLUTO_TEST_ROOT/state/boot-confirmed" ]; then
+  post_confirm_count=$(cat "$PLUTO_TEST_HEALTH_RACE_COUNT" 2>/dev/null ||
+    echo 0)
+  post_confirm_count=$((post_confirm_count + 1))
+  printf '%s\n' "$post_confirm_count" > "$PLUTO_TEST_HEALTH_RACE_COUNT"
+fi
+if [ "${post_confirm_count:-0}" -eq 2 ] &&
+   mkdir "$PLUTO_TEST_HEALTH_RACE_MARKER" 2>/dev/null; then
+  health_file=$(cat "$PLUTO_TEST_CURRENT_HEALTH_PATH" 2>/dev/null || true)
+  health_line=$(cat "$health_file" 2>/dev/null || true)
+  pid_field=${health_line%% *}
+  health_rest=${health_line#* }
+  seq_field=${health_rest%% *}
+  mono_field=${health_rest##* }
+  pid=${pid_field#pid=}
+  seq=${seq_field#seq=}
+  mono=${mono_field#mono_ms=}
+  case "$pid:$seq:$mono" in
+    ''|*[!0-9:]*|:*|*::*|*:) exit 97 ;;
+  esac
+  old_mtime=$("$PLUTO_TEST_REAL_STAT" -c '%Y' "$health_file" 2>/dev/null ||
+    "$PLUTO_TEST_REAL_STAT" -f '%m' "$health_file")
+  # The contract stores whole-second mtimes. Cross one complete second before
+  # creating the replacement so the legacy split read is guaranteed to pair
+  # generation N's content with a distinct generation N+1 mtime.
+  sleep 1
+  temporary="$health_file.race.$$"
+  printf 'pid=%s seq=%s mono_ms=%s\n' \
+    "$pid" "$((seq + 1))" "$((mono + 1))" > "$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$health_file"
+  new_mtime=$("$PLUTO_TEST_REAL_STAT" -c '%Y' "$health_file" 2>/dev/null ||
+    "$PLUTO_TEST_REAL_STAT" -f '%m' "$health_file")
+  [ "$new_mtime" -gt "$old_mtime" ] || exit 98
+  printf 'old_mtime=%s new_mtime=%s\n' "$old_mtime" "$new_mtime" \
+    > "$PLUTO_TEST_HEALTH_RACE_EVIDENCE"
+fi
+exec "$PLUTO_TEST_REAL_STAT" "$@"
+STAT
 
 cat > "$TMP/bin/xochitl" <<'XOCHITL'
 #!/bin/sh
@@ -135,6 +190,7 @@ done
 printf 'ready\n' > "$ready_file"
 printf 'pid=%s seq=1 mono_ms=1\n' "$$" > "$health_file"
 chmod 0600 "$health_file"
+printf '%s\n' "$health_file" > "$PLUTO_TEST_CURRENT_HEALTH_PATH"
 if [ "${PLUTO_TEST_FREEZE_HEALTH:-0}" = 1 ]; then
   while :; do sleep 1; done
 fi
@@ -152,6 +208,11 @@ case "$PLUTO_APP_ID" in
           wait_count=$((wait_count + 1))
         done
         [ -s "$PLUTO_ROOT/state/boot-confirmed" ] || exit 66
+        if [ "${PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM:-0}" = 1 ]; then
+          # Keep this foreground alive through two post-confirm health reads:
+          # the first establishes a baseline and the second forces the race.
+          sleep 3
+        fi
         printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/launch"
         ;;
       2) printf 'dev.example.debug\n' > "$PLUTO_RUN_DIR/debug-launch" ;;
@@ -175,7 +236,7 @@ case "$PLUTO_APP_ID" in
 esac
 sleep 0.2
 EMBEDDER
-chmod +x "$TMP/bin/systemctl" "$TMP/bin/xochitl" \
+chmod +x "$TMP/bin/systemctl" "$TMP/bin/stat" "$TMP/bin/xochitl" \
   "$TMP/bin/boot-recovery" "$ROOT/bin/pluto-embedder" "$ROOT/bin/codex"
 
 start_session() {
@@ -193,7 +254,7 @@ start_session() {
   PLUTO_NONCE_FILE="$TMP/nonce" \
   PLUTO_BOOT_STABLE_WINDOW=0 \
   PLUTO_BOOT_READY_TIMEOUT=3 \
-  PLUTO_RENDERER_HEALTH_STALE_SECONDS=2 \
+  PLUTO_RENDERER_HEALTH_STALE_SECONDS="${PLUTO_TEST_RENDERER_HEALTH_STALE_SECONDS:-2}" \
   PLUTO_RENDERER_HEALTH_POLL_INTERVAL=0.1 \
   PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
   PLUTO_UPTIME_FILE="$TMP/uptime" \
@@ -202,6 +263,13 @@ start_session() {
   PLUTO_TEST_LAUNCHER_COUNT="$TMP/launcher-count" \
   PLUTO_TEST_STOCK_PID="$TMP/stock-pid" \
   PLUTO_TEST_STOCK_ARGS="$TMP/stock-args" \
+  PLUTO_TEST_REAL_STAT="$REAL_STAT" \
+  PLUTO_TEST_ROOT="$ROOT" \
+  PLUTO_TEST_CURRENT_HEALTH_PATH="$TMP/current-health-path" \
+  PLUTO_TEST_HEALTH_RACE_MARKER="$TMP/health-race-fired" \
+  PLUTO_TEST_HEALTH_RACE_COUNT="$TMP/health-race-count" \
+  PLUTO_TEST_HEALTH_RACE_EVIDENCE="$TMP/health-race-evidence" \
+  PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM="${PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM:-0}" \
   PLUTO_TEST_BOOT_CONFIRM_COUNT="$TMP/boot-confirm-count" \
   PLUTO_TEST_RECOVERY_CONFIRMED="$TMP/recovery-confirmed" \
   PLUTO_TEST_RECOVERY_LOG="$TMP/recovery.log" \
@@ -211,6 +279,8 @@ start_session() {
   SESSION_PID=$!
 }
 
+PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM=1
+PLUTO_TEST_RENDERER_HEALTH_STALE_SECONDS=6
 start_session
 EXPECTED_STOCK_PID=$SESSION_PID
 
@@ -225,6 +295,18 @@ if kill -0 "$SESSION_PID" 2>/dev/null; then
 fi
 wait "$SESSION_PID" || fail "supervisor returned failure"
 SESSION_PID=""
+unset PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM
+unset PLUTO_TEST_RENDERER_HEALTH_STALE_SECONDS
+
+[ -d "$TMP/health-race-fired" ] ||
+  fail "health generation was not replaced during the metadata read"
+old_mtime=$(sed -n 's/^old_mtime=\([0-9][0-9]*\) .*/\1/p' \
+  "$TMP/health-race-evidence")
+new_mtime=$(sed -n 's/.* new_mtime=\([0-9][0-9]*\)$/\1/p' \
+  "$TMP/health-race-evidence")
+[ -n "$old_mtime" ] && [ -n "$new_mtime" ] &&
+  [ "$new_mtime" -gt "$old_mtime" ] ||
+  fail "forced health generation did not advance the pathname mtime"
 
 [ "$(grep -c '^dev.pluto.launcher ' "$TMP/invocations")" -eq 4 ] ||
   fail "expected four launcher handoffs"

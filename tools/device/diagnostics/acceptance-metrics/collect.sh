@@ -75,6 +75,28 @@ sha256_file() {
   fi
 }
 
+file_identity() {
+  local path="$1"
+  local identity
+  if identity="$(stat -Lc '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null)"; then
+    printf '%s\n' "$identity"
+  elif identity="$(stat -Lf '%d:%i:%z:%m:%c' "$path" 2>/dev/null)"; then
+    printf '%s\n' "$identity"
+  else
+    return 1
+  fi
+}
+
+proof_manifest_sha256() {
+  local file="$1"
+  local values
+  values="$(sed -n \
+    's/^[[:space:]]*"manifestSha256"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' \
+    "$file")"
+  [[ "$values" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$values"
+}
+
 one_value() {
   local key="$1"
   local file="$2"
@@ -155,7 +177,19 @@ HEALTH_DELTA="$(one_value health.seq_delta "$EVIDENCE")" || exit 74
 
 LOCAL_MANIFEST_RECORD="none"
 if [[ -n "$RELEASE_MANIFEST" ]]; then
+  MANIFEST_ID_BEFORE="$(file_identity "$RELEASE_MANIFEST")" || {
+    echo 'acceptance metrics: cannot identify release manifest' >&2
+    exit 66
+  }
   MANIFEST_SHA="$(sha256_file "$RELEASE_MANIFEST")"
+  MANIFEST_ID_AFTER_PREHASH="$(file_identity "$RELEASE_MANIFEST")" || {
+    echo 'acceptance metrics: release manifest disappeared while hashing' >&2
+    exit 74
+  }
+  [[ "$MANIFEST_ID_AFTER_PREHASH" == "$MANIFEST_ID_BEFORE" ]] || {
+    echo 'acceptance metrics: release manifest changed while hashing' >&2
+    exit 74
+  }
   transcript "run exact pinned-Dart manifest/device hash verifier manifest_sha256=$MANIFEST_SHA target=$TARGET"
   "$DART" --packages="$PACKAGES" "$MANIFEST_VERIFIER" \
     --manifest "$RELEASE_MANIFEST" \
@@ -164,6 +198,29 @@ if [[ -n "$RELEASE_MANIFEST" ]]; then
     --expected-revision "$REVISION" \
     --evidence "$EVIDENCE" \
     --output "$TMP/manifest-proof.json" 2>> "$TRANSCRIPT"
+  PROOF_MANIFEST_SHA="$(proof_manifest_sha256 "$TMP/manifest-proof.json")" || {
+    echo 'acceptance metrics: manifest proof has no unique digest' >&2
+    exit 74
+  }
+  [[ "$PROOF_MANIFEST_SHA" == "$MANIFEST_SHA" ]] || {
+    echo 'acceptance metrics: manifest proof digest does not match the fenced manifest' >&2
+    exit 74
+  }
+  MANIFEST_ID_AFTER="$(file_identity "$RELEASE_MANIFEST")" || {
+    echo 'acceptance metrics: release manifest disappeared during verification' >&2
+    exit 74
+  }
+  MANIFEST_SHA_AFTER="$(sha256_file "$RELEASE_MANIFEST")"
+  MANIFEST_ID_AFTER_POSTHASH="$(file_identity "$RELEASE_MANIFEST")" || {
+    echo 'acceptance metrics: release manifest disappeared after verification' >&2
+    exit 74
+  }
+  [[ "$MANIFEST_ID_AFTER" == "$MANIFEST_ID_BEFORE" &&
+    "$MANIFEST_ID_AFTER_POSTHASH" == "$MANIFEST_ID_BEFORE" &&
+    "$MANIFEST_SHA_AFTER" == "$MANIFEST_SHA" ]] || {
+    echo 'acceptance metrics: release manifest changed during verification' >&2
+    exit 74
+  }
   LOCAL_MANIFEST_RECORD="$MANIFEST_SHA"
   transcript "validated every immutable installed file against selected release slice manifest_sha256=$MANIFEST_SHA"
 fi

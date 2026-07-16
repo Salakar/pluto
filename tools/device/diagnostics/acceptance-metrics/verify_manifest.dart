@@ -48,8 +48,10 @@ void main(List<String> arguments) {
     exit(66);
   }
   final String releaseRoot = manifestFile.parent.path;
-  final ReleaseSetManifest release = ReleaseSetManifest.read(
+  final List<int> manifestBytes = manifestFile.readAsBytesSync();
+  final ReleaseSetManifest release = ReleaseSetManifest.readBytes(
     root: releaseRoot,
+    manifestBytes: manifestBytes,
     expectedPins: ReleaseSetPins.read(values['pins']!),
   );
   final String target = values['target']!;
@@ -135,7 +137,7 @@ void main(List<String> arguments) {
     stderr.writeln('acceptance manifest proof: output already exists');
     exit(73);
   }
-  final String manifestDigest = sha256Bytes(manifestFile.readAsBytesSync());
+  final String manifestDigest = sha256Bytes(manifestBytes);
   output.writeAsStringSync(
     '${const JsonEncoder.withIndent('  ').convert(<String, Object?>{'format': 'pluto-acceptance-manifest-proof', 'gitRevision': release.gitRevision, 'installedFileCount': installed.length, 'manifestSha256': manifestDigest, 'sliceTreeSha256': slice.treeSha256, 'status': 'PASS', 'target': target})}\n',
     flush: true,

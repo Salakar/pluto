@@ -398,4 +398,85 @@ if HOME="$TMP/dart-home" DART_SUPPRESS_ANALYTICS=1 \
 fi
 [[ ! -e "$TMP/tampered-proof.json" ]] || fail 'failed manifest proof left a PASS artifact'
 
+# The collector must not publish when its verifier returns a digest for a
+# different manifest generation, even if the verifier exits successfully.
+sed 's/) S /) T /' "$FIXTURE/proc/201/stat" > "$TMP/stat"
+mv "$TMP/stat" "$FIXTURE/proc/201/stat"
+FAKE_SDK="$TMP/fake-sdk"
+FAKE_DART="$FAKE_SDK/bin/cache/dart-sdk/bin/dart"
+mkdir -p "$(dirname "$FAKE_DART")"
+cat > "$FAKE_DART" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=''
+manifest=''
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --output) output=$2; shift 2 ;;
+    --manifest) manifest=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output" && -n "$manifest" ]]
+case "${FAKE_DART_MODE:?}" in
+  inconsistent-proof)
+    proof_sha=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    ;;
+  replace-manifest)
+    mv "$FAKE_REPLACEMENT_MANIFEST" "$manifest"
+    proof_sha=$FAKE_PROOF_SHA
+    ;;
+  *) exit 64 ;;
+esac
+cat > "$output" <<PROOF
+{
+  "format": "pluto-acceptance-manifest-proof",
+  "manifestSha256": "$proof_sha",
+  "status": "PASS"
+}
+PROOF
+EOF
+chmod 755 "$FAKE_DART"
+
+run_fenced_collect() {
+  local mode="$1" manifest="$2" output="$3" error="$4"
+  FIXTURE_ROOT="$FIXTURE" \
+  PLUTO_ACCEPTANCE_TRANSPORT="$TRANSPORT" \
+  PLUTO_SDK="$FAKE_SDK" \
+  FAKE_DART_MODE="$mode" \
+  FAKE_REPLACEMENT_MANIFEST="${FAKE_REPLACEMENT_MANIFEST:-}" \
+  FAKE_PROOF_SHA="${FAKE_PROOF_SHA:-}" \
+    bash "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+      --samples 3 --interval-seconds 1 --release-manifest "$manifest" \
+      --output "$output" >/dev/null 2>"$error"
+}
+
+FENCED_MANIFEST="$TMP/fenced-release-manifest.json"
+printf '{"generation":"first"}\n' > "$FENCED_MANIFEST"
+if run_fenced_collect inconsistent-proof "$FENCED_MANIFEST" \
+  "$TMP/inconsistent-proof" "$TMP/inconsistent-proof.err"; then
+  fail 'collector accepted a proof for a different manifest digest'
+fi
+[[ ! -e "$TMP/inconsistent-proof" ]] ||
+  fail 'inconsistent manifest proof published a partial bundle'
+grep -q 'proof digest does not match the fenced manifest' \
+  "$TMP/inconsistent-proof.err" ||
+  fail 'inconsistent manifest proof did not fail at digest binding'
+
+# Even a proof that repeats the pre-verification digest cannot hide an atomic
+# replacement of the manifest while the verifier is running.
+printf '{"generation":"first"}\n' > "$FENCED_MANIFEST"
+REPLACEMENT="$TMP/replacement-release-manifest.json"
+printf '{"generation":"second"}\n' > "$REPLACEMENT"
+FAKE_REPLACEMENT_MANIFEST="$REPLACEMENT" \
+FAKE_PROOF_SHA="$(sha "$FENCED_MANIFEST")" \
+  run_fenced_collect replace-manifest "$FENCED_MANIFEST" \
+    "$TMP/replaced-manifest" "$TMP/replaced-manifest.err" &&
+  fail 'collector accepted a manifest replaced during verification'
+[[ ! -e "$TMP/replaced-manifest" ]] ||
+  fail 'manifest replacement published a partial bundle'
+grep -q 'release manifest changed during verification' \
+  "$TMP/replaced-manifest.err" ||
+  fail 'manifest replacement did not fail at the identity/digest fence'
+
 echo 'acceptance-metrics_test: PASS'
