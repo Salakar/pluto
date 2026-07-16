@@ -513,8 +513,56 @@ mark_boot_fatal() {  # reason ready health
   fatal_ready=${2:-}
   fatal_health=${3:-}
   log "boot attempt failed closed: $fatal_reason"
+
+  # Preserve the exact last heartbeat evidence before removing the live
+  # nonce-bound receipts. Without this snapshot an intermittent renderer
+  # stall is indistinguishable from a malformed file or supervisor identity
+  # rejection after fail-closed recovery has restored stock.
+  fatal_health_state=not-provided
+  fatal_health_mode=
+  fatal_health_uid=
+  fatal_health_mtime=
+  fatal_health_lines=
+  fatal_health_record=
+  if [ -n "$fatal_health" ]; then
+    if [ -L "$fatal_health" ]; then
+      fatal_health_state=symlink
+    elif [ -f "$fatal_health" ]; then
+      fatal_health_state=regular
+      fatal_health_mode="$(file_mode "$fatal_health" 2>/dev/null || true)"
+      fatal_health_uid="$(file_uid "$fatal_health" 2>/dev/null || true)"
+      fatal_health_mtime="$(file_mtime "$fatal_health" 2>/dev/null || true)"
+      fatal_health_lines="$(wc -l < "$fatal_health" 2>/dev/null |
+        tr -d '[:space:]')"
+      fatal_health_record="$(sed -n '1p' "$fatal_health" 2>/dev/null || true)"
+    elif [ -e "$fatal_health" ]; then
+      fatal_health_state=non-regular
+    else
+      fatal_health_state=missing
+    fi
+  fi
+  fatal_observed="$(health_clock_seconds)"
   rm -f "$fatal_ready" "$fatal_health"
-  printf '%s\n' "$fatal_reason" > "$BOOT_FATAL_FILE.tmp.$$" &&
+  {
+    printf '%s\n' "$fatal_reason"
+    printf 'health.path=%s\n' "${fatal_health:-none}"
+    printf 'health.state=%s\n' "$fatal_health_state"
+    printf 'health.mode=%s\n' "${fatal_health_mode:-unknown}"
+    printf 'health.uid=%s\n' "${fatal_health_uid:-unknown}"
+    printf 'health.mtime=%s\n' "${fatal_health_mtime:-unknown}"
+    printf 'health.lines=%s\n' "${fatal_health_lines:-unknown}"
+    printf 'health.record=%s\n' "${fatal_health_record:-none}"
+    printf 'watch.pid=%s\n' "${HEALTH_PID:-unknown}"
+    printf 'watch.process_start=%s\n' "${HEALTH_PROCESS_START:-unknown}"
+    printf 'watch.started=%s\n' "${HEALTH_WATCH_STARTED:-unknown}"
+    printf 'watch.last_check=%s\n' "${HEALTH_LAST_CHECK:-unknown}"
+    printf 'watch.last_advance=%s\n' "${HEALTH_LAST_ADVANCE:-unknown}"
+    printf 'watch.last_seq=%s\n' "${HEALTH_LAST_SEQ:-unknown}"
+    printf 'watch.last_mono_ms=%s\n' "${HEALTH_LAST_MONO:-unknown}"
+    printf 'watch.last_mtime=%s\n' "${HEALTH_LAST_MTIME:-unknown}"
+    printf 'watch.progress_count=%s\n' "${HEALTH_PROGRESS_COUNT:-unknown}"
+    printf 'watch.observed=%s\n' "$fatal_observed"
+  } > "$BOOT_FATAL_FILE.tmp.$$" &&
     mv -f "$BOOT_FATAL_FILE.tmp.$$" "$BOOT_FATAL_FILE"
 }
 

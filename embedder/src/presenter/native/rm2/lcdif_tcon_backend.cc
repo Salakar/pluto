@@ -421,12 +421,27 @@ public:
                 ? std::move(power_ready_reader)
                 : [](std::string
                          *error) { return read_rm2_panel_power_ready(error); }),
-        pan_worker_(
-            [this](std::uint32_t slot, std::chrono::nanoseconds *out_duration) {
-              return device_->pan(slot, out_duration) == kPlutoStatusOk;
-            }),
+        pan_completion_delivery_delay_for_testing_(
+            handoff.pan_completion_delivery_delay_for_testing),
+        pan_worker_([this](std::uint32_t slot, Rm2PanResult *out_result) {
+          if (out_result == nullptr) {
+            return false;
+          }
+          const bool ok =
+              device_->pan(slot, &out_result->duration,
+                           &out_result->completed_at) == kPlutoStatusOk;
+          if (pan_completion_delivery_delay_for_testing_ >
+              std::chrono::nanoseconds::zero()) {
+            std::this_thread::sleep_for(
+                pan_completion_delivery_delay_for_testing_);
+          }
+          return ok;
+        }),
         cpu_frequency_lease_(cpu_frequency_paths(profile, handoff)),
         cpu_frequency_debounce_(handoff.cpu_frequency_debounce_for_testing),
+        cpu_thermal_retry_delay_(
+            std::max(handoff.cpu_thermal_retry_delay_for_testing,
+                     std::chrono::milliseconds(1))),
         phase_encode_delay_for_testing_(handoff.phase_encode_delay_for_testing),
         handoff_path_(std::move(handoff.path)),
         handoff_now_(handoff.now_for_testing == nullptr
@@ -518,7 +533,22 @@ public:
     }
 
     std::string frequency_error;
-    if (!acquire_cpu_frequency_floor(&frequency_error)) {
+    const Rm2CpuFrequencyAcquireOutcome frequency_outcome =
+        acquire_cpu_frequency_floor(&frequency_error);
+    if (frequency_outcome == Rm2CpuFrequencyAcquireOutcome::kThermalHold) {
+      // No presenter exists yet to expose a live retry deadline. Returning
+      // Again before framebuffer mutation deliberately hands retry/fallback to
+      // the supervisor, whose bounded foreground-failure policy waits between
+      // attempts and restores stock after repeated startup failures. A valid
+      // hot reading is therefore not recorded as a hardware fault here.
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 frequency guard thermal hold before "
+                   "start: %s\n",
+                   frequency_error.c_str());
+      waveforms_.clear();
+      return kPlutoStatusAgain;
+    }
+    if (frequency_outcome != Rm2CpuFrequencyAcquireOutcome::kAcquired) {
       std::fprintf(stderr,
                    "lcdif_tcon: RM2 frequency guard acquire failed: "
                    "%s\n",
@@ -564,6 +594,7 @@ public:
       callback_ = config.on_complete;
       callback_user_data_ = config.user_data;
       accepting_ = !handoff_pending;
+      cpu_thermal_retry_deadline_ = {};
       started_ = true;
       stopping_ = false;
       worker_started_ = false;
@@ -673,7 +704,8 @@ public:
         if (lost_) {
           return kPlutoStatusDeviceLost;
         }
-        if (!started_ || !accepting_ || outstanding_) {
+        if (!started_ || !accepting_ || outstanding_ ||
+            cpu_thermal_retry_blocked_locked()) {
           return kPlutoStatusAgain;
         }
       }
@@ -682,9 +714,11 @@ public:
       }
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        if (lost_ || !started_ || !accepting_ || outstanding_) {
+        if (lost_ || !started_ || !accepting_ || outstanding_ ||
+            cpu_thermal_retry_blocked_locked()) {
           return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
         }
+        cpu_thermal_retry_deadline_ = {};
         callback = callback_;
         callback_user_data = callback_user_data_;
         ++completed_jobs_;
@@ -701,7 +735,8 @@ public:
       if (lost_) {
         return kPlutoStatusDeviceLost;
       }
-      if (!started_ || !accepting_ || outstanding_) {
+      if (!started_ || !accepting_ || outstanding_ ||
+          cpu_thermal_retry_blocked_locked()) {
         return kPlutoStatusAgain;
       }
     }
@@ -711,16 +746,32 @@ public:
     Job job;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      if (lost_ || !started_ || !accepting_ || outstanding_) {
+      if (lost_ || !started_ || !accepting_ || outstanding_ ||
+          cpu_thermal_retry_blocked_locked()) {
         return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
       }
+      cpu_thermal_retry_deadline_ = {};
       outstanding_ = true;
       cpu_frequency_release_armed_ = false;
       job = std::move(reusable_job_);
     }
     work_cv_.notify_one();
     std::string frequency_error;
-    if (!acquire_cpu_frequency_floor(&frequency_error)) {
+    const Rm2CpuFrequencyAcquireOutcome frequency_outcome =
+        acquire_cpu_frequency_floor(&frequency_error);
+    if (frequency_outcome == Rm2CpuFrequencyAcquireOutcome::kThermalHold) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 frequency guard thermal hold before "
+                   "admission: %s\n",
+                   frequency_error.c_str());
+      if (device_->blank_powerdown() != kPlutoStatusOk) {
+        finish_failed_admission(kPlutoStatusDeviceLost, std::move(job));
+        return kPlutoStatusDeviceLost;
+      }
+      finish_thermal_hold_admission(std::move(job));
+      return kPlutoStatusAgain;
+    }
+    if (frequency_outcome != Rm2CpuFrequencyAcquireOutcome::kAcquired) {
       std::fprintf(stderr,
                    "lcdif_tcon: RM2 frequency guard acquire failed "
                    "before admission: %s\n",
@@ -766,7 +817,7 @@ public:
     }
     std::lock_guard<std::mutex> lock(state_mutex_);
     return started_ && accepting_ && !stopping_ && !suspended_ && !lost_ &&
-           !outstanding_;
+           !outstanding_ && !cpu_thermal_retry_blocked_locked();
   }
 
   PlutoStatus wait_idle(std::uint32_t timeout_ms) {
@@ -1042,7 +1093,9 @@ public:
 
   NativeBackendHealth health() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    const bool busy = outstanding_ || (started_ && !accepting_);
+    const bool busy =
+        outstanding_ ||
+        (started_ && (!accepting_ || cpu_thermal_retry_blocked_locked()));
     return {
         .state = lost_ ? NativeBackendHealthState::kDeviceLost
                        : (busy ? NativeBackendHealthState::kBusy
@@ -1090,6 +1143,7 @@ public:
       std::lock_guard<std::mutex> lock(state_mutex_);
       pending_job_.reset();
       outstanding_ = false;
+      cpu_thermal_retry_deadline_ = {};
       started_ = false;
       probed_ = false;
       stopping_ = false;
@@ -1102,7 +1156,12 @@ public:
   }
 
 private:
-  bool acquire_cpu_frequency_floor(std::string *error) {
+  bool cpu_thermal_retry_blocked_locked() const noexcept {
+    return std::chrono::steady_clock::now() < cpu_thermal_retry_deadline_;
+  }
+
+  Rm2CpuFrequencyAcquireOutcome
+  acquire_cpu_frequency_floor(std::string *error) {
     std::lock_guard<std::mutex> lock(cpu_frequency_mutex_);
     return cpu_frequency_lease_.acquire(error);
   }
@@ -1541,8 +1600,8 @@ private:
 
   bool pan_with_deadline(std::uint32_t slot) {
     Rm2PanResult result;
-    result.operation_ok =
-        device_->pan(slot, &result.duration) == kPlutoStatusOk;
+    result.operation_ok = device_->pan(slot, &result.duration,
+                                       &result.completed_at) == kPlutoStatusOk;
     return accept_pan_result(slot, result);
   }
 
@@ -1930,11 +1989,14 @@ private:
         return kPlutoStatusDeviceLost;
       }
       ++presented_phases_;
-      const auto boundary = std::chrono::steady_clock::now();
-      const auto cadence = boundary - pan_begin;
-      if (cadence > cadence_deadline) {
+      // `finish()` may resume well after the kernel has latched the page. The
+      // device captures CUR_FRAME_DONE beside the ioctl return, so use that
+      // boundary while retaining the complete request-to-latch deadline.
+      if (pan_result.completed_at < pan_begin ||
+          pan_result.completed_at - pan_begin > cadence_deadline) {
         ++missed_deadlines_;
-        if (cadence > phase_interval * 2) {
+        if (pan_result.completed_at < pan_begin ||
+            pan_result.completed_at - pan_begin > phase_interval * 2) {
           ++underflows_;
         }
         (void)device_->blank_powerdown();
@@ -2007,6 +2069,15 @@ private:
     idle_cv_.notify_all();
   }
 
+  void finish_thermal_hold_admission(Job &&job) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    reusable_job_ = std::move(job);
+    outstanding_ = false;
+    cpu_thermal_retry_deadline_ =
+        std::chrono::steady_clock::now() + cpu_thermal_retry_delay_;
+    idle_cv_.notify_all();
+  }
+
   void observe_fault(PlutoStatus status) {
     if (status == kPlutoStatusDeviceLost || status == kPlutoStatusInternal) {
       mark_lost();
@@ -2026,9 +2097,11 @@ private:
   Rm2PowerReadyReader power_ready_reader_;
   Rm2WaveformProgram waveforms_;
   Rm2PhaseEncoder phase_encoder_;
+  std::chrono::nanoseconds pan_completion_delivery_delay_for_testing_{};
   Rm2PanWorker pan_worker_;
   Rm2CpuFrequencyBurstLease cpu_frequency_lease_;
   std::chrono::milliseconds cpu_frequency_debounce_{50};
+  std::chrono::milliseconds cpu_thermal_retry_delay_{1000};
   std::chrono::nanoseconds phase_encode_delay_for_testing_{};
   std::string handoff_path_;
   GlassHandoffClock (*handoff_now_)() = glass_handoff_now;
@@ -2074,6 +2147,7 @@ private:
   bool telemetry_emitted_ = false;
   bool cpu_frequency_release_armed_ = false;
   std::chrono::steady_clock::time_point cpu_frequency_release_deadline_{};
+  std::chrono::steady_clock::time_point cpu_thermal_retry_deadline_{};
   std::uint64_t completed_jobs_ = 0;
   std::uint64_t hardware_faults_ = 0;
   std::uint64_t presented_phases_ = 0;

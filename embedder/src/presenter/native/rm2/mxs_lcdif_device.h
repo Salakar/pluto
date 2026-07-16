@@ -50,8 +50,9 @@ public:
   std::string_view last_error() const { return last_error_; }
 
   std::span<std::byte> slot(std::uint32_t index);
-  PlutoStatus pan(std::uint32_t index,
-                  std::chrono::nanoseconds *out_duration = nullptr);
+  PlutoStatus
+  pan(std::uint32_t index, std::chrono::nanoseconds *out_duration = nullptr,
+      std::chrono::steady_clock::time_point *out_completed_at = nullptr);
   PlutoStatus unblank(std::uint32_t index);
   PlutoStatus blank_powerdown();
 

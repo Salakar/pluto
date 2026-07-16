@@ -134,6 +134,7 @@ using pluto::native::rm2::kRm2PanelHeight;
 using pluto::native::rm2::kRm2PanelWidth;
 using pluto::native::rm2::kRm2SlotBytes;
 using pluto::native::rm2::rgb565_to_rm2_level;
+using pluto::native::rm2::Rm2CpuFrequencyAcquireOutcome;
 using pluto::native::rm2::Rm2CpuFrequencyBurstLease;
 using pluto::native::rm2::Rm2CpuFrequencyLeasePaths;
 using pluto::native::rm2::Rm2PanelRect;
@@ -782,7 +783,7 @@ int run_frequency_lease_probe(std::size_t iterations) {
       g_allocation_count.load(std::memory_order_relaxed);
   for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
     const auto acquire_begin = std::chrono::steady_clock::now();
-    if (!lease.acquire(&error)) {
+    if (lease.acquire(&error) != Rm2CpuFrequencyAcquireOutcome::kAcquired) {
       std::fprintf(stderr,
                    "RM2 production frequency lease acquire failed at %zu: "
                    "%s\n",
@@ -834,7 +835,7 @@ int run_frequency_lease_hold(std::size_t milliseconds) {
   Rm2CpuFrequencyBurstLease lease(production_frequency_paths());
   std::string error;
   const auto acquire_begin = std::chrono::steady_clock::now();
-  if (!lease.acquire(&error)) {
+  if (lease.acquire(&error) != Rm2CpuFrequencyAcquireOutcome::kAcquired) {
     std::fprintf(stderr, "RM2 production frequency lease acquire failed: %s\n",
                  error.c_str());
     return 1;
@@ -1032,24 +1033,24 @@ int run_phase_soak(std::size_t jobs, std::span<const std::uint8_t> transitions,
   Rm2PhaseEncoder phase_encoder;
   std::array<std::atomic<std::uint64_t>, kRm2ActiveSlots> generations{};
   std::atomic<std::uint64_t> latched_slot_mutations{0};
-  Rm2PanWorker pan_worker(
-      [&](std::uint32_t slot, std::chrono::nanoseconds *out_duration) {
-        const std::uint64_t generation_before =
-            slot < kRm2ActiveSlots
-                ? generations[slot].load(std::memory_order_acquire)
-                : 0;
-        const auto begin = std::chrono::steady_clock::now();
-        std::this_thread::sleep_until(begin + kPhaseInterval);
-        const auto end = std::chrono::steady_clock::now();
-        *out_duration =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
-        if (slot < kRm2ActiveSlots &&
-            generations[slot].load(std::memory_order_acquire) !=
-                generation_before) {
-          latched_slot_mutations.fetch_add(1, std::memory_order_relaxed);
-        }
-        return slot <= kRm2IdleSlot;
-      });
+  Rm2PanWorker pan_worker([&](std::uint32_t slot, Rm2PanResult *out_result) {
+    const std::uint64_t generation_before =
+        slot < kRm2ActiveSlots
+            ? generations[slot].load(std::memory_order_acquire)
+            : 0;
+    const auto begin = std::chrono::steady_clock::now();
+    std::this_thread::sleep_until(begin + kPhaseInterval);
+    const auto end = std::chrono::steady_clock::now();
+    out_result->duration =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+    out_result->completed_at = end;
+    if (slot < kRm2ActiveSlots &&
+        generations[slot].load(std::memory_order_acquire) !=
+            generation_before) {
+      latched_slot_mutations.fetch_add(1, std::memory_order_relaxed);
+    }
+    return slot <= kRm2IdleSlot;
+  });
   if (!phase_encoder.ready() || !pan_worker.ready()) {
     std::fprintf(stderr,
                  "RM2 phase or blocking-pan worker did not acquire policy\n");
@@ -1643,7 +1644,7 @@ int run_guarded_phase_soak(std::size_t jobs,
   Rm2CpuFrequencyBurstLease lease(production_frequency_paths());
   std::string error;
   const auto acquire_begin = std::chrono::steady_clock::now();
-  if (!lease.acquire(&error)) {
+  if (lease.acquire(&error) != Rm2CpuFrequencyAcquireOutcome::kAcquired) {
     std::fprintf(stderr,
                  "RM2 phase soak frequency guard acquire failed before phase "
                  "0: %s\n",

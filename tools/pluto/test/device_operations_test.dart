@@ -120,11 +120,15 @@ FakeTransport _screenshotTransport({
   CommandResult? postflightResult,
   Uint8List? downloadedPng,
   void Function(Map<String, Object?> request)? onRequest,
+  Future<CommandResult> Function(String command)? foregroundHandler,
 }) {
   return _moveTransport(
     'device',
     execHandler: (String command) async {
       if (command.contains('PLUTO-FOREGROUND-PID|%s')) {
+        if (foregroundHandler != null) {
+          return foregroundHandler(command);
+        }
         return CommandResult(
           exitCode: 0,
           stdout: 'PLUTO-FOREGROUND-PID|$pid\n',
@@ -1830,6 +1834,55 @@ void main() {
       isFalse,
     );
   });
+
+  test(
+    'native screenshot resolves the managed release link for foreground identity',
+    () async {
+      final Uint8List png = _pngHeaderFixture(37, 29);
+      late String foregroundCommand;
+      final FakeTransport transport = _screenshotTransport(
+        png: png,
+        pid: 30113,
+        path: '/run/pluto/screenshots/direct-30113-1.png',
+        foregroundHandler: (String command) async {
+          foregroundCommand = command;
+          const String shellFixture = r'''
+cat() {
+  [ "$1" = '/run/pluto/embedder.pid' ] || return 1
+  printf '%s\n' '30113'
+}
+readlink() {
+  if [ "$1" = '-f' ]; then
+    [ "$2" = '/home/root/pluto/bin/pluto-embedder' ] || return 1
+    printf '%s\n' '/home/root/pluto.releases/release-1/bin/pluto-embedder'
+    return 0
+  fi
+  [ "$1" = '/proc/30113/exe' ] || return 1
+  printf '%s\n' '/home/root/pluto.releases/release-1/bin/pluto-embedder'
+}
+''';
+          final ProcessResult result = await Process.run('sh', <String>[
+            '-c',
+            '$shellFixture\n$command',
+          ]);
+          return CommandResult(
+            exitCode: result.exitCode,
+            stdout: '${result.stdout}',
+            stderr: '${result.stderr}',
+          );
+        },
+      );
+
+      expect(
+        await LiveDeviceOperations(transport).screenshot(),
+        orderedEquals(png),
+      );
+      expect(
+        foregroundCommand,
+        contains("readlink -f '$root/bin/pluto-embedder'"),
+      );
+    },
+  );
 
   test(
     'native screenshot accepts dynamic surface formats and strides',

@@ -77,6 +77,9 @@ done < "$TMP/expected-labels"
 cat > "$TMP/bin/pluto" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${PLUTO_FAKE_CALL_LOG:-}" ]]; then
+  printf '%s\n' "$*" >> "$PLUTO_FAKE_CALL_LOG"
+fi
 case "$1" in
   run)
     exit 0
@@ -128,6 +131,10 @@ case "$command" in
     printf 'dev.pluto.codex\n'
     ;;
   *'expected exactly one common Pluto supervisor'*)
+    if [[ "${SUPERVISOR_FAIL:-0}" == 1 ]]; then
+      printf 'release AOT smoke: expected exactly one common Pluto supervisor, found 0\n' >&2
+      exit 84
+    fi
     printf 'release AOT smoke: PASS common supervisor unit=xochitl.service pid=100\n'
     ;;
   *'switcher never became ready'*)
@@ -292,6 +299,22 @@ common_env=(
   PLUTO_CAMERA_RIG=2
   PLUTO_ACCEPTANCE_STAGE_DELAY=0
 )
+
+: > "$TMP/preflight-calls"
+set +e
+env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
+  PLUTO_CLI=pluto PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 SUPERVISOR_FAIL=1 \
+  PLUTO_FAKE_CALL_LOG="$TMP/preflight-calls" \
+  "$SMOKE" root@fixture-device > "$TMP/preflight.out" 2>&1
+preflight_rc=$?
+set -e
+[[ "$preflight_rc" != 0 ]] ||
+  fail 'hardware smoke continued after a failed supervisor preflight'
+[[ ! -s "$TMP/preflight-calls" ]] ||
+  fail 'hardware smoke launched an app before proving the common supervisor'
+grep -q 'expected exactly one common Pluto supervisor' "$TMP/preflight.out" ||
+  fail 'supervisor preflight failure did not report the real blocker'
 
 cat > "$TMP/camera-binding.json" <<'JSON'
 {"devices":[{"number":2,"profile_id":"rm1"}]}

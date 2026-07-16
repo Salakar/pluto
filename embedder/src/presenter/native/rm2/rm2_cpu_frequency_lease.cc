@@ -233,29 +233,53 @@ Rm2CpuFrequencyBurstLease::~Rm2CpuFrequencyBurstLease() {
 
 bool Rm2CpuFrequencyBurstLease::temperature_safe(int *out_millidegrees,
                                                  std::string *error) const {
+  return read_temperature(out_millidegrees, error) == TemperatureState::kSafe;
+}
+
+Rm2CpuFrequencyBurstLease::TemperatureState
+Rm2CpuFrequencyBurstLease::read_temperature(int *out_millidegrees,
+                                            std::string *error) const {
   if (!enabled()) {
     if (out_millidegrees != nullptr) {
       *out_millidegrees = 0;
     }
-    return true;
+    return TemperatureState::kSafe;
   }
   std::array<char, 64> type{};
   std::array<char, 64> temperature{};
   std::uint64_t millidegrees = 0;
   if (!read_line(cpu_thermal_type_path_, type.data(), type.size()) ||
-      std::string_view(type.data()) != "imx_thermal_zone" ||
-      !read_line(cpu_temperature_path_, temperature.data(),
+      std::string_view(type.data()) != "imx_thermal_zone") {
+    set_error(error, "RM2 CPU thermal identity is unavailable or mismatched");
+    return TemperatureState::kUnavailable;
+  }
+  if (!read_line(cpu_temperature_path_, temperature.data(),
                  temperature.size()) ||
       !parse_uint64(temperature.data(), &millidegrees) || millidegrees == 0 ||
-      millidegrees >=
-          static_cast<std::uint64_t>(kRm2CpuTemperatureCutoffMillidegrees)) {
-    set_error(error, "RM2 CPU temperature unavailable or at/above 45 C cutoff");
-    return false;
+      millidegrees >
+          static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+    set_error(error, "RM2 CPU temperature is unavailable or malformed");
+    return TemperatureState::kUnavailable;
   }
   if (out_millidegrees != nullptr) {
     *out_millidegrees = static_cast<int>(millidegrees);
   }
-  return true;
+  if (millidegrees >=
+      static_cast<std::uint64_t>(kRm2CpuTemperatureCutoffMillidegrees)) {
+    std::array<char, 128> message{};
+    const int length = std::snprintf(
+        message.data(), message.size(),
+        "RM2 CPU temperature %llu mC is at or above the 45000 mC cutoff",
+        static_cast<unsigned long long>(millidegrees));
+    set_error(
+        error,
+        length > 0 && static_cast<std::size_t>(length) < message.size()
+            ? std::string_view(message.data(), static_cast<std::size_t>(length))
+            : std::string_view("RM2 CPU temperature is at or above "
+                               "the 45000 mC cutoff"));
+    return TemperatureState::kAtOrAboveCutoff;
+  }
+  return TemperatureState::kSafe;
 }
 
 bool Rm2CpuFrequencyBurstLease::read_policy(std::uint64_t *out_minimum,
@@ -343,16 +367,16 @@ bool Rm2CpuFrequencyBurstLease::write_minimum(std::uint64_t frequency_khz,
 }
 
 bool Rm2CpuFrequencyBurstLease::publish_receipt(std::string *error) {
-  const int size = std::snprintf(
-      receipt_, sizeof(receipt_),
-      "policy=%s\nowner_pid=%ld\nowner_start_ticks=%llu\n"
-      "original_min_khz=%llu\noriginal_max_khz=%llu\n"
-      "original_governor=%s\n",
-      policy_path_.c_str(), static_cast<long>(::getpid()),
-      static_cast<unsigned long long>(owner_start_ticks_),
-      static_cast<unsigned long long>(original_minimum_khz_),
-      static_cast<unsigned long long>(original_maximum_khz_),
-      original_governor_);
+  const int size =
+      std::snprintf(receipt_, sizeof(receipt_),
+                    "policy=%s\nowner_pid=%ld\nowner_start_ticks=%llu\n"
+                    "original_min_khz=%llu\noriginal_max_khz=%llu\n"
+                    "original_governor=%s\n",
+                    policy_path_.c_str(), static_cast<long>(::getpid()),
+                    static_cast<unsigned long long>(owner_start_ticks_),
+                    static_cast<unsigned long long>(original_minimum_khz_),
+                    static_cast<unsigned long long>(original_maximum_khz_),
+                    original_governor_);
   if (size <= 0 || static_cast<std::size_t>(size) >= sizeof(receipt_)) {
     set_error(error, "receipt formatting failed");
     return false;
@@ -414,24 +438,28 @@ void Rm2CpuFrequencyBurstLease::close_lock() noexcept {
   }
 }
 
-bool Rm2CpuFrequencyBurstLease::acquire(std::string *error) {
+Rm2CpuFrequencyAcquireOutcome
+Rm2CpuFrequencyBurstLease::acquire(std::string *error) {
   if (!enabled()) {
-    return true;
+    return Rm2CpuFrequencyAcquireOutcome::kAcquired;
   }
-  if (!temperature_safe(nullptr, error)) {
-    if (active_) {
-      (void)release(nullptr);
+  const TemperatureState initial_temperature = read_temperature(nullptr, error);
+  if (initial_temperature != TemperatureState::kSafe) {
+    if (active_ && !release(error)) {
+      return Rm2CpuFrequencyAcquireOutcome::kFault;
     }
-    return false;
+    return initial_temperature == TemperatureState::kAtOrAboveCutoff
+               ? Rm2CpuFrequencyAcquireOutcome::kThermalHold
+               : Rm2CpuFrequencyAcquireOutcome::kFault;
   }
   if (active_) {
-    return true;
+    return Rm2CpuFrequencyAcquireOutcome::kAcquired;
   }
   if (receipt_path_.empty() || lock_path_.empty() ||
       cpu_thermal_type_path_.empty() || cpu_temperature_path_.empty() ||
       !secure_runtime_directory(runtime_path_)) {
     set_error(error, "enabled lease has incomplete or insecure paths");
-    return false;
+    return Rm2CpuFrequencyAcquireOutcome::kFault;
   }
   lock_fd_ = ::open(lock_path_.c_str(),
                     O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -439,7 +467,7 @@ bool Rm2CpuFrequencyBurstLease::acquire(std::string *error) {
       ::flock(lock_fd_, LOCK_EX | LOCK_NB) != 0) {
     close_lock();
     set_error(error, "cannot acquire exact cpufreq lease lock");
-    return false;
+    return Rm2CpuFrequencyAcquireOutcome::kFault;
   }
   owner_start_ticks_ = owner_start_ticks_for_testing_;
   if ((owner_start_ticks_ == 0 && !process_start_ticks(&owner_start_ticks_)) ||
@@ -447,25 +475,31 @@ bool Rm2CpuFrequencyBurstLease::acquire(std::string *error) {
                    original_governor_, sizeof(original_governor_), error) ||
       !publish_receipt(error)) {
     close_lock();
-    return false;
+    return Rm2CpuFrequencyAcquireOutcome::kFault;
   }
   active_ = true;
   if (!write_minimum(original_maximum_khz_, error)) {
     (void)release(nullptr);
-    return false;
+    return Rm2CpuFrequencyAcquireOutcome::kFault;
   }
   bool verified = wait_for_policy(original_maximum_khz_, original_maximum_khz_,
                                   original_governor_);
+  TemperatureState raised_temperature = TemperatureState::kUnavailable;
   if (!verified) {
     set_error(error, "cpufreq policy did not settle at the exact ceiling");
-  } else if (!temperature_safe(nullptr, error)) {
-    verified = false;
+  } else {
+    raised_temperature = read_temperature(nullptr, error);
+    verified = raised_temperature == TemperatureState::kSafe;
   }
   if (!verified) {
-    (void)release(nullptr);
-    return false;
+    if (!release(error)) {
+      return Rm2CpuFrequencyAcquireOutcome::kFault;
+    }
+    return raised_temperature == TemperatureState::kAtOrAboveCutoff
+               ? Rm2CpuFrequencyAcquireOutcome::kThermalHold
+               : Rm2CpuFrequencyAcquireOutcome::kFault;
   }
-  return true;
+  return Rm2CpuFrequencyAcquireOutcome::kAcquired;
 }
 
 bool Rm2CpuFrequencyBurstLease::release(std::string *error) noexcept {

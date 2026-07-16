@@ -3982,20 +3982,26 @@ TEST(Gallery3DrmPresenterTest,
   std::remove(handoff.c_str());
   {
     auto seed_drm = std::make_unique<RecordingDrm>();
+    // This test observes flip identity/counters, never phase-plane bytes.
+    // Disable the mock's 1.24 MiB per-flip comparison and use the production
+    // fallback scan cadence (~85 Hz) so sanitizers cannot turn seed setup
+    // into an artificial 500 Hz pause/feedback flood.
+    seed_drm->record_flips = false;
     pluto::swtcon::set_drm_interface_for_testing(std::move(seed_drm));
     Presenter seed("flip_interval_ms=0,stats_log_s=0,handoff=" + handoff +
-                   ",eink=" + eink + ",scan_period_ns=2000000");
+                   ",eink=" + eink + ",scan_period_ns=11764706");
     ASSERT_EQ(seed.open_status(), kPlutoStatusOk);
     ASSERT_EQ(seed.ops()->wait_idle(seed.raw(), 30000), kPlutoStatusOk);
     ASSERT_EQ(seed.stage_handoff(), kPlutoStatusOk);
   }
 
   auto drm = std::make_unique<RecordingDrm>();
+  drm->record_flips = false;
   RecordingDrm *drm_raw = drm.get();
   pluto::swtcon::set_drm_interface_for_testing(std::move(drm));
   {
     Presenter p("flip_interval_ms=0,stats_log_s=0,handoff=" + handoff +
-                ",eink=" + eink + ",scan_period_ns=2000000");
+                ",eink=" + eink + ",scan_period_ns=11764706");
     ASSERT_EQ(p.open_status(), kPlutoStatusOk);
     ASSERT_EQ(p.confirm_incoming_handoff(), kPlutoStatusOk);
     const auto ready_deadline =

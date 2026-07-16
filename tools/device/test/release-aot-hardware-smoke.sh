@@ -674,6 +674,8 @@ else
 fi" || return $?
 }
 
+verify_common_supervisor
+
 verify_app \
   dev.pluto.examples.counter \
   /home/root/pluto/apps/dev.pluto.examples.counter \

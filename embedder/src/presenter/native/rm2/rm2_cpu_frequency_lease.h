@@ -28,6 +28,16 @@ struct Rm2CpuFrequencyLeasePaths {
   std::uint64_t owner_start_ticks_for_testing = 0;
 };
 
+enum class Rm2CpuFrequencyAcquireOutcome : std::uint8_t {
+  kAcquired,
+  // The thermal identity and temperature were both valid, but the measured
+  // CPU temperature was at or above the fixed cutoff. Callers may retry later.
+  kThermalHold,
+  // Sensor identity/readability, policy, ownership, receipt, or restore fault.
+  // Callers must fail closed rather than treating this as thermal backpressure.
+  kFault,
+};
+
 // Owns the shared RM2 CPU-frequency floor for a short waveform burst. The
 // receipt is published before the floor changes and remains present until the
 // original policy is restored and verified. The device supervisor consumes
@@ -46,10 +56,18 @@ public:
 
   bool temperature_safe(int *out_millidegrees = nullptr,
                         std::string *error = nullptr) const;
-  bool acquire(std::string *error = nullptr);
+  Rm2CpuFrequencyAcquireOutcome acquire(std::string *error = nullptr);
   bool release(std::string *error = nullptr) noexcept;
 
 private:
+  enum class TemperatureState : std::uint8_t {
+    kSafe,
+    kAtOrAboveCutoff,
+    kUnavailable,
+  };
+
+  TemperatureState read_temperature(int *out_millidegrees,
+                                    std::string *error) const;
   bool read_policy(std::uint64_t *out_minimum, std::uint64_t *out_maximum,
                    char *out_governor, std::size_t governor_capacity,
                    std::string *error) const;

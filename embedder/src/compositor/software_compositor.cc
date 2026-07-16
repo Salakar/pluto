@@ -794,6 +794,10 @@ void FrameRenderer::configure(uint32_t width, uint32_t height,
 // zero scheduler activity by construction.
 bool FrameRenderer::submit_frame(const PlutoFramePacket &packet) {
   std::lock_guard<std::mutex> lock(mutex_);
+  return submit_frame_locked(packet);
+}
+
+bool FrameRenderer::submit_frame_locked(const PlutoFramePacket &packet) {
   ++submitted_frames_;
   if (!valid_ || packet.pixels == nullptr || packet.row_bytes == 0 ||
       packet.width == 0 || packet.height == 0) {
@@ -2103,11 +2107,94 @@ bool FrameRenderer::attach_presenter(const PlutoPresenterOps *presenter_ops,
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+
+  // detach_presenter() deliberately leaves the last complete app-owned
+  // surface in memory while its Dart isolate sleeps. Preserve that desired
+  // surface across configure(): the newly opened presenter may import a
+  // different app's glass handoff, which is the correct physical baseline but
+  // not the content this resumed isolate must show.
+  const uint32_t resume_width = width_;
+  const uint32_t resume_height = height_;
+  const size_t resume_stride = stride_;
+  const PlutoPixelFormat resume_format = format_;
+  const bool have_resume_surface =
+      retained_content_ready_ && resume_width != 0 && resume_height != 0 &&
+      resume_stride != 0 && resume_height <= SIZE_MAX / resume_stride &&
+      retained_frame_.size() == resume_stride * resume_height;
+  std::vector<uint8_t> resume_surface;
+  if (have_resume_surface) {
+    resume_surface = std::move(retained_frame_);
+  }
+
   config_.presenter_ops = presenter_ops;
   config_.presenter = presenter;
   next_presenter_health_poll_us_ = 0;
   configure(width_, height_, format_);
   valid_ = components_valid();
+  if (!valid_ || !have_resume_surface || resume_width != width_ ||
+      resume_height != height_ || resume_stride != stride_ ||
+      resume_format != format_) {
+    return valid_;
+  }
+  const bool exact_physical_baseline = seeded_physical_baseline_valid_;
+
+  // Reconcile the complete, real pre-hibernate app surface against the current
+  // glass handoff. Engine ScheduleFrame is still requested by EngineHost after
+  // lifecycle resume, but it is only a hint: Flutter can legitimately decide
+  // an unchanged layer tree needs no new raster. The supervisor has removed
+  // the old health receipt, so native resume itself must guarantee a fresh
+  // completed presentation.
+  const bool exact_surface_match =
+      exact_physical_baseline && resume_surface == retained_frame_;
+  if (exact_surface_match) {
+    // The imported handoff already contains this exact raw surface plus the
+    // correlated settled/debt planes for the glass now in front of us. A
+    // byte comparison is enough to transfer ownership back to this isolate;
+    // avoid a full 2.6M-pixel tile/dither traversal on the common same-app
+    // resume path.
+    retained_content_ready_ = true;
+    seeded_physical_baseline_valid_ = false;
+    last_damage_count_ = 0;
+  } else {
+    PlutoFramePacket replay{};
+    replay.pixels = resume_surface.data();
+    replay.row_bytes = resume_stride;
+    replay.width = resume_width;
+    replay.height = resume_height;
+    replay.format = resume_format;
+    replay.did_update = true;
+    const uint64_t replay_now_us = decision_now_us();
+    replay.presentation_time_ns =
+        replay_now_us > UINT64_MAX / 1000u ? UINT64_MAX : replay_now_us * 1000u;
+    if (!submit_frame_locked(replay)) {
+      valid_ = false;
+      return false;
+    }
+  }
+
+  // When the exact handoff already matches this app, reconciliation is a
+  // zero-diff frame. Queue the smallest real Fast presenter probe in that case
+  // rather than driving all 2.6M pixels merely to prove the new generation is
+  // alive. RegionScheduler/presenter alignment expands it where required, and
+  // health still waits for the backend's real completion boundary. Without an
+  // exact physical baseline, retain a full replay as the conservative cold
+  // path. If reconciliation already left user work queued/in flight, that work
+  // is the proof and no redundant request is added.
+  if (scheduler_ != nullptr && !scheduler_->user_work_pending() &&
+      !scheduler_->anything_inflight()) {
+    const bool exact_zero_diff =
+        exact_physical_baseline && last_damage_count_ == 0;
+    const PlutoRect proof = exact_zero_diff
+                                ? PlutoRect{0, 0, 1, 1}
+                                : PlutoRect{0, 0, static_cast<int32_t>(width_),
+                                            static_cast<int32_t>(height_)};
+    const PlutoRefreshClass quality = kPlutoRefreshFast;
+    const uint64_t now_us = decision_now_us();
+    scheduler_->submit_damage(&proof, &quality, 1, now_us);
+    tick_locked(now_us);
+    wake_.store(true, std::memory_order_release);
+    cv_.notify_one();
+  }
   return valid_;
 }
 

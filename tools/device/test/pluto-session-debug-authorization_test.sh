@@ -323,6 +323,14 @@ SESSION_PID=""
 [ -f "$CTL/boot-fatal" ] || fail "stale health did not publish a fatal receipt"
 grep -q 'renderer health deadline expired' "$CTL/boot-fatal" ||
   fail "stale health fatal receipt was not specific"
+grep -q '^health.state=regular$' "$CTL/boot-fatal" ||
+  fail "stale health fatal receipt did not preserve the file state"
+grep -Eq '^health.record=pid=[0-9]+ seq=1 mono_ms=1$' "$CTL/boot-fatal" ||
+  fail "stale health fatal receipt did not preserve the last exact record"
+grep -q '^watch.last_seq=1$' "$CTL/boot-fatal" ||
+  fail "stale health fatal receipt did not preserve the observed sequence"
+grep -q '^watch.progress_count=1$' "$CTL/boot-fatal" ||
+  fail "stale health fatal receipt did not preserve progress evidence"
 if grep -q '^cancel ' "$TMP/recovery.log"; then
   fail "stale renderer health cancelled recovery instead of failing closed"
 fi

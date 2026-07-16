@@ -298,7 +298,10 @@ public:
   // Quiesces panel-facing work without destroying the renderer object used by
   // Flutter's compositor. The caller may close the detached presenter after
   // this returns. Frames are rejected until attach_presenter() rebuilds the
-  // scheduler against the newly opened panel owner.
+  // scheduler against the newly opened panel owner. Reattach reconciles the
+  // last complete app surface against the current glass handoff and always
+  // queues real presenter work before returning; post-resume health therefore
+  // cannot depend on Flutter deciding that an unchanged scene needs a frame.
   bool detach_presenter(uint32_t timeout_ms = 5000);
   bool attach_presenter(const PlutoPresenterOps *presenter_ops,
                         PlutoPresenter *presenter);
@@ -346,6 +349,7 @@ private:
 
   void configure(uint32_t width, uint32_t height, PlutoPixelFormat format);
   bool components_valid() const;
+  bool submit_frame_locked(const PlutoFramePacket &packet);
   size_t merge_damage();
   // The Stage-6 classification path: ScrollDetector -> ClassifyLadder ->
   // whole-screen scenecut promotion, filling submit_rects_/submit_classes_

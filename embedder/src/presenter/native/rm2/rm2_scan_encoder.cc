@@ -822,7 +822,7 @@ private:
 
       Rm2PanResult result;
       try {
-        result.operation_ok = callback_(slot, &result.duration);
+        result.operation_ok = callback_(slot, &result);
       } catch (...) {
         result = {};
       }

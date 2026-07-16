@@ -31,10 +31,17 @@ struct Rm2HandoffOptions {
   // Deterministic host-only scheduling probe. Production leaves this zero;
   // tests use it to prove encode work overlaps a blocking pan.
   std::chrono::nanoseconds phase_encode_delay_for_testing{};
+  // Delays only delivery of an already completed pan result. The device-owned
+  // completion timestamp must keep this host-only scheduler jitter out of the
+  // physical cadence measurement.
+  std::chrono::nanoseconds pan_completion_delivery_delay_for_testing{};
   // Production selects the exact RM2 policy0 paths only in Linux ARM builds.
   // Host tests may inject isolated regular-file fixtures through this field.
   std::optional<Rm2CpuFrequencyLeasePaths> cpu_frequency_paths_for_testing{};
   std::chrono::milliseconds cpu_frequency_debounce_for_testing{50};
+  // A valid-hot CPU reading is transient backpressure, sampled at most once
+  // per second in production. Tests may shorten (but not disable) the hold.
+  std::chrono::milliseconds cpu_thermal_retry_delay_for_testing{1000};
 };
 
 // Exact union area used as the denominator for damage-amplification

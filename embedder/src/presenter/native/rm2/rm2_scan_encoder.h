@@ -89,6 +89,8 @@ private:
 struct Rm2PanResult {
   bool operation_ok = false;
   std::chrono::nanoseconds duration{};
+  // Captured next to the ioctl return, before worker notification latency.
+  std::chrono::steady_clock::time_point completed_at{};
 };
 
 // Runs the RM2's blocking FBIOPAN_DISPLAY operation on a persistent worker so
@@ -100,8 +102,8 @@ struct Rm2PanResult {
 // physical scan cadence.
 class Rm2PanWorker final {
 public:
-  using PanCallback = std::function<bool(
-      std::uint32_t slot, std::chrono::nanoseconds *out_duration)>;
+  using PanCallback =
+      std::function<bool(std::uint32_t slot, Rm2PanResult *out_result)>;
 
   explicit Rm2PanWorker(PanCallback callback);
   ~Rm2PanWorker();

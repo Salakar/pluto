@@ -1068,13 +1068,16 @@ final class LiveDeviceOperations {
 
   Future<int> _foregroundPid() async {
     final String executable = '$deviceRoot/bin/pluto-embedder';
+    // `/proc/<pid>/exe` names the immutable release target, while deviceRoot
+    // is the atomically switched managed symlink. Resolve both to one spelling.
     final CommandResult result = await transport.exec(
       'pid=\$(cat ${_q('$runDir/embedder.pid')} 2>/dev/null || true); '
       'case "\$pid" in ""|*[!0-9]*) exit 66 ;; esac; '
       '[ "\$pid" -gt 0 ] 2>/dev/null || exit 66; '
+      'expected=\$(readlink -f ${_q(executable)} 2>/dev/null || true); '
+      '[ -n "\$expected" ] || exit 66; '
       'exe=\$(readlink "/proc/\$pid/exe" 2>/dev/null || true); '
-      'case "\$exe" in '
-      '${_q(executable)}|${_q('$executable (deleted)')}) ;; '
+      'case "\$exe" in "\$expected"|"\$expected (deleted)") ;; '
       '*) exit 66 ;; esac; '
       "printf 'PLUTO-FOREGROUND-PID|%s\\n' \"\$pid\"",
     );

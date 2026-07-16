@@ -310,10 +310,14 @@ PlutoStatus MxsLcdifDevice::set_offset(std::uint32_t index) {
   return kPlutoStatusOk;
 }
 
-PlutoStatus MxsLcdifDevice::pan(std::uint32_t index,
-                                std::chrono::nanoseconds *out_duration) {
+PlutoStatus
+MxsLcdifDevice::pan(std::uint32_t index, std::chrono::nanoseconds *out_duration,
+                    std::chrono::steady_clock::time_point *out_completed_at) {
   if (out_duration != nullptr) {
     *out_duration = std::chrono::nanoseconds::zero();
+  }
+  if (out_completed_at != nullptr) {
+    *out_completed_at = {};
   }
   PlutoStatus status = set_offset(index);
   if (status != kPlutoStatusOk) {
@@ -329,10 +333,17 @@ PlutoStatus MxsLcdifDevice::pan(std::uint32_t index,
   const auto begin = std::chrono::steady_clock::now();
   const int result =
       syscalls_->ioctl(fd_, uapi::kPanDisplay, &observed_variable_);
-  const auto duration = std::chrono::steady_clock::now() - begin;
+  // FBIOPAN_DISPLAY returns only after CUR_FRAME_DONE for the requested page.
+  // Capture that physical latch boundary before any worker notification or
+  // caller wake latency can be charged to the panel cadence.
+  const auto completed_at = std::chrono::steady_clock::now();
+  const auto duration = completed_at - begin;
   if (out_duration != nullptr) {
     *out_duration =
         std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
+  }
+  if (out_completed_at != nullptr) {
+    *out_completed_at = completed_at;
   }
   // The RM2 mxs-lcdif driver returns a positive scan-line count on success.
   // Only negative syscall results are failures.

@@ -181,7 +181,14 @@ TEST(MxsLcdifDevice, RequiresUnblankAndAcceptsPositivePanCompletion) {
   EXPECT_EQ(device.pan(3), kPlutoStatusAgain);
   ASSERT_EQ(device.unblank(3), kPlutoStatusOk);
   EXPECT_FALSE(device.is_blanked());
-  ASSERT_EQ(device.pan(4), kPlutoStatusOk);
+  std::chrono::nanoseconds duration{};
+  std::chrono::steady_clock::time_point completed_at{};
+  const auto before = std::chrono::steady_clock::now();
+  ASSERT_EQ(device.pan(4, &duration, &completed_at), kPlutoStatusOk);
+  const auto after = std::chrono::steady_clock::now();
+  EXPECT_TRUE(completed_at >= before);
+  EXPECT_TRUE(completed_at <= after);
+  EXPECT_TRUE(completed_at - before >= duration);
   ASSERT_TRUE(!fake.panned_offsets.empty());
   EXPECT_EQ(fake.panned_offsets.back(), 4U * kRm2ScanoutHeight);
 }

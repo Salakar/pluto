@@ -81,7 +81,7 @@ private:
 TEST(Rm2CpuFrequencyBurstLease, DisabledLeaseIsAnAllocationFreeNoOp) {
   Rm2CpuFrequencyBurstLease lease;
   EXPECT_FALSE(lease.enabled());
-  EXPECT_TRUE(lease.acquire());
+  EXPECT_TRUE(lease.acquire() == Rm2CpuFrequencyAcquireOutcome::kAcquired);
   EXPECT_FALSE(lease.active());
   EXPECT_TRUE(lease.release());
 }
@@ -94,12 +94,13 @@ TEST(Rm2CpuFrequencyBurstLease,
   Rm2CpuFrequencyBurstLease lease(paths);
 
   std::string error;
-  ASSERT_TRUE(lease.acquire(&error)) << error;
+  ASSERT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kAcquired)
+      << error;
   EXPECT_TRUE(lease.active());
   EXPECT_EQ(fixture.read("scaling_min_freq"), "1200000\n");
   const std::string receipt = fixture.receipt();
-  EXPECT_TRUE(receipt.starts_with("policy=" + paths.policy_path +
-                                  "\nowner_pid="));
+  EXPECT_TRUE(
+      receipt.starts_with("policy=" + paths.policy_path + "\nowner_pid="));
   EXPECT_NE(receipt.find("\nowner_start_ticks="), std::string::npos);
   EXPECT_TRUE(
       receipt.ends_with("\noriginal_min_khz=792000\noriginal_max_khz=1200000\n"
@@ -119,10 +120,10 @@ TEST(Rm2CpuFrequencyBurstLease, SerializesOwnersAndRefusesExistingReceipt) {
   const auto paths = fixture.paths();
   Rm2CpuFrequencyBurstLease first(paths);
   Rm2CpuFrequencyBurstLease second(paths);
-  ASSERT_TRUE(first.acquire());
-  EXPECT_FALSE(second.acquire());
+  ASSERT_TRUE(first.acquire() == Rm2CpuFrequencyAcquireOutcome::kAcquired);
+  EXPECT_TRUE(second.acquire() == Rm2CpuFrequencyAcquireOutcome::kFault);
   ASSERT_TRUE(first.release());
-  ASSERT_TRUE(second.acquire());
+  ASSERT_TRUE(second.acquire() == Rm2CpuFrequencyAcquireOutcome::kAcquired);
   ASSERT_TRUE(second.release());
 
   {
@@ -131,7 +132,7 @@ TEST(Rm2CpuFrequencyBurstLease, SerializesOwnersAndRefusesExistingReceipt) {
     receipt << "unowned\n";
   }
   Rm2CpuFrequencyBurstLease blocked(paths);
-  EXPECT_FALSE(blocked.acquire());
+  EXPECT_TRUE(blocked.acquire() == Rm2CpuFrequencyAcquireOutcome::kFault);
   EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
 }
 
@@ -141,7 +142,7 @@ TEST(Rm2CpuFrequencyBurstLease,
   ASSERT_TRUE(fixture.valid());
   const auto paths = fixture.paths();
   Rm2CpuFrequencyBurstLease lease(paths);
-  ASSERT_TRUE(lease.acquire());
+  ASSERT_TRUE(lease.acquire() == Rm2CpuFrequencyAcquireOutcome::kAcquired);
 
   fixture.write("scaling_governor", "performance\n");
   EXPECT_FALSE(lease.release());
@@ -160,7 +161,7 @@ TEST(Rm2CpuFrequencyBurstLease,
   ASSERT_TRUE(fixture.valid());
   const auto paths = fixture.paths();
   Rm2CpuFrequencyBurstLease lease(paths);
-  ASSERT_TRUE(lease.acquire());
+  ASSERT_TRUE(lease.acquire() == Rm2CpuFrequencyAcquireOutcome::kAcquired);
 
   fixture.write("scaling_governor", "performance\n");
   std::thread settle([&fixture] {
@@ -182,7 +183,7 @@ TEST(Rm2CpuFrequencyBurstLease, RejectsNonRm2PolicyIdentityBeforeReceipt) {
   const auto paths = fixture.paths();
   fixture.write("scaling_max_freq", "996000\n");
   Rm2CpuFrequencyBurstLease lease(paths);
-  EXPECT_FALSE(lease.acquire());
+  EXPECT_TRUE(lease.acquire() == Rm2CpuFrequencyAcquireOutcome::kFault);
   EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
   EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
 }
@@ -196,20 +197,38 @@ TEST(Rm2CpuFrequencyBurstLease, RejectsWritableReceiptDirectory) {
               0777),
       0);
   Rm2CpuFrequencyBurstLease lease(paths);
-  EXPECT_FALSE(lease.acquire());
+  EXPECT_TRUE(lease.acquire() == Rm2CpuFrequencyAcquireOutcome::kFault);
   EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
   EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
 }
 
-TEST(Rm2CpuFrequencyBurstLease, Rejects45CAndRestoresAnActiveBurst) {
+TEST(Rm2CpuFrequencyBurstLease, HoldsAt45CAndRestoresAnActiveBurst) {
   TemporaryPolicy fixture;
   ASSERT_TRUE(fixture.valid());
   const auto paths = fixture.paths();
   Rm2CpuFrequencyBurstLease lease(paths);
-  ASSERT_TRUE(lease.acquire());
+  ASSERT_TRUE(lease.acquire() == Rm2CpuFrequencyAcquireOutcome::kAcquired);
   ASSERT_TRUE(lease.active());
   fixture.write("cpu_temperature", "45000\n");
-  EXPECT_FALSE(lease.acquire());
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) ==
+              Rm2CpuFrequencyAcquireOutcome::kThermalHold);
+  EXPECT_NE(error.find("45000 mC"), std::string::npos);
+  EXPECT_FALSE(lease.active());
+  EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
+}
+
+TEST(Rm2CpuFrequencyBurstLease, UnavailableTemperatureRemainsAFault) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  const auto paths = fixture.paths();
+  fixture.write("cpu_temperature", "unavailable\n");
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kFault);
+  EXPECT_NE(error.find("unavailable or malformed"), std::string::npos);
   EXPECT_FALSE(lease.active());
   EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
   EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
@@ -221,7 +240,7 @@ TEST(Rm2CpuFrequencyBurstLease, DestructorRestoresAnOwnedBurst) {
   const auto paths = fixture.paths();
   {
     Rm2CpuFrequencyBurstLease lease(paths);
-    ASSERT_TRUE(lease.acquire());
+    ASSERT_TRUE(lease.acquire() == Rm2CpuFrequencyAcquireOutcome::kAcquired);
     ASSERT_TRUE(lease.active());
   }
   EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");

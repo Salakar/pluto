@@ -312,20 +312,28 @@ TEST(Rm2ScanEncoder, PersistentWorkerWakesAfterRepeatedIdleGaps) {
 
 TEST(Rm2ScanEncoder, PanBeginConfirmsWorkerEnteredBlockingOperation) {
   std::atomic<bool> callback_entered{false};
-  Rm2PanWorker worker([&callback_entered](std::uint32_t slot,
-                                          std::chrono::nanoseconds *duration) {
+  std::atomic<bool> callback_completed{false};
+  Rm2PanWorker worker([&](std::uint32_t slot, Rm2PanResult *result) {
     callback_entered.store(true, std::memory_order_release);
-    *duration = std::chrono::microseconds(1);
+    result->duration = std::chrono::microseconds(1);
+    result->completed_at = std::chrono::steady_clock::now();
+    callback_completed.store(true, std::memory_order_release);
     return slot == 7U;
   });
   ASSERT_TRUE(worker.ready());
 
   ASSERT_TRUE(worker.begin(7U));
   EXPECT_TRUE(callback_entered.load(std::memory_order_acquire));
+  while (!callback_completed.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  const auto before_finish = std::chrono::steady_clock::now();
   Rm2PanResult result;
   ASSERT_TRUE(worker.finish(&result));
   EXPECT_TRUE(result.operation_ok);
   EXPECT_EQ(result.duration, std::chrono::microseconds(1));
+  EXPECT_TRUE(result.completed_at != std::chrono::steady_clock::time_point{});
+  EXPECT_TRUE(result.completed_at <= before_finish);
 }
 
 TEST(Rm2ScanEncoder, RejectsMisalignedOrOutOfRangeWork) {

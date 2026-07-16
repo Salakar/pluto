@@ -434,6 +434,143 @@ TEST(FrameRendererTest, DetachRejectsFramesAndAttachRebuildsPresenterState) {
   EXPECT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 3)));
 }
 
+TEST(FrameRendererTest,
+     ReattachReplaysRetainedSurfaceAndRecreatesHealthWithoutFlutterFrame) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+    g_mono_capture.handoff_enabled = true;
+  }
+  TempReadyMarker health("health-warm-resume");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0x0000);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  ASSERT_TRUE(wait_for_present_count(1));
+
+  uint64_t initial_frame_id = 0;
+  uint16_t initial_presented_pixel = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 1u);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+    ASSERT_TRUE(!g_mono_capture.pixel_history.back().empty());
+    initial_presented_pixel = g_mono_capture.pixel_history.back()[0];
+  }
+  renderer.notify_present_complete(initial_frame_id);
+
+  ParsedHealthRecord initial_health{};
+  const auto initial_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < initial_deadline) {
+    if (std::filesystem::exists(health.marker()) &&
+        parse_health_record(read_file(health.marker()), &initial_health)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(initial_health.pid, static_cast<long>(::getpid()));
+  ASSERT_EQ(initial_health.sequence, 1u);
+
+  ASSERT_TRUE(renderer.detach_presenter());
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(g_mono_capture.handoff_available);
+  }
+
+  // This is the supervisor's real warm-resume boundary: stale proof from the
+  // stopped presenter generation is removed before SIGCONT/SIGUSR2.
+  ASSERT_TRUE(std::filesystem::remove(health.marker()));
+  ASSERT_TRUE(!std::filesystem::exists(health.marker()));
+
+  // No Flutter packet is submitted after attach. Reattach itself must replay
+  // the retained app surface, including the zero-diff/same-glass case.
+  ASSERT_TRUE(renderer.attach_presenter(
+      mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
+  ASSERT_TRUE(wait_for_present_count(2));
+  EXPECT_EQ(renderer.submitted_frames(), 1u)
+      << "an exact same-surface handoff should skip full tile traversal";
+
+  uint64_t resumed_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 2u);
+    resumed_frame_id = g_mono_capture.frame_id_history.back();
+    EXPECT_EQ(g_mono_capture.class_history.back(), kPlutoRefreshFast);
+    EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 1, 1}));
+    ASSERT_TRUE(!g_mono_capture.last_pixels.empty());
+    EXPECT_EQ(g_mono_capture.last_pixels[0], initial_presented_pixel);
+  }
+  renderer.notify_present_complete(resumed_frame_id);
+
+  ParsedHealthRecord resumed_health{};
+  const auto resumed_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < resumed_deadline) {
+    if (std::filesystem::exists(health.marker()) &&
+        parse_health_record(read_file(health.marker()), &resumed_health)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(resumed_health.pid, static_cast<long>(::getpid()));
+  EXPECT_GT(resumed_health.sequence, initial_health.sequence);
+  EXPECT_GE(resumed_health.monotonic_ms, initial_health.monotonic_ms);
+}
+
+TEST(FrameRendererTest,
+     WarmReattachReconcilesDifferentForegroundSurfaceBeforeHealthProof) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.handoff_enabled = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.enable_auto_ghostbuster = false;
+  FrameRenderer resumed(config);
+  ASSERT_TRUE(resumed.valid());
+
+  const std::vector<uint16_t> resumed_pixels(64 * 64, 0x0000);
+  ASSERT_TRUE(resumed.submit_frame(packet_for(resumed_pixels, 64, 64, 1000)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  ASSERT_TRUE(resumed.detach_presenter());
+
+  // A different foreground owns the panel while the first isolate sleeps.
+  const std::vector<uint16_t> foreground_pixels(64 * 64, 0xffff);
+  {
+    FrameRenderer foreground(config);
+    ASSERT_TRUE(foreground.valid());
+    ASSERT_TRUE(
+        foreground.submit_frame(packet_for(foreground_pixels, 64, 64, 2000)));
+    ASSERT_TRUE(wait_for_present_count(2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    ASSERT_TRUE(foreground.detach_presenter());
+  }
+
+  size_t before_resume = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    before_resume = g_mono_capture.presents;
+  }
+  ASSERT_TRUE(resumed.attach_presenter(
+      mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
+  ASSERT_TRUE(wait_for_present_count(before_resume + 1));
+  EXPECT_EQ(resumed.submitted_frames(), 2u)
+      << "different glass must take the complete normal reconciliation path";
+  EXPECT_GT(resumed.last_damage_count(), 0u);
+  std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+  EXPECT_TRUE(g_mono_capture.last_pixels == resumed_pixels)
+      << "the sleeping app's retained pixels, not the outgoing handoff, must "
+         "be presented";
+}
+
 TEST(FrameRendererTest, RotationAndDetachDrainCompletionBeforeFrameIdReuse) {
   reset_mono_capture();
   {
@@ -685,16 +822,11 @@ TEST(FrameRendererTest,
     EXPECT_TRUE(g_mono_capture.handoff_last_confirmed);
   }
 
-  // Resume schedules Flutter asynchronously. Until that frame is accepted,
-  // the ledger may describe the other warm app currently on glass; reset is
-  // deliberately unavailable. The first updated packet opens the gate even
-  // when its quantized content matches this app's retained state exactly.
-  EXPECT_FALSE(renderer.request_pixel_reset());
-  PlutoRect partial_bound{0, 0, 1, 1};
-  PlutoFramePacket resume = packet_for(pixels, 64, 64, 2);
-  resume.paint_bounds = &partial_bound;
-  resume.paint_bounds_count = 1;
-  ASSERT_TRUE(renderer.submit_frame(resume));
+  // Resume must not depend on Flutter deciding that an unchanged layer tree
+  // needs another raster. Reattach has already reconciled this app's complete
+  // retained surface against the imported physical baseline and queued a real
+  // presentation, so the reset source is app-owned before any new packet.
+  ASSERT_TRUE(wait_for_present_count(2));
   size_t before_reset = 0;
   {
     std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
@@ -1318,6 +1450,53 @@ TEST(FrameRendererTest, DeferredSystemUiNeverPresentsTheStaleFrame) {
     EXPECT_GT(g_mono_capture.presents, 0u);
     EXPECT_EQ(g_mono_capture.last_class, kPlutoRefreshFull);
   }
+}
+
+TEST(FrameRendererTest,
+     WarmReattachKeepsNativeReplayHiddenUntilSystemUiReveal) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.handoff_enabled = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0x7bef);
+  pixels[0] = 0x0000;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::vector<uint16_t> expected_presented;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    expected_presented = g_mono_capture.pixel_history.back();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  ASSERT_TRUE(renderer.detach_presenter());
+
+  // EngineHost arms this gate after reopening the presenter but before attach
+  // when the warm launcher is about to route the switcher/status/power UI.
+  renderer.set_presentation_suspended(true);
+  ASSERT_TRUE(renderer.attach_presenter(
+      mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u)
+        << "the retained Home replay must not flash before routing";
+  }
+
+  // The watchdog/routed reveal discards all hidden replay work and emits one
+  // authoritative Full frame from the current retained surface.
+  ASSERT_TRUE(renderer.force_presentation_resume());
+  ASSERT_TRUE(wait_for_present_count(2));
+  std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+  EXPECT_EQ(g_mono_capture.presents, 2u);
+  EXPECT_EQ(g_mono_capture.last_class, kPlutoRefreshFull);
+  EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 64, 64}));
+  EXPECT_TRUE(g_mono_capture.last_pixels == expected_presented);
 }
 
 TEST(FrameRendererTest, DeferredSystemUiWatchdogCanForceCurrentFullFrame) {

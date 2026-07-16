@@ -668,6 +668,149 @@ TEST(LcdifTconBackend,
   backend.stop();
 }
 
+TEST(LcdifTconBackend,
+     Rm2CpuThermalHoldDefersStartupWithoutFramebufferMutation) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  policy.write("cpu_temperature", "45000\n");
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  EXPECT_EQ(backend.start(config), kPlutoStatusAgain);
+  EXPECT_TRUE(syscalls.blank_values.empty());
+  EXPECT_TRUE(syscalls.panned_offsets.empty());
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  EXPECT_FALSE(policy.receipt_exists());
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+
+  policy.write("cpu_temperature", "33000\n");
+  ASSERT_EQ(backend.start(config), kPlutoStatusOk);
+  backend.stop();
+}
+
+TEST(LcdifTconBackend, Rm2UnavailableCpuTemperatureFailsStartupClosed) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  policy.write("cpu_temperature", "unavailable\n");
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(syscalls.blank_values.empty());
+  EXPECT_TRUE(syscalls.panned_offsets.empty());
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  EXPECT_FALSE(policy.receipt_exists());
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+}
+
+TEST(LcdifTconBackend, Rm2CpuThermalHoldBackpressuresAdmissionAndRecovers) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+      .cpu_frequency_debounce_for_testing = std::chrono::milliseconds(10),
+      .cpu_thermal_retry_delay_for_testing = std::chrono::milliseconds(20),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  ASSERT_TRUE(
+      wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
+
+  policy.write("cpu_temperature", "45000\n");
+  syscalls.blank_values.clear();
+  syscalls.panned_offsets.clear();
+  OwnedPixelRequest request(3, 7, 0, 106);
+  EXPECT_EQ(backend.submit(&request.request), kPlutoStatusAgain);
+  EXPECT_EQ(backend.wait_idle(0), kPlutoStatusOk);
+  EXPECT_FALSE(backend.ready(kPlutoRefreshFast));
+  EXPECT_EQ(static_cast<int>(backend.health().state),
+            static_cast<int>(NativeBackendHealthState::kBusy));
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  EXPECT_EQ(backend.health().completed_jobs, 0U);
+  EXPECT_TRUE(syscalls.panned_offsets.empty());
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  EXPECT_FALSE(policy.receipt_exists());
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+
+  const std::size_t blank_count_during_hold = syscalls.blank_values.size();
+  EXPECT_EQ(backend.submit(&request.request), kPlutoStatusAgain);
+  EXPECT_FALSE(backend.ready(kPlutoRefreshFast));
+  EXPECT_EQ(syscalls.blank_values.size(), blank_count_during_hold);
+  EXPECT_TRUE(syscalls.panned_offsets.empty());
+
+  policy.write("cpu_temperature", "33000\n");
+  const auto ready_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (!backend.ready(kPlutoRefreshFast) &&
+         std::chrono::steady_clock::now() < ready_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(backend.ready(kPlutoRefreshFast));
+  EXPECT_EQ(static_cast<int>(backend.health().state),
+            static_cast<int>(NativeBackendHealthState::kReady));
+  const std::size_t unblank_count_before = static_cast<std::size_t>(
+      std::count(syscalls.blank_values.begin(), syscalls.blank_values.end(),
+                 static_cast<std::uintptr_t>(uapi::kBlankUnblank)));
+  ASSERT_EQ(backend.submit(&request.request), kPlutoStatusOk);
+  ASSERT_EQ(backend.wait_idle(3000), kPlutoStatusOk);
+  const std::size_t unblank_count_after = static_cast<std::size_t>(
+      std::count(syscalls.blank_values.begin(), syscalls.blank_values.end(),
+                 static_cast<std::uintptr_t>(uapi::kBlankUnblank)));
+  EXPECT_GT(unblank_count_after, unblank_count_before);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  EXPECT_EQ(backend.health().completed_jobs, 1U);
+  backend.stop();
+}
+
 TEST(LcdifTconBackend, Rm2FrequencyBurstRejectsPanelTemperatureAt45C) {
   LocalRm2Profile fixture;
   BackendTemporaryCpuPolicy policy;
@@ -1055,7 +1198,7 @@ TEST(LcdifTconBackend, DamageAmplificationUsesUniqueRequestedUnionArea) {
 }
 
 TEST(LcdifTconBackend,
-     BlockingPanOverlapsNextEncodeAndKeepsLatchedSlotImmutable) {
+     BlockingPanUsesLatchTimeInsteadOfDelayedCompletionDelivery) {
   LocalRm2Profile fixture;
   ASSERT_TRUE(fixture.valid());
   BackendFakeLcdifSyscalls syscalls;
@@ -1068,6 +1211,7 @@ TEST(LcdifTconBackend,
   Rm2HandoffOptions options{
       .path = {},
       .phase_encode_delay_for_testing = std::chrono::milliseconds(5),
+      .pan_completion_delivery_delay_for_testing = std::chrono::milliseconds(8),
   };
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
@@ -1101,13 +1245,36 @@ TEST(LcdifTconBackend,
       .frame_id = 0x90U,
   };
   ASSERT_EQ(backend.submit(&request), kPlutoStatusOk);
-  // The former serial path necessarily spent 8 ms in pan plus the injected
-  // 5 ms encode delay and failed the 12.351 ms cadence limit. The production
-  // pipeline overlaps them, so this request completes all four phases.
+  // The former caller-side timestamp charged the injected 8 ms post-latch
+  // delivery delay to each 8 ms pan and failed the 12.351 ms cadence limit.
+  // The device timestamp excludes that scheduler jitter while the production
+  // pipeline still overlaps the injected 5 ms encode work.
   ASSERT_EQ(backend.wait_idle(3000), kPlutoStatusOk);
   EXPECT_EQ(backend.health().completed_jobs, 1U);
   EXPECT_EQ(syscalls.latched_slot_mutations, 0U);
   EXPECT_EQ(syscalls.panned_phase_cells.size(), 4U);
+  backend.stop();
+}
+
+TEST(LcdifTconBackend, PhysicalPanOverrunStillFailsClosed) {
+  LocalRm2Profile fixture;
+  ASSERT_TRUE(fixture.valid());
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, {});
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+
+  // Delivery jitter after CUR_FRAME_DONE is harmless, but a physical latch
+  // that exceeds the 5% ioctl-duration allowance remains a hardware fault.
+  syscalls.pan_delay = std::chrono::milliseconds(13);
+  OwnedPixelRequest request(3, 7, 0, 0x91U);
+  EXPECT_EQ(backend.submit(&request.request), kPlutoStatusDeviceLost);
+  EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusDeviceLost);
+  EXPECT_EQ(backend.health().completed_jobs, 0U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
   backend.stop();
 }
 
