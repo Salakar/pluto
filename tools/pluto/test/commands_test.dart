@@ -1209,6 +1209,22 @@ void main() {
     );
     expect(
       transport.commands.any(
+        (String command) => command.contains('$stage/engine/profile'),
+      ),
+      isFalse,
+      reason:
+          'the release-only ARM slice must not leave an empty profile engine '
+          'directory',
+    );
+    expect(
+      transport.commands.any(
+        (String command) => command.contains('$stage/engine/release'),
+      ),
+      isTrue,
+      reason: 'runtime uploads create only the engine modes in the slice',
+    );
+    expect(
+      transport.commands.any(
         (String command) =>
             command.contains('$candidate/bin/pluto-release-activate.sh') &&
             command.contains("activate '$candidate' 'transient'"),

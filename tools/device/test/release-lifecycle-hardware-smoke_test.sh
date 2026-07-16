@@ -191,6 +191,12 @@ case "$command" in
     fi
     ;;
   *'release-lifecycle-prepare-ink'*)
+    if ! printf '%s' "$command" | grep -F -- \
+      '"${prepare_prefix}0}}" | "${prepare_prefix}1}}" | "${prepare_prefix}2}}")' \
+      >/dev/null; then
+      echo 'fake ssh: lifecycle prepare consumer did not require a complete exact JSON receipt' >&2
+      exit 66
+    fi
     ;;
   *'release-lifecycle-stroke'*)
     seq=$((seq + 1))

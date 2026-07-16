@@ -715,7 +715,7 @@ final class LiveDeviceOperations {
       'mkdir -p ${_q(_releaseStore)} '
       '${<String>['appdata', 'logs', 'state', 'staging', 'shared'].map((String directory) => _q('$_dataRoot/$directory')).join(' ')} && '
       'rm -rf ${_q(stage)} ${_q(candidate)} && '
-      'mkdir -p ${<String>['bin', 'engine', 'engine/profile', 'engine/release', 'launcher', 'apps'].map((String directory) => _q('$stage/$directory')).join(' ')} && '
+      'mkdir -p ${<String>['bin', 'engine', 'launcher', 'apps'].map((String directory) => _q('$stage/$directory')).join(' ')} && '
       "printf '%s\\n' ${_q(nonce)} > ${_q('$stage/.pluto-release-owned')} && "
       '${<String>['appdata', 'logs', 'state', 'staging', 'shared'].map((String directory) => 'ln -s ${_q('$_dataRoot/$directory')} ${_q('$stage/$directory')}').join(' && ')}',
       failure: 'could not create the isolated candidate release layout',

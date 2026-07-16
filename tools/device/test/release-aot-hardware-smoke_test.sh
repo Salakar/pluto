@@ -144,6 +144,12 @@ case "$command" in
     printf 'release AOT smoke: PASS switcher UI selected dev.pluto.codex pid=201\n'
     ;;
   *'release-aot-prepare-ink'*)
+    if ! printf '%s' "$command" | grep -F -- \
+      '"${expected_prefix}0}}" | "${expected_prefix}1}}" | "${expected_prefix}2}}")' \
+      >/dev/null; then
+      echo 'fake ssh: AOT prepare consumer did not require a complete exact JSON receipt' >&2
+      exit 66
+    fi
     printf 'release AOT smoke: PASS real Ink canvas pid=202 response={"ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"canvasReady":true,"actionCount":2}}\n'
     ;;
   *'Ink stroke produced no completion-backed present'*)

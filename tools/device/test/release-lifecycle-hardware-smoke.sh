@@ -463,7 +463,7 @@ prepare_response=\$(/home/root/pluto/bin/pluto-controlctl \\
   --socket /run/pluto/embedder-control.sock --request \"\$prepare_request\")
 prepare_prefix='{\"requestId\":\"release-lifecycle-prepare-ink\",\"ok\":true,\"result\":{\"appId\":\"$EXPECTED_APP_ID\",\"pid\":$stroke_pid,\"canvasReady\":true,\"actionCount\":'
 case \"\$prepare_response\" in
-  \"\${prepare_prefix}0}\" | \"\${prepare_prefix}1}\" | \"\${prepare_prefix}2}\") ;;
+  \"\${prepare_prefix}0}}\" | \"\${prepare_prefix}1}}\" | \"\${prepare_prefix}2}}\") ;;
   *) echo \"release lifecycle smoke: Ink canvas preparation returned unbound metadata: \$prepare_response\" >&2; exit 91 ;;
 esac
 [ \"\$(cat /run/pluto/embedder.pid 2>/dev/null)\" = '$stroke_pid' ]" >/dev/null

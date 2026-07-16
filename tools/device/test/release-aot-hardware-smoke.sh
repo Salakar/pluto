@@ -562,7 +562,7 @@ response=\$(/home/root/pluto/bin/pluto-controlctl \\
   --socket /run/pluto/embedder-control.sock --request \"\$request\")
 expected_prefix='{\"requestId\":\"release-aot-prepare-ink\",\"ok\":true,\"result\":{\"appId\":\"dev.pluto.ink\",\"pid\":'"\$pid"',\"canvasReady\":true,\"actionCount\":'
 case \"\$response\" in
-  \"\${expected_prefix}0}\" | \"\${expected_prefix}1}\" | \"\${expected_prefix}2}\") ;;
+  \"\${expected_prefix}0}}\" | \"\${expected_prefix}1}}\" | \"\${expected_prefix}2}}\") ;;
   *) echo \"release AOT smoke: Ink canvas preparation returned unbound metadata: \$response\" >&2; exit 91 ;;
 esac
 [ \"\$(cat /run/pluto/embedder.pid 2>/dev/null)\" = \"\$pid\" ] || exit 92
