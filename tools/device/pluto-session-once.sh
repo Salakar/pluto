@@ -616,6 +616,18 @@ do_start() {
 
   # Retire an earlier one-shot session before replacing its runtime-only unit.
   "$SYSTEMCTL" stop "$UNIT_NAME" 2>/dev/null || true
+  previous_state=$(
+    "$SYSTEMCTL" show "$UNIT_NAME" -p ActiveState --value 2>/dev/null
+  ) || die "cannot verify earlier transient service retirement"
+  case "$previous_state" in
+    inactive | failed) ;;
+    *) die "cannot retire active or indeterminate transient service" ;;
+  esac
+  stale_pid_file="$RUN_DIR/embedder.pid"
+  if [ -e "$stale_pid_file" ] || [ -L "$stale_pid_file" ]; then
+    rm -f "$stale_pid_file" ||
+      die "cannot retire stale foreground PID receipt"
+  fi
   rm -f "$UNIT" "$UNIT.tmp.$$"
   cat > "$UNIT.tmp.$$" <<EOF || die "cannot stage transient service"
 [Unit]

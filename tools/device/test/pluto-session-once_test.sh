@@ -83,12 +83,34 @@ cat > "$BIN/systemctl" <<'SYSTEMCTL'
 printf '%s\n' "$*" >> "$PLUTO_TEST_EVENTS"
 case "$*" in
   'start pluto-session-once.service')
+    if [ -n "${PLUTO_TEST_RUN:-}" ]; then
+      [ ! -e "$PLUTO_TEST_RUN/embedder.pid" ] &&
+        [ ! -L "$PLUTO_TEST_RUN/embedder.pid" ] || exit 95
+      printf 'stale-pid-retired-before-start\n' >> "$PLUTO_TEST_EVENTS"
+    fi
     [ "${PLUTO_TEST_FAIL_START:-0}" != 1 ] || exit 1
+    if [ -n "${PLUTO_TEST_FOREGROUND_PID:-}" ]; then
+      printf '%s\n' "$PLUTO_TEST_FOREGROUND_PID" \
+        > "$PLUTO_TEST_RUN/embedder.pid"
+    fi
     : > "$PLUTO_TEST_ACTIVE"
     ;;
-  'stop pluto-session-once.service') rm -f "$PLUTO_TEST_ACTIVE" ;;
+  'stop pluto-session-once.service')
+    [ "${PLUTO_TEST_FAIL_STOP:-0}" != 1 ] || exit 1
+    rm -f "$PLUTO_TEST_ACTIVE"
+    ;;
   'is-active --quiet pluto-session-once.service')
     [ -f "$PLUTO_TEST_ACTIVE" ] || exit 3
+    ;;
+  'show pluto-session-once.service -p ActiveState --value')
+    [ "${PLUTO_TEST_FAIL_SHOW:-0}" != 1 ] || exit 1
+    if [ -n "${PLUTO_TEST_ACTIVE_STATE:-}" ]; then
+      printf '%s\n' "$PLUTO_TEST_ACTIVE_STATE"
+    elif [ -f "$PLUTO_TEST_ACTIVE" ]; then
+      printf 'active\n'
+    else
+      printf 'inactive\n'
+    fi
     ;;
   'start xochitl.service')
     [ "${PLUTO_TEST_FAIL_STOCK_START:-0}" != 1 ] || exit 1
@@ -228,6 +250,8 @@ run_once() {
   PLUTO_SYSTEMD_RUNTIME_DIR="$UNITS" \
   PLUTO_TEST_EVENTS="$EVENTS" \
   PLUTO_TEST_ACTIVE="$ACTIVE" \
+  PLUTO_TEST_RUN="$RUN" \
+  PLUTO_TEST_FOREGROUND_PID="${FIXTURE_PID:-}" \
   PLUTO_TESTING=1 \
   PLUTO_TEST_ONCE_PROC_ROOT="$PROC" \
   PLUTO_TEST_ONCE_HEALTH_ATTEMPTS="${PLUTO_TEST_GATE_ATTEMPTS:-20}" \
@@ -256,6 +280,10 @@ expect_gate_rejection() {
 start_foreground_fixture success
 run_once start >/dev/null || fail "one-shot session did not start"
 UNIT="$UNITS/pluto-session-once.service"
+[ "$(cat "$RUN/embedder.pid")" = "$FIXTURE_PID" ] ||
+  fail "new transient service did not publish its foreground PID receipt"
+grep -q '^stale-pid-retired-before-start$' "$EVENTS" ||
+  fail "stale foreground PID receipt survived until transient service start"
 [ -f "$UNIT" ] || fail "runtime-only service was not published"
 [ "$(stat -f '%Lp' "$UNIT" 2>/dev/null || stat -c '%a' "$UNIT")" = 644 ] ||
   fail "runtime-only service mode is not 0644"
@@ -289,6 +317,72 @@ grep -q '^start xochitl.service$' "$EVENTS" ||
   fail "stop did not request stock xochitl"
 stop_foreground_fixture
 
+# A failed stop may leave the old cgroup live. Its receipt must remain intact
+# and the replacement service must not be staged or started.
+: > "$EVENTS"
+start_foreground_fixture frozen
+: > "$ACTIVE"
+export PLUTO_TEST_FAIL_STOP=1
+set +e
+run_once start > "$TMP/active-session-retirement-failure.out" 2>&1
+ACTIVE_SESSION_RETIREMENT_FAILURE=$?
+set -e
+unset PLUTO_TEST_FAIL_STOP
+[[ "$ACTIVE_SESSION_RETIREMENT_FAILURE" -ne 0 ]] ||
+  fail "active transient service retirement returned success"
+grep -q 'cannot retire active or indeterminate transient service' \
+  "$TMP/active-session-retirement-failure.out" ||
+  fail "active transient service retirement failure was not diagnosed"
+[[ "$(cat "$RUN/embedder.pid")" = "$FIXTURE_PID" ]] ||
+  fail "active transient service lost its foreground PID receipt"
+if grep -q '^start pluto-session-once.service$' "$EVENTS"; then
+  fail "active transient service retirement failure started a replacement"
+fi
+[[ ! -e "$UNIT" ]] ||
+  fail "active transient service retirement failure published a replacement unit"
+rm -f "$ACTIVE"
+stop_foreground_fixture
+
+# Neither an intermediate systemd state nor a failed state query proves the
+# old cgroup is gone. Both conditions preserve the receipt and abort before a
+# replacement is staged.
+: > "$EVENTS"
+start_foreground_fixture frozen
+export PLUTO_TEST_ACTIVE_STATE=deactivating
+set +e
+run_once start > "$TMP/deactivating-session-retirement.out" 2>&1
+DEACTIVATING_SESSION_RETIREMENT=$?
+set -e
+unset PLUTO_TEST_ACTIVE_STATE
+[[ "$DEACTIVATING_SESSION_RETIREMENT" -ne 0 ]] ||
+  fail "deactivating transient service retirement returned success"
+[[ "$(cat "$RUN/embedder.pid")" = "$FIXTURE_PID" ]] ||
+  fail "deactivating transient service lost its foreground PID receipt"
+if grep -q '^start pluto-session-once.service$' "$EVENTS"; then
+  fail "deactivating transient service retirement started a replacement"
+fi
+stop_foreground_fixture
+
+: > "$EVENTS"
+start_foreground_fixture frozen
+export PLUTO_TEST_FAIL_SHOW=1
+set +e
+run_once start > "$TMP/session-state-query-failure.out" 2>&1
+SESSION_STATE_QUERY_FAILURE=$?
+set -e
+unset PLUTO_TEST_FAIL_SHOW
+[[ "$SESSION_STATE_QUERY_FAILURE" -ne 0 ]] ||
+  fail "failed transient service state query returned success"
+grep -q 'cannot verify earlier transient service retirement' \
+  "$TMP/session-state-query-failure.out" ||
+  fail "failed transient service state query was not diagnosed"
+[[ "$(cat "$RUN/embedder.pid")" = "$FIXTURE_PID" ]] ||
+  fail "failed transient service state query removed the foreground PID receipt"
+if grep -q '^start pluto-session-once.service$' "$EVENTS"; then
+  fail "failed transient service state query started a replacement"
+fi
+stop_foreground_fixture
+
 : > "$EVENTS"
 set +e
 PLUTO_ROOT="$ROOT" \
@@ -307,6 +401,30 @@ set -e
 [ ! -e "$UNIT" ] || fail "failed transient start retained its unit"
 grep -q '^start xochitl.service$' "$EVENTS" ||
   fail "failed transient start did not restore stock"
+
+# Receipt retirement is fail-closed before the transient service can contend
+# with stock for the panel. A directory at the receipt path cannot be removed
+# as a file and therefore must abort without starting either display service.
+: > "$EVENTS"
+mkdir "$RUN/embedder.pid"
+set +e
+run_once start > "$TMP/stale-pid-retirement-failure.out" 2>&1
+STALE_PID_RETIREMENT_FAILURE=$?
+set -e
+[[ "$STALE_PID_RETIREMENT_FAILURE" -ne 0 ]] ||
+  fail "unremovable stale foreground PID receipt returned success"
+grep -q 'cannot retire stale foreground PID receipt' \
+  "$TMP/stale-pid-retirement-failure.out" ||
+  fail "stale foreground PID retirement failure was not diagnosed"
+if grep -q '^start pluto-session-once.service$' "$EVENTS"; then
+  fail "stale foreground PID retirement failure started Pluto"
+fi
+if grep -q '^start xochitl.service$' "$EVENTS"; then
+  fail "stale foreground PID retirement failure mutated stock ownership"
+fi
+[[ ! -e "$UNIT" ]] ||
+  fail "stale foreground PID retirement failure published a transient unit"
+rm -rf "$RUN/embedder.pid"
 
 # A Type=simple service with a frozen renderer receipt must be stopped and
 # removed instead of being reported as a successful transient activation.
