@@ -189,6 +189,57 @@ stopped-process CPU, total resident memory, switch latency, full/sparse damage,
 panel temperature, and optical behavior. Any further allocation or copy
 reduction must repeat checksum, deadline, soak, and optical gates.
 
+### RM2 round 4: thermal-sample admission latency
+
+The first physical multi-app release run exposed a kernel timing edge that the
+host transport mocks could not reproduce. The i.MX7 thermal zone returned
+`EAGAIN` often enough for the original 11 reads at 10 ms intervals, followed by
+one whole-start retry, to exhaust while the supervisor launched the standby
+child. Pluto performed no unsafe frequency raise or panel work and correctly
+restored stock after its bounded foreground-failure budget, but the device
+could not enter standby.
+
+The public reMarkable i.MX thermal driver explains the failure mode: it programs
+approximately 10 Hz auto-measurement, waits only 20--50 us when the `FINISHED`
+bit is clear, and returns `-EAGAIN` if the sample is still unavailable. A fixed
+10 ms grid can repeatedly miss the valid window. The retained implementation
+reopens the exact sysfs attribute every 1 ms for at most 128 fresh attempts.
+That spans 127 ms, more than one nominal sensor period, while preserving the
+same fail-closed rules: no cached value, no frequency floor without valid
+pre-raise and post-raise samples below 45 C, immediate failure for identity or
+non-`EAGAIN` errors, and backpressure with exact policy restoration on bounded
+exhaustion.
+
+On the exact RM2, the target-native release benchmark called the production
+temperature-read method for 1,000 independent windows. All 1,000 returned a
+fresh valid 35--36 C sample with zero exhaustion, thermal hold, or other fault.
+Monotonic latency was `6.062 ms` p50, `6.092 ms` p95, `13.114 ms` p99, and
+`19.137 ms` maximum; allocation and RSS deltas were zero. The benchmark did not
+acquire the frequency lease or touch the display: policy0 remained exactly
+`792000/1200000/ondemand`, no receipt existed, and stock Xochitl retained the
+same PID. The fixed attempt count still bounds sysfs work, with at most 127 ms
+of explicit retry delay per sample. Final release standby and render acceptance
+remains part of the same-revision table below.
+
+### Lifecycle acceptance: reject early external wakes
+
+An intermediate RM1 soak entered deep suspend but woke early on later cycles.
+Kernel timing showed sleeps of about 4.6 s, 0.83 s, and 0.75 s while the armed
+RTC alarm remained tens of seconds in the future; the journal also recorded
+physical short power-key events around one cycle. This is external/input wake
+contamination, not evidence of a Pluto suspend failure. It did expose that one
+brief SSH outage was insufficient acceptance evidence.
+
+The hardware soak now binds each cycle to the exact next supervisor wake
+receipt and the accepted RTC epoch. The supervisor samples `rtc0` immediately
+after the blocking suspend command returns, before UI restoration or relaunch.
+Acceptance requires that immutable receipt to fall within the fixed two-second
+whole-clock tolerance on either side of the armed epoch, whether or not SSH
+briefly became unreachable. It distinguishes early wake, late wake, and no
+suspend receipt, and accepts slow USB transport only when the exact on-time
+receipt exists. The final 20-cycle runs must be hands-off and pass this stronger
+gate.
+
 ## Final host and artifact gates
 
 The following table is intentionally not a promise from an intermediate build.

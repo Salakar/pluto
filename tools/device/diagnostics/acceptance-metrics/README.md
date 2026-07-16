@@ -45,10 +45,12 @@ directory that could be mistaken for a passing bundle.
 
 The collector accepts the common `pluto-session.sh start` supervisor only when
 its exact process is the healthy main PID of either boot-first
-`xochitl.service` or, on Move only, current-boot
-`pluto-session-once.service` with stock `xochitl` inactive. Unit names alone are
-never process evidence. It also requires at least one non-foreground warm
-release/AOT process to remain `SIGSTOP`ped throughout sampling.
+`xochitl.service` or device-profile-gated current-boot
+`pluto-session-once.service` with stock `xochitl` inactive. The same check
+applies to every profile whose `bootDefaultEnabled` recovery gate is closed;
+unit names alone are never process evidence. It also requires at least one
+non-foreground warm release/AOT process to remain `SIGSTOP`ped throughout
+sampling.
 
 Profile telemetry is fail-closed:
 

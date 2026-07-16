@@ -25,6 +25,8 @@ FOREGROUND_READY_FILE=
 FOREGROUND_HEALTH_FILE=
 FOREGROUND_HEALTH_SEQ=
 FOREGROUND_HEALTH_MONO=
+FOREGROUND_INSPECT_PID=
+FOREGROUND_INSPECT_PID_RECEIPT_GONE=0
 
 log() { printf '[pluto-once %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -170,6 +172,12 @@ process_start_ticks() {
   printf '%s\n' "$1"
 }
 
+foreground_process_live() {
+  is_uint "$1" && [ "$1" -gt 1 ] &&
+    kill -0 "$1" 2>/dev/null &&
+    [ -d "$PROC_ROOT/$1" ] && [ ! -L "$PROC_ROOT/$1" ]
+}
+
 configure_health_gate() {
   if [ "${PLUTO_TESTING:-0}" = 1 ]; then
     HEALTH_GATE_ATTEMPTS="${PLUTO_TEST_ONCE_HEALTH_ATTEMPTS:-45}"
@@ -178,6 +186,8 @@ configure_health_gate() {
   elif [ -n "${PLUTO_TEST_ONCE_HEALTH_ATTEMPTS:-}" ] ||
        [ -n "${PLUTO_TEST_ONCE_HEALTH_POLL_SECONDS:-}" ] ||
        [ -n "${PLUTO_TEST_ONCE_PROC_ROOT:-}" ] ||
+       [ -n "${PLUTO_TEST_ONCE_AFTER_PID_PATH_CHECK:-}" ] ||
+       [ -n "${PLUTO_TEST_ONCE_AFTER_FOREGROUND_INSPECT:-}" ] ||
        [ -n "${PLUTO_TEST_ONCE_BEFORE_FINAL_FENCE:-}" ]; then
     die "transient health-gate test seams are forbidden outside test mode"
   fi
@@ -205,12 +215,26 @@ foreground_malformed() {
 
 inspect_foreground() {
   HEALTH_GATE_ERROR=
+  FOREGROUND_INSPECT_PID=
+  FOREGROUND_INSPECT_PID_RECEIPT_GONE=0
   pid_file="$RUN_DIR/embedder.pid"
   if [ ! -e "$pid_file" ] && [ ! -L "$pid_file" ]; then
     foreground_pending "foreground PID receipt is not published"
     return $?
   fi
+  if [ "${PLUTO_TESTING:-0}" = 1 ] &&
+     [ -n "${PLUTO_TEST_ONCE_AFTER_PID_PATH_CHECK:-}" ]; then
+    "$PLUTO_TEST_ONCE_AFTER_PID_PATH_CHECK" "$pid_file" || {
+      foreground_malformed "foreground PID path-check test hook failed"
+      return $?
+    }
+  fi
   pid=$(one_line "$pid_file") || {
+    if [ ! -e "$pid_file" ] && [ ! -L "$pid_file" ]; then
+      FOREGROUND_INSPECT_PID_RECEIPT_GONE=1
+      foreground_malformed "foreground PID receipt disappeared during inspection"
+      return $?
+    fi
     foreground_malformed "foreground PID receipt is malformed"
     return $?
   }
@@ -219,6 +243,7 @@ inspect_foreground() {
     return $?
     ;;
   esac
+  FOREGROUND_INSPECT_PID=$pid
   kill -0 "$pid" 2>/dev/null || {
     foreground_malformed "foreground process is not live"
     return $?
@@ -516,6 +541,14 @@ wait_for_healthy_foreground() {
     }
     inspect_rc=0
     inspect_foreground || inspect_rc=$?
+    if [ "${PLUTO_TESTING:-0}" = 1 ] &&
+       [ -n "${PLUTO_TEST_ONCE_AFTER_FOREGROUND_INSPECT:-}" ]; then
+      "$PLUTO_TEST_ONCE_AFTER_FOREGROUND_INSPECT" \
+        "$inspect_rc" "$RUN_DIR/embedder.pid" || {
+        HEALTH_GATE_ERROR="foreground post-inspection test hook failed"
+        return 1
+      }
+    fi
     if [ "$inspect_rc" -eq 0 ]; then
       if [ -z "$observed_pid" ]; then
         observed_pid=$FOREGROUND_PID
@@ -543,8 +576,35 @@ wait_for_healthy_foreground() {
         HEALTH_GATE_ERROR="foreground health sequence or monotonic clock regressed"
         return 1
       fi
-    elif [ "$inspect_rc" -eq 2 ]; then
+    elif [ "$inspect_rc" -eq 1 ] && [ -n "$observed_pid" ]; then
+      # Pending publication is valid only until the first complete identity
+      # has been accepted. Once latched, even a whole-poll receipt gap is an
+      # identity discontinuity; a later reappearance of the same PID cannot
+      # preserve evidence across that unobserved interval.
+      HEALTH_GATE_ERROR="foreground receipt disappeared after identity was latched"
       return 1
+    elif [ "$inspect_rc" -eq 2 ]; then
+      # The common supervisor owns a bounded foreground retry loop. Before
+      # this gate has accepted even one complete process/receipt identity, a
+      # candidate may legitimately exit and its PID receipt may be retired
+      # before that loop publishes the replacement. Keep only those genuine
+      # gaps pending. A surviving malformed receipt/process remains fatal, as
+      # does any disappearance or identity change after the first valid
+      # observation has been latched above.
+      retryable_pre_ready=0
+      if [ -z "$observed_pid" ]; then
+        if [ "$FOREGROUND_INSPECT_PID_RECEIPT_GONE" -eq 1 ]; then
+          retryable_pre_ready=1
+        elif [ -n "$FOREGROUND_INSPECT_PID" ] &&
+             ! foreground_process_live "$FOREGROUND_INSPECT_PID"; then
+          retryable_pre_ready=1
+        fi
+      fi
+      if [ "$retryable_pre_ready" -eq 1 ]; then
+        HEALTH_GATE_ERROR="pre-ready foreground changed before health validation"
+      else
+        return 1
+      fi
     fi
     attempt=$((attempt + 1))
     [ "$attempt" -ge "$HEALTH_GATE_ATTEMPTS" ] ||

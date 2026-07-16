@@ -159,6 +159,18 @@ esac
 EOF
 chmod 0755 "$TMP/bin/mv"
 
+cat > "$TMP/bin/journalctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == *'-o cat'* && "$*" == *'--no-pager'* ]]
+while IFS= read -r epoch; do
+  printf '[pluto-session 02:03:04] suspend-wake-receipt rtc=rtc0 since_epoch=%s\n' \
+    "$epoch"
+  printf '[pluto-session 02:03:04] suspend target completed after wake\n'
+done < "$STATE_DIR/wake-receipts"
+EOF
+chmod 0755 "$TMP/bin/journalctl"
+
 cat > "$TMP/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -194,8 +206,95 @@ frontlight_snapshot=$frontlight_snapshot
 standby_requests=$standby_requests
 STATE
 }
+complete_suspend() {
+  suspended=0
+  case "$FIXTURE_MODE" in
+    normal)
+      pending_progress=1
+      ;;
+    cold)
+      home_pid=$((home_pid + 1))
+      home_start=$((home_start + 1))
+      pid=$home_pid
+      seq=$((seq + 1))
+      mono=$((mono + 1000))
+      home_seq=$seq
+      home_mono=$mono
+      ;;
+    reused)
+      home_start=$((home_start + 1))
+      seq=$((seq + 1))
+      mono=$((mono + 1000))
+      home_seq=$seq
+      home_mono=$mono
+      ;;
+    relaunch)
+      home_launch=home-relaunch
+      seq=$((seq + 1))
+      mono=$((mono + 1000))
+      home_seq=$seq
+      home_mono=$mono
+      ;;
+    stale) ;;
+    *) exit 64 ;;
+  esac
+  save
+}
+complete_fixture_wake() {
+  accepted_alarm=$(cat "$STATE_DIR/rtc0/wakealarm") || exit 66
+  [[ "$accepted_alarm" =~ ^[0-9]+$ ]] || exit 66
+  case "${WAKE_FIXTURE_MODE:-rtc}" in
+    rtc | rtc-reachable)
+      printf '%s\n' "$accepted_alarm" >> "$STATE_DIR/wake-receipts"
+      wakes=$((wakes + 1))
+      printf '%s\n' "$accepted_alarm" > "$STATE_DIR/rtc0/since_epoch"
+      : > "$STATE_DIR/rtc0/wakealarm"
+      ;;
+    early-delayed)
+      ((accepted_alarm >= 30)) || exit 66
+      printf '%s\n' "$((accepted_alarm - 30))" >> \
+        "$STATE_DIR/wake-receipts"
+      wakes=$((wakes + 1))
+      # SSH observation is deliberately later than the deadline. Only the
+      # supervisor's immutable wake receipt can still prove the early wake.
+      printf '%s\n' "$((accepted_alarm + 30))" > \
+        "$STATE_DIR/rtc0/since_epoch"
+      : > "$STATE_DIR/rtc0/wakealarm"
+      ;;
+    late-delayed)
+      printf '%s\n' "$((accepted_alarm + 30))" >> \
+        "$STATE_DIR/wake-receipts"
+      wakes=$((wakes + 1))
+      printf '%s\n' "$((accepted_alarm + 60))" > \
+        "$STATE_DIR/rtc0/since_epoch"
+      : > "$STATE_DIR/rtc0/wakealarm"
+      ;;
+    malformed)
+      printf 'not-an-epoch\n' >> "$STATE_DIR/wake-receipts"
+      wakes=$((wakes + 1))
+      printf '%s\n' "$accepted_alarm" > "$STATE_DIR/rtc0/since_epoch"
+      : > "$STATE_DIR/rtc0/wakealarm"
+      ;;
+    missing)
+      printf '%s\n' "$accepted_alarm" > "$STATE_DIR/rtc0/since_epoch"
+      : > "$STATE_DIR/rtc0/wakealarm"
+      ;;
+    *) exit 64 ;;
+  esac
+  complete_suspend
+}
+verify_receipt_query() {
+  [[ "$command" == *' suspend-wake-receipt '* ]] || exit 66
+  [[ "$command" != *'suspend target completed after wake'* ]] || exit 66
+}
 case "$command" in
   *'proc_start_ticks()'*)
+    verify_receipt_query
+    receipt_count=$(wc -l < "$STATE_DIR/wake-receipts" | tr -d ' ')
+    valid_receipt_count=$(grep -Ec '^[0-9]+$' \
+      "$STATE_DIR/wake-receipts" || true)
+    [[ "$receipt_count" == "$wakes" &&
+      "$valid_receipt_count" == "$receipt_count" ]] || exit 90
     if [[ "$crashed" == 1 ]]; then
       seq=$((seq + 1))
       mono=$((mono + 1000))
@@ -258,6 +357,16 @@ case "$command" in
     ink_mono=$mono
     save
     ;;
+  *'probe_kind=release-lifecycle-suspend-progress'*)
+    if [[ "$suspended" == 1 && "${WAKE_FIXTURE_MODE:-rtc}" != never ]]; then
+      complete_fixture_wake
+      case "${WAKE_FIXTURE_MODE:-rtc}" in
+        rtc | early-delayed | late-delayed | malformed | missing) exit 1 ;;
+      esac
+    fi
+    verify_receipt_query
+    /bin/sh -c "$command"
+    ;;
   *'wakealarm'*)
     relative_write="printf '+%s\\n' '60' > \"\$wakealarm\""
     clear_write="printf '0\\n' > \"\$wakealarm\""
@@ -310,14 +419,20 @@ fi'
     case "${RTC_FIXTURE_MODE:-normal}" in
       normal)
         rewritten=${rewritten/"$clear_write"/": > \"\$wakealarm\""}
-        accepted_alarm=100060
+        rtc_base=$(cat "$STATE_DIR/rtc0/since_epoch") || exit 66
+        [[ "$rtc_base" =~ ^[0-9]+$ ]] || exit 66
+        accepted_alarm=$((rtc_base + 60))
         ;;
       expired)
         rewritten=${rewritten/"$clear_write"/": > \"\$wakealarm\""}
-        accepted_alarm=99999
+        rtc_base=$(cat "$STATE_DIR/rtc0/since_epoch") || exit 66
+        [[ "$rtc_base" =~ ^[0-9]+$ && "$rtc_base" -gt 0 ]] || exit 66
+        accepted_alarm=$((rtc_base - 1))
         ;;
       uncleared)
-        accepted_alarm=100060
+        rtc_base=$(cat "$STATE_DIR/rtc0/since_epoch") || exit 66
+        [[ "$rtc_base" =~ ^[0-9]+$ ]] || exit 66
+        accepted_alarm=$((rtc_base + 60))
         ;;
       *) exit 64 ;;
     esac
@@ -353,43 +468,6 @@ fi'
     suspended=1
     save
     printf '%s\n' "$receipt"
-    ;;
-  true)
-    if [[ "$suspended" == 1 ]]; then
-      suspended=0
-      wakes=$((wakes + 1))
-      case "$FIXTURE_MODE" in
-        normal)
-          pending_progress=1
-          ;;
-        cold)
-          home_pid=$((home_pid + 1))
-          home_start=$((home_start + 1))
-          pid=$home_pid
-          seq=$((seq + 1))
-          mono=$((mono + 1000))
-          home_seq=$seq
-          home_mono=$mono
-          ;;
-        reused)
-          home_start=$((home_start + 1))
-          seq=$((seq + 1))
-          mono=$((mono + 1000))
-          home_seq=$seq
-          home_mono=$mono
-          ;;
-        relaunch)
-          home_launch=home-relaunch
-          seq=$((seq + 1))
-          mono=$((mono + 1000))
-          home_seq=$seq
-          home_mono=$mono
-          ;;
-        stale) ;;
-      esac
-      save
-      exit 1
-    fi
     ;;
   *'kill -KILL'*)
     [[ "$app" == dev.pluto.ink ]]
@@ -431,6 +509,7 @@ pluto_profile_probe() {
 EOF
   printf '100000\n' > "$dir/rtc0/since_epoch"
   : > "$dir/rtc0/wakealarm"
+  : > "$dir/wake-receipts"
   cat > "$dir/state" <<EOF
 unit=xochitl.service
 supervisor=100
@@ -465,6 +544,7 @@ run_smoke() {
   STATE_DIR="$dir" FIXTURE_MODE="$mode" PATH="$TMP/bin:$PATH" \
   PNG_FIXTURE_DIR="$TMP/png" \
   RTC_FIXTURE_MODE="${RTC_FIXTURE_MODE:-normal}" \
+  WAKE_FIXTURE_MODE="${WAKE_FIXTURE_MODE:-rtc}" \
   PUBLICATION_FIXTURE_MODE="${PUBLICATION_FIXTURE_MODE:-normal}" \
   SLEEP_LOG="${SLEEP_LOG:-}" \
   PLUTO_TEST_NO_SLEEP="${PLUTO_TEST_NO_SLEEP:-0}" \
@@ -497,6 +577,10 @@ grep -q 'PASS cycles=1 crash_test=1' "$TMP/pass.out" ||
 grep -Eq \
   'requested cleared=1 rtc_now=[0-9]+ system_now=[0-9]+ clock_delta=-?[0-9]+ accepted=[0-9]+ arm_margin=60 publish_rtc=[0-9]+ publish_margin=60 frontlight=none' \
   "$TMP/pass.out" || fail 'RTC clock, accepted-alarm, and margin evidence was not emitted'
+grep -Eq \
+  'PASS cycle=1 .* wake_epoch=100060 accepted=100060 transport_down_observed=1' \
+  "$TMP/pass.out" ||
+  fail 'exact wake receipt and observed transport loss were not retained as evidence'
 . "$TMP/pass/state"
 [[ "$frontlight_snapshot" == none && "$standby_requests" == 1 &&
   "$(tr '\n' ',' < "$TMP/pass/publish-order")" == 'standby,' &&
@@ -577,6 +661,78 @@ SLEEP_LOG="$TMP/dwell-sleeps" PLUTO_TEST_NO_SLEEP=1 ACCEPTANCE_CYCLES=2 \
   fail 'two-cycle lifecycle dwell fixture did not pass'
 [[ "$(grep -c '^3$' "$TMP/dwell-sleeps")" == 1 ]] ||
   fail 'multi-cycle lifecycle flow did not dwell once between two wakes'
+
+reset_state "$TMP/rtc-reachable"
+WAKE_FIXTURE_MODE=rtc-reachable PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/rtc-reachable" > "$TMP/rtc-reachable.out" ||
+  fail 'on-time RTC wake failed when slow SSH never observed transport loss'
+grep -Eq \
+  'PASS cycle=1 .* wake_epoch=100060 accepted=100060 transport_down_observed=0' \
+  "$TMP/rtc-reachable.out" ||
+  fail 'reachable on-time RTC wake omitted its exact receipt evidence'
+
+reset_state "$TMP/early-delayed"
+if WAKE_FIXTURE_MODE=early-delayed PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/early-delayed" >/dev/null \
+    2>"$TMP/early-delayed.err"; then
+  fail 'early external wake passed after delayed SSH observation'
+fi
+grep -q \
+  'completed suspend early before the armed RTC deadline (wake_epoch=100030 accepted=100060 tolerance=2 wake_receipts=1)' \
+  "$TMP/early-delayed.err" ||
+  fail 'delayed observation did not retain the supervisor early-wake epoch'
+[[ "$(cat "$TMP/early-delayed/rtc0/since_epoch")" == 100090 ]] ||
+  fail 'early-wake fixture did not delay observation past the alarm epoch'
+
+reset_state "$TMP/late-delayed"
+if WAKE_FIXTURE_MODE=late-delayed PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/late-delayed" >/dev/null \
+    2>"$TMP/late-delayed.err"; then
+  fail 'materially late wake passed after delayed SSH observation'
+fi
+grep -q \
+  'completed suspend late after the armed RTC deadline (wake_epoch=100090 accepted=100060 tolerance=2 wake_receipts=1)' \
+  "$TMP/late-delayed.err" ||
+  fail 'delayed observation did not retain the supervisor late-wake epoch'
+[[ "$(cat "$TMP/late-delayed/rtc0/since_epoch")" == 100120 ]] ||
+  fail 'late-wake fixture did not delay observation beyond its wake receipt'
+
+reset_state "$TMP/malformed-wake-receipt"
+if WAKE_FIXTURE_MODE=malformed PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/malformed-wake-receipt" >/dev/null \
+    2>"$TMP/malformed-wake-receipt.err"; then
+  fail 'malformed supervisor wake epoch passed lifecycle acceptance'
+fi
+grep -q 'returned malformed post-wake progress evidence' \
+  "$TMP/malformed-wake-receipt.err" ||
+  fail 'malformed supervisor wake epoch did not fail closed'
+
+reset_state "$TMP/missing-wake-receipt"
+if WAKE_FIXTURE_MODE=missing PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/missing-wake-receipt" >/dev/null \
+    2>"$TMP/missing-wake-receipt.err"; then
+  fail 'missing supervisor wake receipt passed lifecycle acceptance'
+fi
+grep -q 'did not publish its completed suspend receipt after transport loss' \
+  "$TMP/missing-wake-receipt.err" ||
+  fail 'missing supervisor wake receipt did not fail closed'
+
+reset_state "$TMP/never-suspended"
+if WAKE_FIXTURE_MODE=never PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/never-suspended" >/dev/null \
+    2>"$TMP/never-suspended.err"; then
+  fail 'device with no transport loss or completed wake receipt passed'
+fi
+grep -q \
+  'never became unreachable and published no completed suspend receipt' \
+  "$TMP/never-suspended.err" ||
+  fail 'never-suspended device was confused with an early completed wake'
 
 reset_state "$TMP/expired"
 if RTC_FIXTURE_MODE=expired PLUTO_LIFECYCLE_CRASH_TEST=0 \

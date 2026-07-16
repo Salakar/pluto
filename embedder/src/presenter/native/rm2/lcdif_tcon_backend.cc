@@ -481,6 +481,9 @@ public:
       return kPlutoStatusAgain;
     }
     const PlutoStatus status = device_->open(profile);
+    if (status != kPlutoStatusOk) {
+      report_startup_failure("probe.framebuffer-open", status);
+    }
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (status == kPlutoStatusOk) {
       probed_ = true;
@@ -582,6 +585,7 @@ public:
 
     PlutoStatus status = device_->initialize();
     if (status != kPlutoStatusOk) {
+      report_startup_failure("start.framebuffer-initialize", status);
       if (!release_cpu_frequency_floor(&frequency_error)) {
         std::fprintf(stderr,
                      "lcdif_tcon: RM2 frequency guard restore failed after "
@@ -595,20 +599,24 @@ public:
     }
     for (std::uint32_t slot = 0; slot < kRm2MappedSlots; ++slot) {
       if (!fill_rm2_scan_slot(device_->slot(slot), 0)) {
-        return fail_powered_start(kPlutoStatusInternal);
+        return fail_powered_start("start.safe-idle-fill", kPlutoStatusInternal);
       }
     }
     if (device_->validate_safe_idle_scan() != kPlutoStatusOk) {
-      return fail_powered_start(kPlutoStatusDeviceLost);
+      return fail_powered_start("start.safe-idle-validate",
+                                kPlutoStatusDeviceLost);
     }
     bool handoff_pending = false;
     const PlutoStatus handoff_status =
         prepare_incoming_handoff(&handoff_pending);
     if (handoff_status != kPlutoStatusOk) {
-      return fail_powered_start(kPlutoStatusDeviceLost);
+      return fail_powered_start("start.handoff-prepare",
+                                kPlutoStatusDeviceLost);
     }
     if (!handoff_pending && cold_initialize() != kPlutoStatusOk) {
-      return fail_powered_start(kPlutoStatusDeviceLost);
+      // cold_initialize() records its precise failing substage before its
+      // mandatory safety powerdown can clear the device error.
+      return rollback_powered_start(kPlutoStatusDeviceLost);
     }
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1219,10 +1227,26 @@ private:
     cpu_frequency_release_armed_ = true;
   }
 
-  std::optional<int> read_powered_temperature(std::string *error) {
+  std::optional<int>
+  read_powered_temperature(std::string *error,
+                           bool report_cold_start_failure = false) {
     if (device_->is_blanked()) {
-      if (device_->unblank(kRm2IdleSlot) != kPlutoStatusOk ||
-          !pan_with_deadline(kRm2IdleSlot)) {
+      if (device_->unblank(kRm2IdleSlot) != kPlutoStatusOk) {
+        if (report_cold_start_failure) {
+          report_startup_failure(
+              "start.cold-initialize.powered-temperature-unblank",
+              kPlutoStatusDeviceLost);
+        }
+        (void)device_->blank_powerdown();
+        return std::nullopt;
+      }
+      if (!pan_with_deadline(kRm2IdleSlot)) {
+        if (report_cold_start_failure) {
+          report_startup_failure(
+              "start.cold-initialize.powered-temperature-safe-idle-pan",
+              kPlutoStatusDeviceLost,
+              "safe-idle pan failed or missed its deadline");
+        }
         (void)device_->blank_powerdown();
         return std::nullopt;
       }
@@ -1231,13 +1255,53 @@ private:
     // vendor kernel's SY7636A regulator path. The independent MFD attributes
     // must then agree before and after the signed temperature register read.
     if (!power_ready_reader_(error)) {
+      if (report_cold_start_failure) {
+        const std::string_view reason =
+            error != nullptr && !error->empty()
+                ? std::string_view(*error)
+                : std::string_view("panel power-ready precheck returned false");
+        report_startup_failure(
+            "start.cold-initialize.powered-temperature-power-precheck",
+            kPlutoStatusDeviceLost, reason);
+      }
       (void)device_->blank_powerdown();
       return std::nullopt;
     }
     const std::optional<int> temperature = temperature_reader_(error);
-    if (!temperature.has_value() ||
-        !waveforms_.temperature_supported(*temperature) ||
-        !power_ready_reader_(error)) {
+    if (!temperature.has_value()) {
+      if (report_cold_start_failure) {
+        const std::string_view reason =
+            error != nullptr && !error->empty()
+                ? std::string_view(*error)
+                : std::string_view(
+                      "panel temperature reader returned no value");
+        report_startup_failure("start.cold-initialize.powered-temperature-read",
+                               kPlutoStatusDeviceLost, reason);
+      }
+      (void)device_->blank_powerdown();
+      return std::nullopt;
+    }
+    if (!waveforms_.temperature_supported(*temperature)) {
+      if (report_cold_start_failure) {
+        report_startup_failure(
+            "start.cold-initialize.powered-temperature-range",
+            kPlutoStatusDeviceLost,
+            "panel temperature is outside the waveform range");
+      }
+      (void)device_->blank_powerdown();
+      return std::nullopt;
+    }
+    if (!power_ready_reader_(error)) {
+      if (report_cold_start_failure) {
+        const std::string_view reason =
+            error != nullptr && !error->empty()
+                ? std::string_view(*error)
+                : std::string_view(
+                      "panel power-ready postcheck returned false");
+        report_startup_failure(
+            "start.cold-initialize.powered-temperature-power-postcheck",
+            kPlutoStatusDeviceLost, reason);
+      }
       (void)device_->blank_powerdown();
       return std::nullopt;
     }
@@ -1251,23 +1315,43 @@ private:
       cold_levels.assign(kRm2PanelWidth * kRm2PanelHeight, 15);
       cold_mirror.assign(kRm2PanelWidth * kRm2PanelHeight, 0xffffU);
     } catch (const std::bad_alloc &) {
+      report_startup_failure("start.cold-initialize.state-allocation",
+                             kPlutoStatusDeviceLost,
+                             "cold-state allocation failed");
       return kPlutoStatusInternal;
     }
 
     std::string error;
-    const std::optional<int> temperature = read_powered_temperature(&error);
+    const std::optional<int> temperature =
+        read_powered_temperature(&error, true);
     std::vector<std::uint8_t> init_codes;
     Rm2WaveformSelection selection;
-    if (!temperature.has_value() ||
-        *temperature >= kMaximumBurstTemperatureMillidegrees ||
-        !waveforms_.select(kPlutoRefreshFast, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshUi, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshText, *temperature, &selection) ||
-        !waveforms_.select(kPlutoRefreshFull, *temperature, &selection) ||
-        !waveforms_.init_pan_codes(*temperature, &init_codes) ||
-        !run_init_clear(init_codes)) {
+    if (!temperature.has_value()) {
       (void)device_->blank_powerdown();
       return kPlutoStatusDeviceLost;
+    }
+    if (*temperature >= kMaximumBurstTemperatureMillidegrees) {
+      return fail_cold_initialize(
+          "start.cold-initialize.panel-thermal-limit",
+          "panel temperature reached the burst safety limit");
+    }
+    if (!waveforms_.select(kPlutoRefreshFast, *temperature, &selection)) {
+      return fail_cold_initialize("start.cold-initialize.fast-waveform-select");
+    }
+    if (!waveforms_.select(kPlutoRefreshUi, *temperature, &selection)) {
+      return fail_cold_initialize("start.cold-initialize.ui-waveform-select");
+    }
+    if (!waveforms_.select(kPlutoRefreshText, *temperature, &selection)) {
+      return fail_cold_initialize("start.cold-initialize.text-waveform-select");
+    }
+    if (!waveforms_.select(kPlutoRefreshFull, *temperature, &selection)) {
+      return fail_cold_initialize("start.cold-initialize.full-waveform-select");
+    }
+    if (!waveforms_.init_pan_codes(*temperature, &init_codes)) {
+      return fail_cold_initialize("start.cold-initialize.init-waveform-select");
+    }
+    if (!run_init_clear(init_codes)) {
+      return fail_cold_initialize("start.cold-initialize.init-clear");
     }
     {
       std::lock_guard<std::mutex> frame_lock(frame_mutex_);
@@ -1512,7 +1596,34 @@ private:
     return kPlutoStatusOk;
   }
 
-  PlutoStatus fail_powered_start(PlutoStatus status) {
+  void report_startup_failure(
+      std::string_view stage, PlutoStatus status,
+      std::string_view reason = std::string_view{}) const noexcept {
+    std::string_view device_error = device_->last_error();
+    if (device_error.empty()) {
+      device_error = "<none>";
+    }
+    if (reason.empty()) {
+      reason = "<none>";
+    }
+    std::fprintf(stderr,
+                 "lcdif_tcon: RM2 startup failure stage=%.*s status=%d "
+                 "mxs_lcdif_error=\"%.*s\" reason=\"%.*s\"\n",
+                 static_cast<int>(stage.size()), stage.data(),
+                 static_cast<int>(status),
+                 static_cast<int>(device_error.size()), device_error.data(),
+                 static_cast<int>(reason.size()), reason.data());
+  }
+
+  PlutoStatus
+  fail_cold_initialize(std::string_view stage,
+                       std::string_view reason = std::string_view{}) {
+    report_startup_failure(stage, kPlutoStatusDeviceLost, reason);
+    (void)device_->blank_powerdown();
+    return kPlutoStatusDeviceLost;
+  }
+
+  PlutoStatus rollback_powered_start(PlutoStatus status) {
     (void)device_->blank_powerdown();
     std::string frequency_error;
     if (!release_cpu_frequency_floor(&frequency_error)) {
@@ -1526,6 +1637,13 @@ private:
     device_->close();
     waveforms_.clear();
     return status;
+  }
+
+  PlutoStatus fail_powered_start(std::string_view stage, PlutoStatus status) {
+    // Record the device error before blanking: a successful fail-safe powerdown
+    // clears MxsLcdifDevice::last_error().
+    report_startup_failure(stage, status);
+    return rollback_powered_start(status);
   }
 
   bool run_init_clear(const std::vector<std::uint8_t> &codes) {

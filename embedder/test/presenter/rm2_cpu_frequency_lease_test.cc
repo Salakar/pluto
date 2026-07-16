@@ -335,6 +335,26 @@ TEST(Rm2CpuFrequencyBurstLease,
 }
 
 TEST(Rm2CpuFrequencyBurstLease,
+     LastBoundedTemperatureAttemptCanAcquireBelowCutoff) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  auto paths = fixture.paths();
+  TransientTemperatureReader reader{
+      .remaining_eagain = kRm2CpuTemperatureReadAttempts - 1U,
+  };
+  paths.temperature_read_for_testing = &TransientTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kAcquired)
+      << error;
+  EXPECT_EQ(reader.eagain_returns, kRm2CpuTemperatureReadAttempts - 1U);
+  EXPECT_TRUE(lease.active());
+  EXPECT_TRUE(lease.release(&error)) << error;
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
      ExhaustedTemperatureEagainRetriesBackpressureWithoutBoosting) {
   TemporaryPolicy fixture;
   ASSERT_TRUE(fixture.valid());

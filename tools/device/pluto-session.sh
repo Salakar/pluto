@@ -79,6 +79,13 @@ BOOT_CONFIRM_DISPATCHER="${PLUTO_BOOT_CONFIRM_DISPATCHER:-/usr/libexec/pluto-boo
 BACKLIGHT_BRIGHTNESS="${PLUTO_BACKLIGHT_BRIGHTNESS:-}"
 VPDD_TIMEOUT_FILE="${PLUTO_VPDD_TIMEOUT_FILE:-}"
 SUSPEND_COMMAND="${PLUTO_SUSPEND_COMMAND:-}"
+# The production wake receipt is always sampled from rtc0. Contract tests may
+# redirect only the read itself into an isolated fixture.
+RTC_SINCE_EPOCH_FILE="/sys/class/rtc/rtc0/since_epoch"
+if [ "${PLUTO_TESTING:-0}" = 1 ] &&
+   [ -n "${PLUTO_TEST_RTC_SINCE_EPOCH_FILE:-}" ]; then
+  RTC_SINCE_EPOCH_FILE="$PLUTO_TEST_RTC_SINCE_EPOCH_FILE"
+fi
 WAVEFORM="${PLUTO_WAVEFORM:-}"
 WAVEFORM_SHA256=""
 WAVEFORM_PANEL_SIGNATURE=""
@@ -838,7 +845,21 @@ suspend_after_standby_exit() {
   sh -c "$SUSPEND_COMMAND"
   suspend_rc=$?
   if [ "$suspend_rc" -eq 0 ]; then
-    log "suspend target completed after wake"
+    # Capture rtc0 before any restoration or relaunch work. The single-line
+    # receipt lets hardware acceptance bind this exact suspend to its armed
+    # alarm even when SSH does not reconnect until much later.
+    wake_epoch="$(cat "$RTC_SINCE_EPOCH_FILE" 2>/dev/null || true)"
+    case "$wake_epoch" in
+      ''|*[!0-9]*)
+        log "suspend-wake-receipt rtc=rtc0 since_epoch=invalid"
+        log "suspend target completed after wake without a valid rtc0 epoch"
+        suspend_rc=75
+        ;;
+      *)
+        log "suspend-wake-receipt rtc=rtc0 since_epoch=$wake_epoch"
+        log "suspend target completed after wake"
+        ;;
+    esac
   else
     log "suspend target failed rc=$suspend_rc"
   fi

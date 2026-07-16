@@ -19,6 +19,7 @@ repository.
 | [Samuel Holland's DRM EPD helper RFC](https://lists.infradead.org/pipermail/linux-rockchip/2022-April/031024.html) | Three-byte little-endian offsets, additive pointer checksums, header/temperature table shape, 5-bit packed LUT dimensions, and the two-state RLE grammar | Explicit `GPL-2.0 OR MIT`; consulted under the MIT option, with an independent bounded C++ implementation |
 | [`yobert/swtcon`](https://github.com/yobert/swtcon) and its [WBF parser](https://raw.githubusercontent.com/yobert/swtcon/main/src/wbf.rs) | Independent RM2-oriented cross-check of the two-level `(mode, temperature)` tables, marker-controlled RLE, temperature intervals, and phase sizing | MIT; behavioral/API cross-check only, no source copied |
 | [reMarkable's public Linux `rm1xx_5.4.70_v1.6.x` branch](https://github.com/reMarkable/linux/tree/rm1xx_5.4.70_v1.6.x) | The scanout boundary uses the public framebuffer ABI and does not depend on private stock-UI or QSG symbols | GPL kernel source used only to define the external kernel ABI. The public branch is v1.6.2-era while the observed device reports v1.6.3, so it is not claimed byte-exact |
+| [The same branch's i.MX thermal driver](https://github.com/reMarkable/linux/blob/rm1xx_5.4.70_v1.6.x/drivers/thermal/imx_thermal.c) | The driver programs an approximately 10 Hz measurement interval, waits only 20--50 us when `FINISHED` is clear, and returns `-EAGAIN` if the measurement still has not completed | GPL kernel source used only to explain the external sysfs behavior. Exact-tablet sampling independently confirmed the intermittent `EAGAIN` contract; no kernel implementation text is copied |
 
 GPL-only `waved`, `rM2-stuff`, and stock Xochitl disassembly are not source
 inputs for this decoder. They may inform later black-box behavioral experiments
@@ -157,8 +158,13 @@ profile-gated frequency lease rather than changing the device's boot policy:
   `/run/pluto` before the minimum changes, while a mode-0600 `flock` remains
   exclusively held for the burst;
 - acquisition and every 128 soak phases read the exact
-  `imx_thermal_zone`; unavailable temperature or a value at/above 45 C fails
-  closed before further work;
+  `imx_thermal_zone`. A kernel `EAGAIN` reopens the same exact attribute at
+  1 ms intervals for at most 128 fresh attempts. The 127 ms of explicit retry
+  spacing spans more than one nominal 10 Hz period, and the fixed attempt count
+  also bounds sysfs work. Exhaustion backpressures with no retained frequency
+  floor or panel work; malformed data, wrong sensor identity, and non-`EAGAIN`
+  errors remain immediate faults. A valid value at/above 45 C remains a thermal
+  hold before further work;
 - release restores and verifies the original minimum, maximum, governor, and
   CPU binding before retiring the receipt. Bounded readback retries cover the
   RM2 sysfs attribute's observed settling edge without accepting a different
@@ -174,6 +180,18 @@ receipt, exclusively held lock, and 1.2 GHz floor in place; the companion
 restorer then recovered the exact 792,000/1,200,000 kHz `ondemand` policy and
 retired the receipt. The final 10,000-phase soak peaked at 37 C, restored that
 same policy, left the stock UI active, and did not change the device boot ID.
+
+The temperature retry constants were selected on the exact RM2. The original
+11-attempt, 10 ms grid exhausted during a real standby-child start and the
+bounded supervisor correctly restored stock. Independent sampling then showed
+that valid readings occur in narrow, clustered windows rather than reliably on
+that grid. The retained 128-attempt, 1 ms scheme completed 1,000/1,000 bounded
+target-native production trials without exhaustion or another fault. Monotonic
+read-window latency measured 6.062 ms p50, 13.114 ms p99, and 19.137 ms maximum;
+temperature remained 35--36 C, allocation and RSS deltas were zero, policy0 was
+unchanged, and Xochitl retained the same PID. This changes only how Pluto waits
+for a fresh valid kernel sample: it does not cache temperature, relax the 45 C
+limit, or permit an unverified frequency raise.
 
 The ignored raw evidence is under `analysis/native-cutover/rm2/perf/`. It
 includes binary hashes, the complete-slot reference checksum, resource

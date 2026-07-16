@@ -25,6 +25,11 @@ CYCLES="${PLUTO_LIFECYCLE_CYCLES:-20}"
 # Keep more than twice that envelope between marker publication and RTC wake.
 MIN_WAKE_SECONDS=60
 WAKE_SECONDS="${PLUTO_LIFECYCLE_WAKE_SECONDS:-$MIN_WAKE_SECONDS}"
+# rtc0 and the supervisor receipt use whole seconds. Permit one tick at the
+# alarm boundary plus one tick while the blocking suspend target unwinds; the
+# receipt is captured before any UI restoration, so a wider window would hide
+# a materially early external wake or a materially late alarm delivery.
+RTC_WAKE_TOLERANCE_SECONDS=2
 POST_WAKE_DWELL_SECONDS="${PLUTO_LIFECYCLE_POST_WAKE_DWELL_SECONDS:-3}"
 DOWN_TIMEOUT="${PLUTO_LIFECYCLE_DOWN_TIMEOUT:-45}"
 UP_TIMEOUT="${PLUTO_LIFECYCLE_UP_TIMEOUT:-120}"
@@ -303,9 +308,27 @@ health_mono=${3#mono_ms=}
 case "$health_seq:$health_mono" in
   "":*|*:""|*[!0-9:]*) exit 89 ;;
 esac
-wake_count=$(journalctl -u "$selected_unit" -b -o cat --no-pager 2>/dev/null |
-  grep -c "suspend target completed after wake" || true)
-case "$wake_count" in ""|*[!0-9]*) exit 90 ;; esac
+wake_journal=$(journalctl -u "$selected_unit" -b -o cat --no-pager \
+  2>/dev/null) || exit 90
+wake_lines=$(printf "%s\n" "$wake_journal" |
+  grep " suspend-wake-receipt " || true)
+if [ -n "$wake_lines" ]; then
+  wake_count=$(printf "%s\n" "$wake_lines" | wc -l | tr -d " ")
+  wake_epochs=$(printf "%s\n" "$wake_lines" | sed -n \
+    "s/^.*] suspend-wake-receipt rtc=rtc0 since_epoch=\\([0-9][0-9]\\{0,9\\}\\)$/\\1/p")
+  if [ -n "$wake_epochs" ]; then
+    wake_valid_count=$(printf "%s\n" "$wake_epochs" | wc -l | tr -d " ")
+  else
+    wake_valid_count=0
+  fi
+else
+  wake_count=0
+  wake_valid_count=0
+fi
+case "$wake_count:$wake_valid_count" in
+  *[!0-9:]*|:*) exit 90 ;;
+esac
+[ "$wake_count" -eq "$wake_valid_count" ] || exit 90
 warm_ink_pid=none
 warm_ink_start_ticks=none
 warm_ink_state=none
@@ -429,11 +452,136 @@ wait_matching() {
   return 1
 }
 
+suspend_progress() {
+  local unit="$1" receipt_index="$2"
+  case "$unit" in
+    xochitl.service | pluto-session-once.service) ;;
+    *) return 1 ;;
+  esac
+  [[ "$receipt_index" =~ ^[1-9][0-9]*$ ]] || return 1
+  remote "probe_kind=release-lifecycle-suspend-progress
+receipt_index=$receipt_index
+wake_journal=\$(journalctl -u '$unit' -b -o cat --no-pager \
+  2>/dev/null) || {
+  printf 'reachable|malformed|malformed\\n'
+  exit 0
+}
+wake_lines=\$(printf '%s\\n' \"\$wake_journal\" |
+  grep ' suspend-wake-receipt ' || true)
+if [ -n \"\$wake_lines\" ]; then
+  wake_count=\$(printf '%s\\n' \"\$wake_lines\" | wc -l | tr -d ' ')
+  wake_epochs=\$(printf '%s\\n' \"\$wake_lines\" | sed -n \
+    's/^.*] suspend-wake-receipt rtc=rtc0 since_epoch=\\([0-9][0-9]\\{0,9\\}\\)$/\\1/p')
+  if [ -n \"\$wake_epochs\" ]; then
+    wake_valid_count=\$(printf '%s\\n' \"\$wake_epochs\" | wc -l | tr -d ' ')
+  else
+    wake_valid_count=0
+  fi
+else
+  wake_count=0
+  wake_valid_count=0
+  wake_epochs=''
+fi
+case \"\$wake_count:\$wake_valid_count\" in
+  *[!0-9:]*|:*)
+    printf 'reachable|malformed|malformed\\n'
+    exit 0
+    ;;
+esac
+if [ \"\$wake_count\" -ne \"\$wake_valid_count\" ]; then
+  printf 'reachable|malformed|malformed\\n'
+  exit 0
+fi
+wake_epoch=none
+if [ \"\$wake_count\" -ge \"\$receipt_index\" ]; then
+  wake_epoch=\$(printf '%s\\n' \"\$wake_epochs\" |
+    sed -n \"\${receipt_index}p\")
+  case \"\$wake_epoch\" in ''|*[!0-9]*) wake_epoch=malformed ;; esac
+fi
+printf 'reachable|%s|%s\\n' \"\$wake_count\" \"\$wake_epoch\"
+exit 0"
+}
+
+parse_suspend_progress() {
+  local progress="$1"
+  IFS='|' read -r PROGRESS_REACHABLE PROGRESS_WAKE_COUNT \
+    PROGRESS_WAKE_EPOCH PROGRESS_EXTRA <<< "$progress"
+  [[ "$PROGRESS_REACHABLE" == reachable &&
+    "$PROGRESS_WAKE_COUNT" =~ ^[0-9]+$ &&
+    ("$PROGRESS_WAKE_EPOCH" == none ||
+      "$PROGRESS_WAKE_EPOCH" =~ ^[0-9]+$) &&
+    -z "$PROGRESS_EXTRA" ]]
+}
+
+wake_receipt_timing() {
+  local wake_epoch="$1" accepted_alarm="$2"
+  local wake_value=$((10#$wake_epoch))
+  local accepted_value=$((10#$accepted_alarm))
+  if ((wake_value + RTC_WAKE_TOLERANCE_SECONDS < accepted_value)); then
+    return 2
+  fi
+  if ((wake_value > accepted_value + RTC_WAKE_TOLERANCE_SECONDS)); then
+    return 5
+  fi
+  return 0
+}
+
+WAIT_WAKE_COUNT=none
+WAIT_WAKE_EPOCH=none
+WAIT_DOWN_OBSERVED_UNREACHABLE=0
+
 wait_down() {
-  local elapsed=0
+  local unit="$1" expected_wake="$2" accepted_alarm="$3"
+  local elapsed=0 progress=""
+  case "$unit" in
+    xochitl.service | pluto-session-once.service) ;;
+    *) return 3 ;;
+  esac
+  WAIT_WAKE_COUNT=none
+  WAIT_WAKE_EPOCH=none
+  WAIT_DOWN_OBSERVED_UNREACHABLE=0
   while ((elapsed < DOWN_TIMEOUT)); do
-    if ! remote 'true' >/dev/null 2>&1; then
+    if ! progress="$(suspend_progress "$unit" "$expected_wake" 2>/dev/null)"; then
+      WAIT_DOWN_OBSERVED_UNREACHABLE=1
       return 0
+    fi
+    parse_suspend_progress "$progress" || return 3
+    if ((PROGRESS_WAKE_COUNT > expected_wake)); then
+      WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
+      WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
+      return 4
+    fi
+    if ((PROGRESS_WAKE_COUNT == expected_wake)); then
+      WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
+      WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
+      [[ "$PROGRESS_WAKE_EPOCH" =~ ^[0-9]+$ ]] || return 3
+      wake_receipt_timing "$PROGRESS_WAKE_EPOCH" "$accepted_alarm"
+      return $?
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+wait_wake_receipt() {
+  local timeout="$1" unit="$2" expected_wake="$3" accepted_alarm="$4"
+  local elapsed=0 progress=""
+  while ((elapsed < timeout)); do
+    if progress="$(suspend_progress "$unit" "$expected_wake" 2>/dev/null)"; then
+      parse_suspend_progress "$progress" || return 3
+      if ((PROGRESS_WAKE_COUNT > expected_wake)); then
+        WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
+        WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
+        return 4
+      fi
+      if ((PROGRESS_WAKE_COUNT == expected_wake)); then
+        WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
+        WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
+        [[ "$PROGRESS_WAKE_EPOCH" =~ ^[0-9]+$ ]] || return 3
+        wake_receipt_timing "$PROGRESS_WAKE_EPOCH" "$accepted_alarm"
+        return $?
+      fi
     fi
     sleep 1
     elapsed=$((elapsed + 1))
@@ -655,11 +803,77 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
   }
   echo "release lifecycle smoke: cycle=$cycle requested $receipt"
 
-  wait_down || {
-    echo "release lifecycle smoke: cycle $cycle never entered an unreachable suspended state" >&2
-    exit 78
-  }
   expected_wake=$((before_wake_count + 1))
+  accepted_alarm="$(printf '%s\n' "$receipt" | tr ' ' '\n' |
+    sed -n 's/^accepted=//p')"
+  [[ "$accepted_alarm" =~ ^[0-9]+$ &&
+    "${#accepted_alarm}" -le 10 ]] || {
+    echo "release lifecycle smoke: cycle $cycle returned an invalid accepted RTC epoch" >&2
+    exit 77
+  }
+
+  wait_down_status=0
+  wait_down "$before_unit" "$expected_wake" "$accepted_alarm" ||
+    wait_down_status=$?
+  case "$wait_down_status" in
+    0) ;;
+    1)
+      echo "release lifecycle smoke: cycle $cycle never became unreachable and published no completed suspend receipt" >&2
+      exit 78
+      ;;
+    2)
+      echo "release lifecycle smoke: cycle $cycle completed suspend early before the armed RTC deadline (wake_epoch=$WAIT_WAKE_EPOCH accepted=$accepted_alarm tolerance=$RTC_WAKE_TOLERANCE_SECONDS wake_receipts=$WAIT_WAKE_COUNT)" >&2
+      exit 78
+      ;;
+    3)
+      echo "release lifecycle smoke: cycle $cycle returned malformed suspend progress evidence" >&2
+      exit 78
+      ;;
+    4)
+      echo "release lifecycle smoke: cycle $cycle published too many completed suspend receipts (expected=$expected_wake actual=$WAIT_WAKE_COUNT)" >&2
+      exit 78
+      ;;
+    5)
+      echo "release lifecycle smoke: cycle $cycle completed suspend late after the armed RTC deadline (wake_epoch=$WAIT_WAKE_EPOCH accepted=$accepted_alarm tolerance=$RTC_WAKE_TOLERANCE_SECONDS wake_receipts=$WAIT_WAKE_COUNT)" >&2
+      exit 78
+      ;;
+    *)
+      echo "release lifecycle smoke: cycle $cycle returned an unknown suspend wait status" >&2
+      exit 78
+      ;;
+  esac
+
+  wake_receipt_status=0
+  wait_wake_receipt "$UP_TIMEOUT" "$before_unit" "$expected_wake" \
+    "$accepted_alarm" || wake_receipt_status=$?
+  case "$wake_receipt_status" in
+    0) ;;
+    1)
+      echo "release lifecycle smoke: cycle $cycle did not publish its completed suspend receipt after transport loss" >&2
+      exit 78
+      ;;
+    2)
+      echo "release lifecycle smoke: cycle $cycle completed suspend early before the armed RTC deadline (wake_epoch=$WAIT_WAKE_EPOCH accepted=$accepted_alarm tolerance=$RTC_WAKE_TOLERANCE_SECONDS wake_receipts=$WAIT_WAKE_COUNT)" >&2
+      exit 78
+      ;;
+    3)
+      echo "release lifecycle smoke: cycle $cycle returned malformed post-wake progress evidence" >&2
+      exit 78
+      ;;
+    4)
+      echo "release lifecycle smoke: cycle $cycle published too many completed suspend receipts (expected=$expected_wake actual=$WAIT_WAKE_COUNT)" >&2
+      exit 78
+      ;;
+    5)
+      echo "release lifecycle smoke: cycle $cycle completed suspend late after the armed RTC deadline (wake_epoch=$WAIT_WAKE_EPOCH accepted=$accepted_alarm tolerance=$RTC_WAKE_TOLERANCE_SECONDS wake_receipts=$WAIT_WAKE_COUNT)" >&2
+      exit 78
+      ;;
+    *)
+      echo "release lifecycle smoke: cycle $cycle returned an unknown wake wait status" >&2
+      exit 78
+      ;;
+  esac
+
   after="$(wait_matching "$UP_TIMEOUT" "$HOME_PID" "$LAUNCHER_APP_ID" \
     "$before_health_seq" "$before_health_mono" "$expected_wake" \
     "$INK_PID" T)" || {
@@ -695,7 +909,7 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
     echo "release lifecycle smoke: cycle $cycle lacks exactly one completed suspend receipt (before=$before_wake_count after=$STATE_WAKE_COUNT)" >&2
     exit 81
   }
-  echo "release lifecycle smoke: PASS cycle=$cycle app=$STATE_APP_ID pid=$STATE_FOREGROUND_PID health_seq=$STATE_HEALTH_SEQ wake_receipts=$STATE_WAKE_COUNT"
+  echo "release lifecycle smoke: PASS cycle=$cycle app=$STATE_APP_ID pid=$STATE_FOREGROUND_PID health_seq=$STATE_HEALTH_SEQ wake_receipts=$STATE_WAKE_COUNT wake_epoch=$WAIT_WAKE_EPOCH accepted=$accepted_alarm transport_down_observed=$WAIT_DOWN_OBSERVED_UNREACHABLE"
   stage "lifecycle-wake-$cycle"
   if ((cycle < CYCLES)); then
     sleep "$POST_WAKE_DWELL_SECONDS"

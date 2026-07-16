@@ -13,6 +13,7 @@ ACTIVE="$TMP/active"
 PROC="$TMP/proc"
 FIXTURE_PID=
 FIXTURE_UPDATER_PID=
+FIXTURE_INITIAL_PID=
 
 stop_foreground_fixture() {
   if [[ -n "$FIXTURE_UPDATER_PID" ]]; then
@@ -25,6 +26,7 @@ stop_foreground_fixture() {
     wait "$FIXTURE_PID" 2>/dev/null || true
     FIXTURE_PID=
   fi
+  FIXTURE_INITIAL_PID=
   rm -rf "$RUN" "$PROC"
   mkdir -p "$RUN" "$PROC"
 }
@@ -213,6 +215,24 @@ start_foreground_fixture() {
       ) &
       FIXTURE_UPDATER_PID=$!
       ;;
+    dead-pre-ready | pre-ready-replacement)
+      publish_fixture_health 1 100
+      # Above every supported host/device pid_max; guaranteed not to name a
+      # live process while remaining a canonical positive integer receipt.
+      FIXTURE_INITIAL_PID=2147483647
+      if [[ "$mode" == pre-ready-replacement ]]; then
+        (
+          while [[ ! -f "$ACTIVE" ]]; do sleep 0.01; done
+          sleep 0.1
+          printf '%s\n' "$FIXTURE_PID" > "$RUN/embedder.pid"
+          for sequence in 2 3 4 5 6; do
+            sleep 0.1
+            publish_fixture_health "$sequence" "$((sequence * 100))"
+          done
+        ) &
+        FIXTURE_UPDATER_PID=$!
+      fi
+      ;;
     malformed)
       printf 'pid=%s seq=broken mono_ms=100\n' "$FIXTURE_PID" > "$FIXTURE_HEALTH"
       chmod 0600 "$FIXTURE_HEALTH"
@@ -251,7 +271,7 @@ run_once() {
   PLUTO_TEST_EVENTS="$EVENTS" \
   PLUTO_TEST_ACTIVE="$ACTIVE" \
   PLUTO_TEST_RUN="$RUN" \
-  PLUTO_TEST_FOREGROUND_PID="${FIXTURE_PID:-}" \
+  PLUTO_TEST_FOREGROUND_PID="${FIXTURE_INITIAL_PID:-${FIXTURE_PID:-}}" \
   PLUTO_TESTING=1 \
   PLUTO_TEST_ONCE_PROC_ROOT="$PROC" \
   PLUTO_TEST_ONCE_HEALTH_ATTEMPTS="${PLUTO_TEST_GATE_ATTEMPTS:-20}" \
@@ -315,6 +335,54 @@ if grep -q '^cpufreq-restore$' "$EVENTS"; then
 fi
 grep -q '^start xochitl.service$' "$EVENTS" ||
   fail "stop did not request stock xochitl"
+stop_foreground_fixture
+
+# The supervisor may replace an embedder that exits before publishing any
+# complete ready/health identity. A dead pre-ready PID is pending until the
+# bounded supervisor retry publishes its replacement; it is not itself enough
+# to consume the whole release transaction.
+: > "$EVENTS"
+start_foreground_fixture pre-ready-replacement
+run_once start > "$TMP/pre-ready-replacement.out" 2>&1 || {
+  cat "$TMP/pre-ready-replacement.out" >&2
+  fail 'healthy replacement after a dead pre-ready PID was rejected'
+}
+[[ "$(cat "$RUN/embedder.pid")" == "$FIXTURE_PID" ]] ||
+  fail 'pre-ready retry did not bind the replacement foreground'
+[[ -e "$UNIT" && -e "$ACTIVE" ]] ||
+  fail 'healthy pre-ready replacement did not retain the transient session'
+run_once stop >/dev/null ||
+  fail 'pre-ready replacement session did not stop cleanly'
+stop_foreground_fixture
+
+# A vanished process is only pending, never accepted. If the bounded
+# supervisor cannot publish a healthy replacement, the fixed gate deadline
+# still tears down the transient unit and restores stock.
+: > "$EVENTS"
+start_foreground_fixture dead-pre-ready
+export PLUTO_TEST_GATE_ATTEMPTS=3
+expect_gate_rejection 'permanently dead pre-ready foreground'
+[[ "$(grep -c '^is-active --quiet pluto-session-once.service$' "$EVENTS")" == 4 ]] ||
+  fail 'dead pre-ready foreground did not remain pending for the fixed gate bound'
+unset PLUTO_TEST_GATE_ATTEMPTS
+stop_foreground_fixture
+
+# Exercise the real path-check/read gap: the receipt exists for the first
+# lstat-style check, then vanishes before one_line can securely open it. Before
+# any identity is latched this remains pending for the complete fixed bound.
+cat > "$BIN/remove-pid-after-path-check" <<'REMOVE_PID_GAP'
+#!/bin/sh
+rm -f "$1"
+REMOVE_PID_GAP
+chmod 0755 "$BIN/remove-pid-after-path-check"
+: > "$EVENTS"
+start_foreground_fixture frozen
+export PLUTO_TEST_GATE_ATTEMPTS=3
+export PLUTO_TEST_ONCE_AFTER_PID_PATH_CHECK="$BIN/remove-pid-after-path-check"
+expect_gate_rejection 'pre-ready PID receipt disappearance during inspection'
+[[ "$(grep -c '^is-active --quiet pluto-session-once.service$' "$EVENTS")" == 4 ]] ||
+  fail 'pre-ready PID receipt gap did not remain pending for the fixed gate bound'
+unset PLUTO_TEST_ONCE_AFTER_PID_PATH_CHECK PLUTO_TEST_GATE_ATTEMPTS
 stop_foreground_fixture
 
 # A failed stop may leave the old cgroup live. Its receipt must remain intact
@@ -566,6 +634,62 @@ export PLUTO_TEST_RUN_DIR="$RUN"
 export PLUTO_TEST_ONCE_BEFORE_FINAL_FENCE="$BIN/swap-foreground-pid"
 expect_gate_rejection 'foreground PID receipt replacement during inspection'
 unset PLUTO_TEST_ONCE_BEFORE_FINAL_FENCE PLUTO_TEST_RUN_DIR
+stop_foreground_fixture
+
+# Once one complete foreground identity has been observed, the same genuine
+# PID-receipt disappearance is fail-closed. The first path-check hook is a
+# no-op so inspection can latch; the second removes the receipt before read.
+cat > "$BIN/remove-pid-after-first-observation" <<'REMOVE_LATCHED_PID'
+#!/bin/sh
+count=$(cat "$PLUTO_TEST_FENCE_COUNT" 2>/dev/null || printf '0\n')
+count=$((count + 1))
+printf '%s\n' "$count" > "$PLUTO_TEST_FENCE_COUNT"
+[ "$count" -lt 2 ] || rm -f "$1"
+REMOVE_LATCHED_PID
+chmod 0755 "$BIN/remove-pid-after-first-observation"
+: > "$EVENTS"
+start_foreground_fixture success
+export PLUTO_TEST_FENCE_COUNT="$TMP/latched-fence-count"
+export PLUTO_TEST_ONCE_AFTER_PID_PATH_CHECK="$BIN/remove-pid-after-first-observation"
+rm -f "$PLUTO_TEST_FENCE_COUNT"
+expect_gate_rejection 'vanished latched foreground PID receipt'
+[[ "$(cat "$PLUTO_TEST_FENCE_COUNT")" -ge 2 ]] ||
+  fail 'latched PID receipt disappearance did not cross two inspections'
+unset PLUTO_TEST_ONCE_AFTER_PID_PATH_CHECK PLUTO_TEST_FENCE_COUNT
+stop_foreground_fixture
+
+# A whole-poll PID-receipt gap after the identity latch is also fatal, even if
+# the same receipt and live process reappear before the gate handles the
+# pending result. The post-inspection seam makes both sides of this race
+# deterministic: remove after the first complete inspection, then restore the
+# identical receipt after the second inspection has observed it missing.
+cat > "$BIN/gap-and-restore-latched-pid" <<'GAP_LATCHED_PID'
+#!/bin/sh
+inspect_rc=$1
+pid_file=$2
+count=$(cat "$PLUTO_TEST_GAP_COUNT" 2>/dev/null || printf '0\n')
+count=$((count + 1))
+printf '%s\n' "$count" > "$PLUTO_TEST_GAP_COUNT"
+case "$count:$inspect_rc" in
+  1:0) rm -f "$pid_file" ;;
+  2:1) printf '%s\n' "$PLUTO_TEST_REAPPEAR_PID" > "$pid_file" ;;
+  *) exit 1 ;;
+esac
+GAP_LATCHED_PID
+chmod 0755 "$BIN/gap-and-restore-latched-pid"
+: > "$EVENTS"
+start_foreground_fixture success
+export PLUTO_TEST_GAP_COUNT="$TMP/latched-whole-poll-gap-count"
+export PLUTO_TEST_REAPPEAR_PID="$FIXTURE_PID"
+export PLUTO_TEST_ONCE_AFTER_FOREGROUND_INSPECT="$BIN/gap-and-restore-latched-pid"
+rm -f "$PLUTO_TEST_GAP_COUNT"
+expect_gate_rejection 'reappearing latched foreground PID receipt'
+[[ "$(cat "$PLUTO_TEST_GAP_COUNT")" == 2 ]] ||
+  fail 'latched whole-poll PID gap was not rejected on its first missing inspection'
+[[ "$(cat "$RUN/embedder.pid")" == "$FIXTURE_PID" ]] ||
+  fail 'latched whole-poll PID test did not restore the identical receipt'
+unset PLUTO_TEST_ONCE_AFTER_FOREGROUND_INSPECT PLUTO_TEST_REAPPEAR_PID
+unset PLUTO_TEST_GAP_COUNT
 stop_foreground_fixture
 
 cat > "$BIN/swap-foreground-start-ticks" <<'SWAP_TICKS'

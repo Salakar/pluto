@@ -23,10 +23,14 @@ constexpr std::uint64_t kRm2MinimumFrequencyKhz = 792'000;
 constexpr std::uint64_t kRm2MaximumFrequencyKhz = 1'200'000;
 constexpr unsigned kPolicySettleAttempts = 50;
 constexpr long kPolicySettleDelayNanoseconds = 1'000'000;
-// The i.MX temperature monitor measures at 10 Hz and can return EAGAIN while
-// its FINISHED bit is clear after wake. Reopening 11 times at 10 ms intervals
-// spans one complete measurement period without accepting a cached sample.
-constexpr long kTemperatureReadRetryDelayNanoseconds = 10'000'000;
+// The reMarkable kernel's i.MX7 thermal driver measures at approximately
+// 10 Hz, waits only 20--50 us for FINISHED, and returns EAGAIN when that bit is
+// still clear. A 10 ms retry grid can repeatedly sample the same unavailable
+// phases. Reopen at 1 ms intervals instead: 128 attempts span 127 ms, more
+// than one nominal sensor period, while real-device sampling usually succeeds
+// within the first few attempts. Every success is still a fresh kernel sample;
+// no temperature is cached or accepted after the 45 C cutoff.
+constexpr long kTemperatureReadRetryDelayNanoseconds = 1'000'000;
 
 void set_error(std::string *error, std::string_view message) noexcept {
   if (error != nullptr) {

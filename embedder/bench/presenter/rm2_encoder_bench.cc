@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <new>
 #include <optional>
 #include <string>
@@ -829,6 +830,85 @@ int run_frequency_lease_probe(std::size_t iterations) {
       pluto::native::rm2::kRm2CpuReceiptPath,
       pluto::native::rm2::kRm2CpuPolicyPath);
   return allocations_before == allocations_after ? 0 : 1;
+}
+
+int run_thermal_read_probe(std::size_t iterations) {
+  Rm2CpuFrequencyBurstLease lease(production_frequency_paths());
+  std::vector<double> samples;
+  samples.reserve(iterations);
+  std::size_t successes = 0;
+  std::size_t exhausted_eagain = 0;
+  std::size_t thermal_holds = 0;
+  std::size_t other_faults = 0;
+  std::size_t samples_over_explicit_retry_bound = 0;
+  int minimum_temperature = std::numeric_limits<int>::max();
+  int maximum_temperature = std::numeric_limits<int>::min();
+  std::string first_error;
+  std::string error;
+  const std::uint64_t rss_before = resident_set_bytes();
+  const std::uint64_t allocations_before =
+      g_allocation_count.load(std::memory_order_relaxed);
+  for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+    int temperature = 0;
+    error.clear();
+    const auto begin = std::chrono::steady_clock::now();
+    const bool safe = lease.temperature_safe(&temperature, &error);
+    const auto end = std::chrono::steady_clock::now();
+    const double duration_us =
+        std::chrono::duration<double, std::micro>(end - begin).count();
+    samples.push_back(duration_us);
+    if (duration_us > 127'000.0) {
+      ++samples_over_explicit_retry_bound;
+    }
+    if (safe) {
+      ++successes;
+      minimum_temperature = std::min(minimum_temperature, temperature);
+      maximum_temperature = std::max(maximum_temperature, temperature);
+      continue;
+    }
+    if (first_error.empty()) {
+      first_error = error;
+    }
+    if (error.find("bounded EAGAIN retries") != std::string::npos) {
+      ++exhausted_eagain;
+    } else if (error.find("at or above the 45000 mC cutoff") !=
+               std::string::npos) {
+      ++thermal_holds;
+    } else {
+      ++other_faults;
+    }
+  }
+  const std::uint64_t allocations_after =
+      g_allocation_count.load(std::memory_order_relaxed);
+  const std::uint64_t rss_after = resident_set_bytes();
+  const Timing timing = summarize(std::move(samples));
+  if (successes == 0) {
+    minimum_temperature = 0;
+    maximum_temperature = 0;
+  }
+  std::printf(
+      "rm2_thermal_read_probe iterations=%zu successes=%zu "
+      "exhausted_eagain=%zu thermal_holds=%zu other_faults=%zu "
+      "temperature_min_mc=%d temperature_max_mc=%d min_us=%.1f "
+      "p50_us=%.1f p95_us=%.1f p99_us=%.1f max_us=%.1f "
+      "over_127ms=%zu allocation_delta=%llu rss_delta_bytes=%lld "
+      "first_error=\"%s\" source=production-temperature-safe\n",
+      iterations, successes, exhausted_eagain, thermal_holds, other_faults,
+      minimum_temperature, maximum_temperature, timing.min_us, timing.p50_us,
+      timing.p95_us, timing.p99_us, timing.max_us,
+      samples_over_explicit_retry_bound,
+      static_cast<unsigned long long>(allocations_after - allocations_before),
+      static_cast<long long>(static_cast<std::int64_t>(rss_after) -
+                             static_cast<std::int64_t>(rss_before)),
+      first_error.c_str());
+  return successes == iterations && exhausted_eagain == 0 &&
+                 thermal_holds == 0 && other_faults == 0 &&
+                 samples_over_explicit_retry_bound == 0 &&
+                 minimum_temperature > 0 &&
+                 maximum_temperature <
+                     pluto::native::rm2::kRm2CpuTemperatureCutoffMillidegrees
+             ? 0
+             : 1;
 }
 
 int run_frequency_lease_hold(std::size_t milliseconds) {
@@ -1695,6 +1775,7 @@ int main(int argc, char **argv) {
   }
   constexpr std::string_view kFrequencyProbePrefix = "--frequency-lease-probe=";
   constexpr std::string_view kFrequencyHoldPrefix = "--frequency-lease-hold=";
+  constexpr std::string_view kThermalReadProbePrefix = "--thermal-read-probe=";
   if (argc == 2 &&
       std::string_view(argv[1]).starts_with(kFrequencyProbePrefix)) {
     const auto iterations = parse_positive_count(
@@ -1717,6 +1798,17 @@ int main(int argc, char **argv) {
     print_context();
     return run_frequency_lease_hold(*milliseconds);
   }
+  if (argc == 2 &&
+      std::string_view(argv[1]).starts_with(kThermalReadProbePrefix)) {
+    const auto iterations = parse_positive_count(
+        argv[1], kThermalReadProbePrefix, static_cast<std::size_t>(100'000));
+    if (!iterations.has_value() || *iterations == 0) {
+      std::fprintf(stderr, "invalid RM2 thermal read probe count\n");
+      return 2;
+    }
+    print_context();
+    return run_thermal_read_probe(*iterations);
+  }
   constexpr std::string_view kCorrectnessSoakPrefix =
       "--phase-correctness-soak=";
   constexpr std::string_view kProductionSoakPrefix = "--phase-production-soak=";
@@ -1736,11 +1828,11 @@ int main(int argc, char **argv) {
     phase_soak = parse_phase_soak(argc, argv);
   }
   if (argc != 1 && (!phase_soak.has_value() || *phase_soak == 0)) {
-    std::fprintf(stderr,
-                 "usage: rm2_encoder_bench "
-                 "[--phase-soak=N|--phase-correctness-soak=N|"
-                 "--phase-production-soak=N|--real-wbf=PATH|"
-                 "--frequency-lease-probe=N|--frequency-lease-hold=MS]\n");
+    std::fprintf(stderr, "usage: rm2_encoder_bench "
+                         "[--phase-soak=N|--phase-correctness-soak=N|"
+                         "--phase-production-soak=N|--real-wbf=PATH|"
+                         "--frequency-lease-probe=N|--frequency-lease-hold=MS|"
+                         "--thermal-read-probe=N]\n");
     return 2;
   }
   print_context();

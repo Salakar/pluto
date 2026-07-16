@@ -16,7 +16,10 @@ inline constexpr char kRm2CpuThermalTypePath[] =
 inline constexpr char kRm2CpuTemperaturePath[] =
     "/sys/devices/virtual/thermal/thermal_zone2/temp";
 inline constexpr int kRm2CpuTemperatureCutoffMillidegrees = 45'000;
-inline constexpr unsigned kRm2CpuTemperatureReadAttempts = 11;
+// The i.MX7 thermal driver samples at approximately 10 Hz but waits only
+// 20--50 us for FINISHED before returning EAGAIN. Dense polling spans more
+// than one complete nominal sample period without caching a temperature.
+inline constexpr unsigned kRm2CpuTemperatureReadAttempts = 128;
 
 using Rm2CpuTemperatureReadForTesting = std::ptrdiff_t (*)(
     void *context, int fd, void *buffer, std::size_t capacity);

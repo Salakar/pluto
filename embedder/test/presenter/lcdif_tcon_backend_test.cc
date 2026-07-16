@@ -62,10 +62,19 @@ public:
 
   int open(const char *, int) override {
     ++open_count;
+    if (open_error != 0) {
+      errno = open_error;
+      return -1;
+    }
     return 91;
   }
   int ioctl(int, unsigned long request, void *argument) override {
     if (request == uapi::kGetFixedScreenInfo) {
+      ++get_fixed_count;
+      if (fail_get_fixed_on_call == get_fixed_count) {
+        errno = ioctl_error;
+        return -1;
+      }
       std::memcpy(argument, &fixed, sizeof(fixed));
       return 0;
     }
@@ -78,6 +87,11 @@ public:
       return 0;
     }
     if (request == uapi::kBlank) {
+      ++blank_count;
+      if (fail_blank_on_call == blank_count) {
+        errno = ioctl_error;
+        return -1;
+      }
       blank_values.push_back(reinterpret_cast<std::uintptr_t>(argument));
       return 0;
     }
@@ -138,8 +152,77 @@ public:
   std::chrono::nanoseconds pan_delay{};
   std::size_t latched_slot_mutations = 0;
   bool capture_phase_cells = false;
+  int open_error = 0;
+  int ioctl_error = EIO;
+  int fail_get_fixed_on_call = 0;
+  int get_fixed_count = 0;
+  int fail_blank_on_call = 0;
+  int blank_count = 0;
   int open_count = 0;
   int close_count = 0;
+};
+
+class ScopedStderrCapture final {
+public:
+  ScopedStderrCapture() {
+    std::fflush(stderr);
+    capture_ = std::tmpfile();
+    if (capture_ == nullptr) {
+      return;
+    }
+    saved_fd_ = ::dup(STDERR_FILENO);
+    if (saved_fd_ < 0 ||
+        ::dup2(::fileno(capture_), STDERR_FILENO) != STDERR_FILENO) {
+      if (saved_fd_ >= 0) {
+        ::close(saved_fd_);
+        saved_fd_ = -1;
+      }
+      return;
+    }
+    active_ = true;
+  }
+
+  ~ScopedStderrCapture() {
+    restore();
+    if (capture_ != nullptr) {
+      std::fclose(capture_);
+    }
+  }
+
+  ScopedStderrCapture(const ScopedStderrCapture &) = delete;
+  ScopedStderrCapture &operator=(const ScopedStderrCapture &) = delete;
+
+  bool valid() const { return active_; }
+
+  std::string finish() {
+    restore();
+    if (capture_ == nullptr || std::fseek(capture_, 0, SEEK_SET) != 0) {
+      return {};
+    }
+    std::string result;
+    std::array<char, 512> buffer{};
+    while (const std::size_t count =
+               std::fread(buffer.data(), 1, buffer.size(), capture_)) {
+      result.append(buffer.data(), count);
+    }
+    return result;
+  }
+
+private:
+  void restore() {
+    if (!active_) {
+      return;
+    }
+    std::fflush(stderr);
+    (void)::dup2(saved_fd_, STDERR_FILENO);
+    ::close(saved_fd_);
+    saved_fd_ = -1;
+    active_ = false;
+  }
+
+  std::FILE *capture_ = nullptr;
+  int saved_fd_ = -1;
+  bool active_ = false;
 };
 
 std::size_t phase_cell_offset_for_user(std::size_t x, std::size_t y) {
@@ -550,6 +633,107 @@ void stage_candidate(const LocalRm2Profile &fixture,
   ASSERT_EQ(backend.stage_handoff(&payload->payload, 3000), kPlutoStatusOk);
   backend.stop();
   ASSERT_EQ(::access(handoff_path.c_str(), F_OK), 0);
+}
+
+TEST(LcdifTconBackend, ProbeFailureReportsFramebufferStageAndDeviceError) {
+  const GeneratedDeviceProfile &profile =
+      *generated_device_profile_by_id("rm2");
+  BackendFakeLcdifSyscalls syscalls;
+  syscalls.open_error = ENODEV;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{.path = ""};
+  LcdifTconDisplayBackend backend(profile, std::move(device), {}, {},
+                                  std::move(options));
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  const PlutoStatus status = backend.probe(profile);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_EQ(status, kPlutoStatusDeviceLost);
+  EXPECT_TRUE(diagnostics.find("stage=probe.framebuffer-open status=4") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("mxs_lcdif_error=\"open(/dev/fb0):") !=
+              std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     PoweredStartFailureReportsSafeIdleStageBeforeErrorIsCleared) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  // Probe and initialize each read the fixed mode once; fail the subsequent
+  // powered safe-idle validation.
+  syscalls.fail_get_fixed_on_call = 3;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{.path = ""};
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  const PlutoStatus status = backend.start(config);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_EQ(status, kPlutoStatusDeviceLost);
+  EXPECT_TRUE(diagnostics.find("stage=start.safe-idle-validate status=4") !=
+              std::string::npos);
+  EXPECT_TRUE(
+      diagnostics.find("mxs_lcdif_error=\"validate RM2 safe-idle scan:") !=
+      std::string::npos);
+  EXPECT_EQ(static_cast<int>(backend.health().state),
+            static_cast<int>(NativeBackendHealthState::kDeviceLost));
+}
+
+TEST(LcdifTconBackend,
+     ColdInitializeReportsUnblankDeviceErrorBeforeSafetyPowerdown) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  // Initialization powers down once. Fail the following cold-start unblank;
+  // later fail-safe powerdowns must not erase its diagnostic.
+  syscalls.fail_blank_on_call = 2;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{.path = ""};
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  const PlutoStatus status = backend.start(config);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_EQ(status, kPlutoStatusDeviceLost);
+  EXPECT_TRUE(
+      diagnostics.find(
+          "stage=start.cold-initialize.powered-temperature-unblank status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find("mxs_lcdif_error=\"FBIOBLANK(UNBLANK):") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("stage=start.cold-initialize status=4") ==
+              std::string::npos);
 }
 
 TEST(LcdifTconBackend,
