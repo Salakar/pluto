@@ -398,6 +398,8 @@ final class _NewArtworkCard extends StatelessWidget {
     return Semantics(
       button: true,
       label: 'new artwork',
+      excludeSemantics: true,
+      onTap: onTap,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: onTap,
