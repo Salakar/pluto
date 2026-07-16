@@ -50,10 +50,10 @@ clear without changing the warm-process lifecycle.
 ## Exact-color glass-state transaction
 
 The glass handoff is not a Dart-heap or process snapshot. It is a short-lived,
-schema-v2 display-state bundle at `/run/pluto/glass.handoff` that lets two
+exact-layout display-state bundle at `/run/pluto/glass.handoff` that lets two
 otherwise independent embedder processes agree on the physical starting point
-for the next diff. Schema v2 is a clean break: the old monochrome plane-only
-format has no compatibility reader and is conservatively rejected.
+for the next diff. Anything that does not match the one current shape is
+conservatively rejected.
 
 For the Paper Pro Move, the bundle contains:
 

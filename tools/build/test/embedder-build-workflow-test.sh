@@ -156,15 +156,8 @@ assert_contains "$PAYLOAD_DRY_RUN" \
   "$ARM64_SLICE/pluto-boot-install.sh"
 assert_contains "$PAYLOAD_DRY_RUN" \
   "$ARM64_SLICE/pluto-session-once.sh"
-for retired_script in \
-  pluto-boot-hook.sh \
-  pluto-bootloop-check.sh \
-  pluto-deadman.sh \
-  pluto-fingerprint-check.sh \
-  pluto-xochitl-guard.sh; do
-  [[ "$PAYLOAD_DRY_RUN" != *"$retired_script"* ]] ||
-    fail "native payload still carries retired $retired_script"
-done
+[[ "$PAYLOAD_DRY_RUN" != *"pluto-rm2-cpufreq-restore.sh"* ]] ||
+  fail "ARM64 slice still carries the RM2-only CPU-frequency restorer"
 [[ "$PAYLOAD_DRY_RUN" != *"apps/codex"* ]] || fail "Codex was selected implicitly"
 [[ "$PAYLOAD_DRY_RUN" != *"kernel_blob.bin"* ]] || fail "dry run copied a JIT kernel"
 EXPECTED_NEXT="Internal release slice complete: $ARM64_SLICE"
@@ -199,6 +192,8 @@ assert_contains "$ARM_PAYLOAD_DRY_RUN" \
   "embedder/build/device-arm/pluto-embedder 2.35 linux-arm"
 assert_contains "$ARM_PAYLOAD_DRY_RUN" \
   "$ARM_SLICE/pluto-session.sh"
+assert_contains "$ARM_PAYLOAD_DRY_RUN" \
+  "$ARM_SLICE/pluto-rm2-cpufreq-restore.sh"
 assert_contains "$ARM_PAYLOAD_DRY_RUN" \
   "$ARM_SLICE/apps/dev.pluto.examples.counter"
 assert_contains "$ARM_PAYLOAD_DRY_RUN" \

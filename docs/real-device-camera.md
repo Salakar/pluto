@@ -22,7 +22,10 @@ room. Later capture commands stay local.
 ```sh
 # One time after arranging/moving the camera or devices. Put a unique red !N
 # label next to every device before running this.
-tools/setup/camera/capture.sh configure
+tools/setup/camera/capture.sh configure \
+  --device-profile 1=move \
+  --device-profile 2=rm1 \
+  --device-profile 3=rm2
 
 # Red device regions plus green final-capture footprints for the whole rig.
 tools/setup/camera/capture.sh identify --output /tmp/devices.jpg
@@ -40,9 +43,11 @@ active-display/bezel transition. It verifies both complete upright portraits
 and the exact green raw-camera capture footprints, adds only a narrow
 inner-bezel safety guard, and atomically writes the git-ignored
 `.pluto-devices.json`. Each device is independent, so one rig may mix different
-screen sizes and aspect ratios. The config stores each device's base, fine, and
-total signed fractional clockwise rotation corrections, physical-boundary fit,
-per-device coverage, diagnostic content-line evidence, plus both corner transforms. Candidate frames and
+screen sizes and aspect ratios. Every detected number must be assigned exactly
+one `rm1`, `rm2`, or `move` profile with `--device-profile NUMBER=PROFILE`.
+The config stores that binding, each device's base, fine, and total signed
+fractional clockwise rotation corrections, physical-boundary fit, per-device
+coverage, diagnostic content-line evidence, plus both corner transforms. Candidate frames and
 crop previews are sent to the OpenAI Codex service during that one-time
 command. Later `identify`, `image`, and `video` commands are local-only FFmpeg
 captures and do not invoke a model.

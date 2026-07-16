@@ -32,7 +32,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <random>
 #include <span>
 #include <string>
@@ -646,24 +645,23 @@ bool load_raw_exact_color_bundle(const std::string &path,
   RawExactColorBundle parsed;
   parsed.bytes.assign(std::istreambuf_iterator<char>(input),
                       std::istreambuf_iterator<char>());
-  if (!input.is_open() || input.bad() || parsed.bytes.size() < 192u ||
-      exact_read_u32(parsed.bytes, 0) != pluto::kGlassHandoffMagic ||
-      exact_read_u32(parsed.bytes, 4) != pluto::kGlassHandoffVersion) {
+  if (!input.is_open() || input.bad() || parsed.bytes.size() < 188u ||
+      exact_read_u32(parsed.bytes, 0) != pluto::kGlassHandoffMagic) {
     return false;
   }
-  const std::uint32_t header_bytes = exact_read_u32(parsed.bytes, 8);
-  const std::uint32_t section_count = exact_read_u32(parsed.bytes, 24);
-  if (header_bytes != 192u + static_cast<std::uint64_t>(section_count) * 32u ||
+  const std::uint32_t header_bytes = exact_read_u32(parsed.bytes, 4);
+  const std::uint32_t section_count = exact_read_u32(parsed.bytes, 20);
+  if (header_bytes != 188u + static_cast<std::uint64_t>(section_count) * 28u ||
       header_bytes > parsed.bytes.size()) {
     return false;
   }
-  parsed.renderer_configuration_hash = exact_read_u64(parsed.bytes, 160);
+  parsed.renderer_configuration_hash = exact_read_u64(parsed.bytes, 156);
   std::uint64_t expected_offset = header_bytes;
   for (std::uint32_t index = 0; index < section_count; ++index) {
-    const std::size_t entry = 192u + static_cast<std::size_t>(index) * 32u;
+    const std::size_t entry = 188u + static_cast<std::size_t>(index) * 28u;
     const std::uint32_t type = exact_read_u32(parsed.bytes, entry);
-    const std::uint64_t offset = exact_read_u64(parsed.bytes, entry + 8u);
-    const std::uint64_t size = exact_read_u64(parsed.bytes, entry + 16u);
+    const std::uint64_t offset = exact_read_u64(parsed.bytes, entry + 4u);
+    const std::uint64_t size = exact_read_u64(parsed.bytes, entry + 12u);
     if (offset != expected_offset || offset > parsed.bytes.size() ||
         size > parsed.bytes.size() - offset ||
         !parsed.sections.emplace(type, std::pair{offset, size}).second) {
@@ -1082,15 +1080,11 @@ template <typename Child> bool run_exact_color_child(Child child) {
 
 } // namespace
 
-// Re-pin: dry-run frame lifecycle through the engine path. Retired option
-// keys (settle_delay_ms + the emergency-DU surface) stay in the option
-// string on purpose: they must parse as accepted-and-ignored. NOTE the old
-// no-eink lifecycle variant is deleted: the engine drives exclusively from
-// a decoded .eink.
+// Re-pin: dry-run frame lifecycle through the engine path. The engine drives
+// exclusively from the canonical decoded `eink` option.
 TEST(Gallery3DrmPresenterTest, DryRunLifecycleCompletesFramesAndSnapshots) {
   const std::string eink = write_synth_eink(3, "lifecycle");
-  Presenter p("dry_run=1,flip_interval_ms=0,settle_delay_ms=0,du_frames=5," +
-              std::string("dither=1,eink=") + eink);
+  Presenter p("dry_run=1,flip_interval_ms=0,eink=" + eink);
   ASSERT_EQ(p.open_status(), kPlutoStatusOk);
 
   PlutoDisplayInfo info{};
@@ -1496,77 +1490,39 @@ TEST(Gallery3DrmPresenterTest,
   EXPECT_EQ(after_full.color_faults, 0u);
 }
 
-// PlutoGallery3DrmDebugStats is APPEND-ONLY ABI: callers pass struct_size and
-// must never see existing fields move. The engine stage appended ten
-// fields; every offset below is pinned — moving, removing, or reordering
-// ANY field breaks this at compile time.
+// Pin the exact layouts used by the single in-tree presenter contract.
 static_assert(offsetof(PlutoGallery3DrmDebugStats, struct_size) == 0);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, updates_completed) == 8);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, gc16_updates) == 16);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, full_updates) == 24);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, settle_updates) == 32);
-// Appended at the per-pixel engine stage (now equally frozen):
-static_assert(offsetof(PlutoGallery3DrmDebugStats, admissions) == 40);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, absorbed) == 48);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, parked) == 56);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, retargets) == 64);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, cancels) == 72);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, neutral_frames) == 80);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, double_scans) == 88);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, dc_saturations) == 96);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, pauses) == 104);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, active_px_peak) == 112);
-// Appended at the HOLD-gap exemption stage (device livelock fix):
-static_assert(offsetof(PlutoGallery3DrmDebugStats, hold_rescans) == 120);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, pen_cross_mode_preemptions) ==
-              136);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_enabled) == 144);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_preprocess_max_us) == 256);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_bypasses) == 264);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_bypass_wait_max_us) ==
-              272);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_obligations) == 280);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_fast_reserve_declines) ==
-              320);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_focus_updates) == 328);
-static_assert(offsetof(PlutoGallery3DrmDebugStats,
-                       color_pen_focus_deferred_current) == 360);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_truth_input_rects) ==
-              368);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_truth_grouped_tiles) ==
-              376);
-static_assert(offsetof(PlutoGallery3DrmDebugStats, color_pen_truth_masked_lanes) ==
-              384);
-static_assert(offsetof(PlutoGallery3DrmDebugStats,
-                       color_pen_truth_groups_per_request_max) == 392);
-static_assert(sizeof(PlutoGallery3DrmDebugStats) == 400,
-              "append new fields at the END and update this pin");
+static_assert(sizeof(PlutoGallery3DrmDebugStats) == 400);
 static_assert(offsetof(PlutoPenFocus, struct_size) == 0);
 static_assert(offsetof(PlutoPenFocus, rect) == 8);
 static_assert(offsetof(PlutoPenFocus, flags) == 24);
 static_assert(offsetof(PlutoPenFocus, sequence) == 32);
 static_assert(sizeof(PlutoPenFocus) == 40);
-static_assert(offsetof(PlutoPresenterOps, set_pen_focus) == 72);
-static_assert(offsetof(PlutoPresenterOps, stage_handoff) == 80);
-static_assert(offsetof(PlutoPresenterOps, get_handoff) == 88);
-static_assert(offsetof(PlutoPresenterOps, confirm_handoff) == 96);
-static_assert(sizeof(PlutoPresenterOps) == 104,
-              "presenter ops are append-only; add new hooks at the tail");
+static_assert(sizeof(PlutoPresenterOps) == 104);
 
-// Re-pin: option parsing. Invalid values reject the open; retired keys are
-// accepted-and-ignored; the engine constants parse.
-TEST(Gallery3DrmPresenterTest, OptionSurfaceValidatesAndRetiresKeys) {
+// Re-pin: option parsing is one exact current surface. Unknown, duplicate,
+// malformed, and aliased keys reject the open.
+TEST(Gallery3DrmPresenterTest, OptionSurfaceIsExact) {
   const std::string eink = write_synth_eink(3, "options");
 
   {
-    // All retired keys + engine constant overrides parse fine.
     Presenter p("dry_run=1,flip_interval_ms=0,eink=" + eink +
-                ",settle_delay_ms=25,full_refresh_every=1,du_mode=1,"
-                "du_white=3,du_black=4,dither=0,du_frames=5,"
-                "max_active_px=100000,full_flash_band_frames=2,"
+                ",max_active_px=100000,full_flash_band_frames=2,"
                 "early_cancel=0,settle_force_identity=0,"
                 "emission_mode=row_stage,scan_period_ns=0");
     EXPECT_EQ(p.open_status(), kPlutoStatusOk);
+  }
+  {
+    Presenter p("dry_run=1,waveform=" + eink);
+    EXPECT_EQ(p.open_status(), kPlutoStatusInvalidArgument);
+  }
+  {
+    Presenter p("dry_run=1,eink=" + eink + ",eink=" + eink);
+    EXPECT_EQ(p.open_status(), kPlutoStatusInvalidArgument);
+  }
+  {
+    Presenter p("dry_run=1,eink=" + eink + ",future_key=1");
+    EXPECT_EQ(p.open_status(), kPlutoStatusInvalidArgument);
   }
   {
     Presenter p("dry_run=1,eink=" + eink + ",max_active_px=abc");
@@ -1590,17 +1546,14 @@ TEST(Gallery3DrmPresenterTest, OptionSurfaceValidatesAndRetiresKeys) {
 }
 
 // Re-pin: the presenter never self-schedules a quality pass — every drive
-// maps 1:1 to an explicit present(), completing its frame_id exactly once;
-// retired settle keys with old "aggressive" values change nothing.
+// maps 1:1 to an explicit present(), completing its frame_id exactly once.
 TEST(Gallery3DrmPresenterTest, PresenterNeverSelfSchedulesSettles) {
   const std::string eink = write_synth_eink(3, "settle");
-  Presenter p("dry_run=1,flip_interval_ms=0,eink=" + eink +
-              ",settle_delay_ms=25,full_refresh_every=1");
+  Presenter p("dry_run=1,flip_interval_ms=0,eink=" + eink);
   ASSERT_EQ(p.open_status(), kPlutoStatusOk);
 
   // Frame 1: partial Fast update (black square on white). Under the old
-  // machinery settle_delay_ms=25 + full_refresh_every=1 would have armed a
-  // self-scheduled settle AND a promoted Full.
+  // The presenter must not arm a self-scheduled settle or promoted Full.
   for (int y = 8; y < 72; ++y) {
     for (int x = 8; x < 72; ++x) {
       store_rgb565(p.frame(), x, y, 0x0000);
@@ -2120,26 +2073,13 @@ TEST(Gallery3DrmPresenterTest,
               ",scan_period_ns=2000000");
   ASSERT_EQ(p.open_status(), kPlutoStatusOk);
 
-  // The six reserve counters were appended at byte 280. A caller compiled
-  // against the immediately previous append-only ABI must still receive its
-  // known prefix without the implementation overwriting its unknown tail.
-  constexpr std::size_t kLegacyStatsSize =
-      offsetof(PlutoGallery3DrmDebugStats, color_fast_obligations);
-  alignas(PlutoGallery3DrmDebugStats)
-      std::byte legacy_storage[sizeof(PlutoGallery3DrmDebugStats) + 16u];
-  auto *legacy_stats =
-      ::new (static_cast<void *>(legacy_storage)) PlutoGallery3DrmDebugStats{};
-  legacy_stats->struct_size = kLegacyStatsSize;
-  std::memset(legacy_storage + kLegacyStatsSize, 0xa5,
-              sizeof(legacy_storage) - kLegacyStatsSize);
-  ASSERT_EQ(pluto_gallery3_drm_presenter_debug_stats(p.raw(), legacy_stats),
-            kPlutoStatusOk);
-  EXPECT_EQ(legacy_stats->struct_size, kLegacyStatsSize);
-  for (std::size_t index = kLegacyStatsSize; index < sizeof(legacy_storage);
-       ++index) {
-    EXPECT_EQ(std::to_integer<unsigned int>(legacy_storage[index]), 0xa5u)
-        << "index=" << index;
-  }
+  PlutoGallery3DrmDebugStats wrong_size{};
+  wrong_size.struct_size = sizeof(wrong_size) - 1u;
+  EXPECT_EQ(pluto_gallery3_drm_presenter_debug_stats(p.raw(), &wrong_size),
+            kPlutoStatusInvalidArgument);
+  wrong_size.struct_size = sizeof(wrong_size) + 1u;
+  EXPECT_EQ(pluto_gallery3_drm_presenter_debug_stats(p.raw(), &wrong_size),
+            kPlutoStatusInvalidArgument);
   const auto ready_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(20);
   while (!p.ops()->ready(p.raw(), kPlutoRefreshFull) &&
@@ -2248,8 +2188,7 @@ TEST(Gallery3DrmPresenterTest,
                                       /*dry_run=*/false) +
               ",scan_period_ns=2000000");
   ASSERT_EQ(p.open_status(), kPlutoStatusOk);
-  ASSERT_GE(p.ops()->struct_size, offsetof(PlutoPresenterOps, set_pen_focus) +
-                                      sizeof(p.ops()->set_pen_focus));
+  ASSERT_EQ(p.ops()->struct_size, sizeof(PlutoPresenterOps));
   ASSERT_NE(p.ops()->set_pen_focus, nullptr);
   const auto ready_deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(20);
@@ -2261,6 +2200,9 @@ TEST(Gallery3DrmPresenterTest,
 
   PlutoPenFocus malformed{};
   malformed.struct_size = sizeof(malformed) - 1u;
+  EXPECT_EQ(p.ops()->set_pen_focus(p.raw(), &malformed),
+            kPlutoStatusInvalidArgument);
+  malformed.struct_size = sizeof(malformed) + 1u;
   EXPECT_EQ(p.ops()->set_pen_focus(p.raw(), &malformed),
             kPlutoStatusInvalidArgument);
   malformed.struct_size = sizeof(malformed);

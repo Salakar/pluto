@@ -134,7 +134,6 @@ struct RegionSchedulerStateConfig {
 };
 
 struct RegionSchedulerState {
-  uint32_t version = 1;
   RegionSchedulerStateConfig config{};
   bool has_debt_grid = false;
   TileGrid debt_grid{};
@@ -147,7 +146,6 @@ struct RegionSchedulerState {
 
 class RegionScheduler {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   // Ledger pointers may be null (pure scheduling tests); when present the
   // scheduler accrues ghost/stress on rail-class dispatch and clears
   // ghost/stress (Text/Full) and chroma-pending (Full) on quality dispatch.

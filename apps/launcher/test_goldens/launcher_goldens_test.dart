@@ -229,33 +229,11 @@ void main() {
       await _expectGolden(tester, 's13_exit_to_stock_confirm');
     });
 
-    testWidgets('S14 uninstall Pluto step 1', (WidgetTester tester) async {
-      await _pumpRoute(tester, '/settings/uninstall');
-      await _expectGolden(tester, 's14_uninstall_pluto_step1');
-    });
-
-    testWidgets('S14 uninstall Pluto hold confirm', (
-      WidgetTester tester,
-    ) async {
-      await _pumpRoute(tester, '/settings/uninstall');
-      await tester.tap(find.text('Continue to uninstall'));
-      await tester.pump(const Duration(milliseconds: 100));
-      await _expectGolden(tester, 's14_uninstall_pluto_hold');
-    });
-
-    testWidgets('S14 uninstall Pluto progress', (WidgetTester tester) async {
-      await _pumpScreen(
-        tester,
-        const UninstallPlutoScreen(initialProgress: true),
-      );
-      await _expectGolden(tester, 's14_uninstall_pluto_progress');
-    });
-
-    testWidgets('S15 about developer', (WidgetTester tester) async {
+    testWidgets('S15 about', (WidgetTester tester) async {
       await _pumpRoute(tester, '/settings/about');
       await tester.pump();
       await tester.pump();
-      await _expectGolden(tester, 's15_about_developer');
+      await _expectGolden(tester, 's15_about');
     });
 
     testWidgets('S16 standby screen', (WidgetTester tester) async {

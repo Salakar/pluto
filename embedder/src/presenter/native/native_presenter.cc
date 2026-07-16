@@ -10,6 +10,7 @@
 #include "presenter/native/mxcfb/mxcfb_backend.h"
 #include "presenter/native/native_display_backend.h"
 #include "presenter/native/rm2/lcdif_tcon_backend.h"
+#include "presenter/presenter_contract.h"
 
 namespace pluto::native {
 namespace {
@@ -32,15 +33,10 @@ public:
 
   ~PresenterOpsDisplayBackend() override { stop(); }
 
-  std::string_view driver_name() const override {
-    return ops_ != nullptr && ops_->name != nullptr ? ops_->name : "unknown";
-  }
+  std::string_view driver_name() const override { return ops_->name; }
 
   PlutoStatus probe(const GeneratedDeviceProfile &profile) override {
-    if (&profile != &profile_ || ops_ == nullptr || ops_->open == nullptr ||
-        ops_->close == nullptr || ops_->info == nullptr ||
-        ops_->present == nullptr || ops_->ready == nullptr ||
-        ops_->wait_idle == nullptr) {
+    if (&profile != &profile_ || !presenter_ops_are_current(ops_)) {
       return kPlutoStatusUnsupported;
     }
     return kPlutoStatusOk;
@@ -76,20 +72,19 @@ public:
   }
 
   PlutoStatus info(PlutoDisplayInfo *out_info) override {
-    return call(ops_ != nullptr ? ops_->info : nullptr, out_info);
+    return call(ops_->info, out_info);
   }
 
   PlutoStatus submit(const PlutoPresentRequest *request) override {
-    const PlutoStatus status =
-        presenter_ != nullptr && ops_ != nullptr && ops_->present != nullptr
-            ? ops_->present(presenter_, request)
-            : kPlutoStatusDeviceLost;
+    const PlutoStatus status = presenter_ != nullptr
+                                   ? ops_->present(presenter_, request)
+                                   : kPlutoStatusDeviceLost;
     observe(status);
     return status;
   }
 
   bool ready(PlutoRefreshClass refresh_class) override {
-    if (presenter_ == nullptr || ops_ == nullptr || ops_->ready == nullptr) {
+    if (presenter_ == nullptr) {
       return false;
     }
     const bool is_ready = ops_->ready(presenter_, refresh_class);
@@ -102,29 +97,25 @@ public:
   }
 
   PlutoStatus wait_idle(std::uint32_t timeout_ms) override {
-    const PlutoStatus status =
-        presenter_ != nullptr && ops_ != nullptr && ops_->wait_idle != nullptr
-            ? ops_->wait_idle(presenter_, timeout_ms)
-            : kPlutoStatusDeviceLost;
+    const PlutoStatus status = presenter_ != nullptr
+                                   ? ops_->wait_idle(presenter_, timeout_ms)
+                                   : kPlutoStatusDeviceLost;
     observe(status);
     return status;
   }
 
   PlutoStatus snapshot(PlutoSurface *out_surface) override {
-    return call_optional(ops_ != nullptr ? ops_->snapshot : nullptr,
-                         out_surface);
+    return call(ops_->snapshot, out_surface);
   }
 
   PlutoStatus set_pen_focus(const PlutoPenFocus *focus) override {
-    return call_optional(ops_ != nullptr ? ops_->set_pen_focus : nullptr,
-                         focus);
+    return call(ops_->set_pen_focus, focus);
   }
 
   PlutoStatus stage_handoff(const PlutoHandoffPayload *payload,
                             std::uint32_t timeout_ms) override {
-    if (presenter_ == nullptr || ops_ == nullptr ||
-        ops_->stage_handoff == nullptr) {
-      return kPlutoStatusUnsupported;
+    if (presenter_ == nullptr) {
+      return kPlutoStatusDeviceLost;
     }
     const PlutoStatus status =
         ops_->stage_handoff(presenter_, payload, timeout_ms);
@@ -133,14 +124,12 @@ public:
   }
 
   PlutoStatus get_handoff(PlutoHandoffPayload *out_payload) override {
-    return call_optional(ops_ != nullptr ? ops_->get_handoff : nullptr,
-                         out_payload);
+    return call(ops_->get_handoff, out_payload);
   }
 
   PlutoStatus confirm_handoff(bool accepted) override {
-    if (presenter_ == nullptr || ops_ == nullptr ||
-        ops_->confirm_handoff == nullptr) {
-      return kPlutoStatusUnsupported;
+    if (presenter_ == nullptr) {
+      return kPlutoStatusDeviceLost;
     }
     const PlutoStatus status = ops_->confirm_handoff(presenter_, accepted);
     observe(status);
@@ -161,7 +150,7 @@ public:
   NativeBackendHealth health() const override { return health_; }
 
   void stop() override {
-    if (presenter_ != nullptr && ops_ != nullptr && ops_->close != nullptr) {
+    if (presenter_ != nullptr) {
       ops_->close(presenter_);
     }
     presenter_ = nullptr;
@@ -171,24 +160,9 @@ private:
   template <typename Argument>
   PlutoStatus call(PlutoStatus (*function)(PlutoPresenter *, Argument *),
                    Argument *argument) {
-    const PlutoStatus status = presenter_ != nullptr && function != nullptr
+    const PlutoStatus status = presenter_ != nullptr
                                    ? function(presenter_, argument)
                                    : kPlutoStatusDeviceLost;
-    observe(status);
-    return status;
-  }
-
-  template <typename Argument>
-  PlutoStatus call_optional(PlutoStatus (*function)(PlutoPresenter *,
-                                                    Argument *),
-                            Argument *argument) {
-    if (presenter_ == nullptr) {
-      return kPlutoStatusDeviceLost;
-    }
-    if (function == nullptr) {
-      return kPlutoStatusUnsupported;
-    }
-    const PlutoStatus status = function(presenter_, argument);
     observe(status);
     return status;
   }
@@ -228,7 +202,7 @@ NativePresenter *as_native(PlutoPresenter *presenter) {
 PlutoStatus native_open(const PlutoPresenterConfig *config,
                         PlutoPresenter **out_presenter) {
   if (config == nullptr || out_presenter == nullptr ||
-      config->struct_size < sizeof(PlutoPresenterConfig) ||
+      config->struct_size != sizeof(PlutoPresenterConfig) ||
       (config->backend_name != nullptr &&
        std::strcmp(config->backend_name, "native") != 0)) {
     return kPlutoStatusInvalidArgument;

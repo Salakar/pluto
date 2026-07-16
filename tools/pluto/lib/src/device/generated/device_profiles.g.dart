@@ -73,7 +73,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       recovery: BootRecoveryContract(
         confirmationStrategy: BootConfirmationStrategy.ubootEnv,
         failureStrategy: BootFailureStrategy.ubootEnvForceReboot,
-        bootDefaultEnabled: true,
+        bootDefaultEnabled: false,
         mmcDevice: '/dev/mmcblk1',
         rootPartitions: <int>[2, 3],
         expectedBootLimit: 1,
@@ -166,7 +166,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
       recovery: BootRecoveryContract(
         confirmationStrategy: BootConfirmationStrategy.ubootEnv,
         failureStrategy: BootFailureStrategy.ubootEnvForceReboot,
-        bootDefaultEnabled: true,
+        bootDefaultEnabled: false,
         mmcDevice: '/dev/mmcblk2',
         rootPartitions: <int>[2, 3],
         expectedBootLimit: 1,
@@ -239,8 +239,7 @@ const List<DeviceProfile> _generatedDeviceProfiles = <DeviceProfile>[
         ],
       ),
       waveformOptionKey: 'eink',
-      presenterOptions:
-          'exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0',
+      presenterOptions: 'exact_color=1,enable_rails=1,vcom=-0.62',
       pen: InputDeviceProfile(
         byPath: '/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse',
         name: 'Elan marker input',
@@ -443,6 +442,20 @@ const List<DeviceIdentityFixture> generatedRejectedIdentityFixtures =
         deviceTreeModel: '',
         deviceTreeCompatible: 'fsl,imx93',
         architecture: 'wrong-architecture',
+      ),
+      DeviceIdentityFixture(
+        profileId: '',
+        machine: 'remarkable 1.0 remarkable 2.0',
+        deviceTreeModel: '',
+        deviceTreeCompatible: 'remarkable,zero-gravitas',
+        architecture: 'armv7l',
+      ),
+      DeviceIdentityFixture(
+        profileId: '',
+        machine: 'remarkable 1.0',
+        deviceTreeModel: '',
+        deviceTreeCompatible: 'remarkable,zero-gravitas fsl,imx7d-sdb',
+        architecture: 'armv7l',
       ),
       DeviceIdentityFixture(
         profileId: '',

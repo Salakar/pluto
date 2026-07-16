@@ -2,10 +2,10 @@
 
 Each foreground native Pluto embedder publishes a private, root-local control
 endpoint. The CLI uses it for screenshots, and the real-device acceptance
-harness uses it to send one deterministic stylus stroke through Ink's ordinary
-Flutter input and rendering path. It is an implementation detail behind the
-single Pluto device workflow, not an app-facing API or a second lifecycle
-backend.
+harness uses Ink's exact semantic controls to prove a real canvas is mounted
+before sending one deterministic stylus stroke through Ink's ordinary Flutter
+input and rendering path. It is an implementation detail behind the single
+Pluto device workflow, not an app-facing API or a second lifecycle backend.
 
 ## Transport and trust boundary
 
@@ -26,32 +26,32 @@ The target-native `/home/root/pluto/bin/pluto-controlctl` client requires both
 an explicit `--socket PATH` and `--request JSON`. It has no implicit socket or
 device-specific action set.
 
-## Schema 1 envelope
+## Exact envelope
 
-Requests contain `schema`, a caller-generated `requestId`, an action, and that
-action's fields:
+Requests contain only a caller-generated `requestId`, an action, and that
+action's exact fields:
 
 ```json
-{"schema":1,"requestId":"host-nonce","action":"screenshot","appId":null,"surface":"logical"}
+{"requestId":"host-nonce","action":"screenshot","appId":null,"surface":"logical"}
 ```
 
 Success preserves the request id:
 
 ```json
-{"schema":1,"requestId":"host-nonce","ok":true,"result":{}}
+{"requestId":"host-nonce","ok":true,"result":{}}
 ```
 
 Failure has a stable code and safe diagnostic:
 
 ```json
-{"schema":1,"requestId":"host-nonce","ok":false,"error":{"code":"bad-args","message":"control action requires appId"}}
+{"requestId":"host-nonce","ok":false,"error":{"code":"bad-args","message":"control action requires appId"}}
 ```
 
-The parser rejects unsupported schemas or actions, duplicate JSON keys,
+The parser rejects unknown fields or actions, duplicate JSON keys,
 embedded NULs, malformed or oversized packets, trailing data, and missing or
 ill-typed required fields. `requestId` and non-null `appId` values are limited
-to 128 printable ASCII bytes. Unknown fields are ignored for schema-1
-extensibility.
+to 128 printable ASCII bytes. There is no version negotiation, alternate
+envelope, or extensibility reader.
 
 ## Actions
 
@@ -66,7 +66,7 @@ Required fields:
 Example:
 
 ```json
-{"schema":1,"requestId":"shot-1","action":"screenshot","appId":"dev.pluto.ink","surface":"logical"}
+{"requestId":"shot-1","action":"screenshot","appId":"dev.pluto.ink","surface":"logical"}
 ```
 
 The result contains `path`, `bytes`, lowercase `sha256`, `appId`, `pid`,
@@ -79,16 +79,19 @@ dimensions, then removes the temporary artifact.
 
 ### `draw-stroke`
 
-This action exists only for real-device acceptance. It accepts exactly the Ink
-application identity and no caller-supplied geometry:
+This action exists only for real-device acceptance and follows a successful
+`prepare-ink-canvas` request for the same foreground PID. It accepts exactly the
+Ink application identity and no caller-supplied geometry:
 
 ```json
-{"schema":1,"requestId":"stroke-1","action":"draw-stroke","appId":"dev.pluto.ink"}
+{"requestId":"stroke-1","action":"draw-stroke","appId":"dev.pluto.ink","expectedPid":4242}
 ```
 
 `appId` must be the concrete string `dev.pluto.ink`; `null`, another app id,
-and the screenshot-only `surface` field are rejected. The request must reach
-the foreground embedder for that exact app. The embedder then sends a
+and the screenshot-only `surface` field are rejected. `expectedPid` is
+required, must be a positive integer, and must equal the receiving process and
+the result PID. The request must reach the foreground embedder for that exact
+app and PID. The embedder then sends a
 deterministic, panel-relative 24-event stylus sequence through Flutter's
 `SendPointerEvent` API: add, down, 20 moves forming a shallow central S-curve,
 up, and remove. Ink therefore handles the same pointer, stroke pipeline,
@@ -98,7 +101,7 @@ write pixels behind Ink or provide a general remote drawing interface.
 A successful response identifies the process and injected event count:
 
 ```json
-{"schema":1,"requestId":"stroke-1","ok":true,"result":{"appId":"dev.pluto.ink","pid":4242,"eventCount":24}}
+{"requestId":"stroke-1","ok":true,"result":{"appId":"dev.pluto.ink","pid":4242,"eventCount":24}}
 ```
 
 The server rejects results whose app identity does not match the request,
@@ -111,12 +114,48 @@ For an acceptance run, invoke the installed target-native client as root:
 ```sh
 /home/root/pluto/bin/pluto-controlctl \
   --socket /run/pluto/embedder-control.sock \
-  --request '{"schema":1,"requestId":"stroke-1","action":"draw-stroke","appId":"dev.pluto.ink"}'
+  --request '{"requestId":"stroke-1","action":"draw-stroke","appId":"dev.pluto.ink","expectedPid":4242}'
 ```
 
 Success confirms dispatch, not visible correctness. Acceptance still requires
-a fresh camera frame showing that the stroke reached Ink and rendered on the
-panel.
+a changed post-dither screenshot relative to the prepared empty canvas and a
+fresh camera frame showing that the stroke reached Ink and rendered on the
+panel. The response PID must equal the foreground PID captured before both
+actions.
+
+### `prepare-ink-canvas`
+
+This bounded acceptance action makes the real Ink canvas a precondition for a
+stroke. It is not a coordinate injector and has no caller-selected UI target:
+
+```json
+{"requestId":"prepare-1","action":"prepare-ink-canvas","appId":"dev.pluto.ink","expectedPid":4242}
+```
+
+`expectedPid` is required, must be a positive integer, and must equal both the
+foreground embedder PID and the receiving process's own PID. The receiving
+embedder must also be configured for exactly `dev.pluto.ink`. For this bounded
+operation it enables Flutter semantics and follows only exact, tappable
+app-owned labels:
+
+- an existing `Back to gallery` action proves the editor is already mounted;
+- otherwise exact `new artwork`, followed by exact `create`, opens a new
+  canvas; or
+- an already-open create chooser requires only the exact `create` action.
+
+Each transition must publish a fresh semantics generation. Missing, stale,
+duplicate, near-match, or non-tappable labels fail closed, as does any timeout
+or foreground/PID change. Success is returned only after a fresh semantic tree
+exposes the editor's exact tappable `Back to gallery` action:
+
+```json
+{"requestId":"prepare-1","ok":true,"result":{"appId":"dev.pluto.ink","pid":4242,"canvasReady":true,"actionCount":2}}
+```
+
+`actionCount` is exactly 0, 1, or 2. The acceptance harness rechecks the same
+foreground PID, captures the empty canvas's post-dither framebuffer, injects
+the stroke, checks the response PID again, and requires a material decoded-pixel
+change inside the deterministic stroke corridor before optical review.
 
 ### `tap-switcher-preview`
 
@@ -124,7 +163,7 @@ This acceptance-only action selects the currently centered running-app card
 through the real Flutter switcher UI:
 
 ```json
-{"schema":1,"requestId":"switch-1","action":"tap-switcher-preview","appId":"dev.pluto.launcher"}
+{"requestId":"switch-1","action":"tap-switcher-preview","appId":"dev.pluto.launcher"}
 ```
 
 The foreground process must be Pluto Home and the supervisor-owned

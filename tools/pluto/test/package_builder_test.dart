@@ -36,6 +36,22 @@ void main() {
       expect(paths, contains('targets/linux-arm64/assets/pluto/icon.png'));
       expect(paths, isNot(contains('bundle/lib/app.so')));
       expect(paths, isNot(contains('build-metadata.json')));
+      final PlapEntry metadataEntry = entries.singleWhere(
+        (PlapEntry entry) =>
+            entry.path == 'targets/linux-arm64/build-metadata.json',
+      );
+      final Map<String, Object?> buildMetadata =
+          jsonDecode(utf8.decode(metadataEntry.bytes)) as Map<String, Object?>;
+      expect(buildMetadata.keys.toSet(), <String>{
+        'buildMode',
+        'engineFlavor',
+        'flutterVersion',
+        'engineCommit',
+        'target',
+      });
+      expect(buildMetadata, isNot(contains('schema')));
+      expect(buildMetadata, isNot(contains('format')));
+      expect(buildMetadata, isNot(contains('version')));
       expect(package.integrity.keys, <String>[
         'compression',
         'createdBy',
@@ -167,40 +183,43 @@ void main() {
     );
   });
 
-  test('multi-slice builder rejects different toolchain identities', () async {
-    const PackageMetadata arm64 = PackageMetadata(
-      flutterVersion: '3.44.4',
-      engineCommit: _engine,
-      plutoVersion: '0.1.0',
-    );
-    const PackageMetadata arm = PackageMetadata(
-      flutterVersion: '3.44.5',
-      engineCommit: _engine,
-      plutoVersion: '0.1.0',
-      target: 'linux-arm',
-    );
-    await expectLater(
-      const PlapPackageBuilder(compressor: NoopCompressor()).buildSlices(
-        slices: <PackageSliceSource>[
-          PackageSliceSource(
-            source: _releaseSource(PlutoTargetPlatform.linuxArm64),
-            metadata: arm64,
-          ),
-          PackageSliceSource(
-            source: _releaseSource(PlutoTargetPlatform.linuxArm),
-            metadata: arm,
-          ),
-        ],
-      ),
-      throwsA(
-        isA<ArtifactVerificationException>().having(
-          (ArtifactVerificationException error) => error.message,
-          'message',
-          contains('different build/toolchain identity'),
+  test(
+    'multi-slice builder rejects a manifest/slice identity mismatch',
+    () async {
+      const PackageMetadata arm64 = PackageMetadata(
+        flutterVersion: '3.44.4',
+        engineCommit: _engine,
+        plutoVersion: '0.1.0',
+      );
+      const PackageMetadata arm = PackageMetadata(
+        flutterVersion: '3.44.5',
+        engineCommit: _engine,
+        plutoVersion: '0.1.0',
+        target: 'linux-arm',
+      );
+      await expectLater(
+        const PlapPackageBuilder(compressor: NoopCompressor()).buildSlices(
+          slices: <PackageSliceSource>[
+            PackageSliceSource(
+              source: _releaseSource(PlutoTargetPlatform.linuxArm64),
+              metadata: arm64,
+            ),
+            PackageSliceSource(
+              source: _releaseSource(PlutoTargetPlatform.linuxArm),
+              metadata: arm,
+            ),
+          ],
         ),
-      ),
-    );
-  });
+        throwsA(
+          isA<ArtifactVerificationException>().having(
+            (ArtifactVerificationException error) => error.message,
+            'message',
+            contains('manifest engine identity does not match'),
+          ),
+        ),
+      );
+    },
+  );
 
   test('reader rejects a crafted cross-slice toolchain mismatch', () async {
     const PackageMetadata arm64 = PackageMetadata(
@@ -329,6 +348,111 @@ void main() {
               (ArtifactVerificationException error) => error.message,
               'message',
               contains('schema/version fields are not supported'),
+            ),
+          ),
+          reason: field,
+        );
+      }
+    },
+  );
+
+  test(
+    'builder and reader reject every non-exact build metadata object',
+    () async {
+      const PackageMetadata metadata = PackageMetadata(
+        flutterVersion: '3.44.4',
+        engineCommit: _engine,
+        plutoVersion: '0.1.0',
+      );
+      final Map<String, Object?> canonical = _buildMetadataDocument(metadata);
+      final List<(String, Map<String, Object?>)>
+      invalid = <(String, Map<String, Object?>)>[
+        ('schema discriminator', <String, Object?>{...canonical, 'schema': 1}),
+        (
+          'format discriminator',
+          <String, Object?>{...canonical, 'formatVersion': 1},
+        ),
+        (
+          'unknown field',
+          <String, Object?>{...canonical, 'legacyTarget': 'arm'},
+        ),
+        ('missing field', <String, Object?>{...canonical}..remove('target')),
+        ('wrong field type', <String, Object?>{...canonical, 'target': 1}),
+      ];
+
+      for (final (String name, Map<String, Object?> document) in invalid) {
+        final Uint8List bytes = Uint8List.fromList(
+          utf8.encode(jsonEncode(document)),
+        );
+        await expectLater(
+          const PlapPackageBuilder(compressor: NoopCompressor()).build(
+            source: MemoryPackageSource(<PackageEntry>[
+              ..._releaseEntries(PlutoTargetPlatform.linuxArm64),
+              PackageEntry(path: BuildLayoutMetadata.fileName, bytes: bytes),
+            ]),
+            metadata: metadata,
+          ),
+          throwsA(isA<ArtifactVerificationException>()),
+          reason: 'builder accepted $name',
+        );
+
+        final List<PackageEntry> sliceEntries = _canonicalSliceEntries(
+          PlutoTargetPlatform.linuxArm64,
+          metadata,
+        );
+        sliceEntries[0] = PackageEntry(
+          path: sliceEntries[0].path,
+          bytes: bytes,
+        );
+        final File crafted = _writeBytes(
+          _canonicalTar(<PackageEntry>[
+            PackageEntry(path: 'manifest.json', bytes: _manifest()),
+            ...sliceEntries,
+          ]),
+          'build-metadata-${name.replaceAll(' ', '-')}',
+        );
+        await expectLater(
+          PlapArchive.read(crafted.path),
+          throwsA(isA<ArtifactVerificationException>()),
+          reason: 'reader accepted $name',
+        );
+      }
+    },
+  );
+
+  test(
+    'builder rejects manifest format and Pluto ABI version fields',
+    () async {
+      for (final String field in <String>['schema', 'plutoAbi']) {
+        final Map<String, Object?> document =
+            jsonDecode(utf8.decode(_manifest())) as Map<String, Object?>;
+        if (field == 'schema') {
+          document[field] = 1;
+        } else {
+          (document['engine']! as Map<String, Object?>)[field] = 1;
+        }
+        final List<PackageEntry> entries = _releaseEntries(
+          PlutoTargetPlatform.linuxArm64,
+        );
+        entries[0] = PackageEntry(
+          path: 'manifest.json',
+          bytes: Uint8List.fromList(utf8.encode(jsonEncode(document))),
+        );
+
+        await expectLater(
+          const PlapPackageBuilder(compressor: NoopCompressor()).build(
+            source: MemoryPackageSource(entries),
+            metadata: const PackageMetadata(
+              flutterVersion: '3.44.4',
+              engineCommit: _engine,
+              plutoVersion: '0.1.0',
+            ),
+          ),
+          throwsA(
+            isA<ArtifactVerificationException>().having(
+              (ArtifactVerificationException error) => error.message,
+              'message',
+              allOf(contains('not canonical'), contains('is not supported')),
             ),
           ),
           reason: field,
@@ -559,6 +683,8 @@ Uint8List _manifest({String appId = 'dev.example.notes', bool debug = false}) {
     utf8.encode(
       jsonEncode(<String, Object?>{
         'id': appId,
+        'name': 'Notes',
+        'version': '1.0.0',
         'icon': 'assets/pluto/icon.png',
         'runtime': debug
             ? <String, Object?>{
@@ -570,6 +696,22 @@ Uint8List _manifest({String appId = 'dev.example.notes', bool debug = false}) {
                 'appElf': 'lib/app.so',
                 'assets': 'flutter_assets',
               },
+        'engine': <String, Object?>{
+          'flutterVersion': '3.44.4',
+          'engineCommit': _engine,
+        },
+        'permissions': <Object?>[],
+        'display': <String, Object?>{
+          'orientations': <Object?>['portrait'],
+          'defaultOrientation': 'portrait',
+          'scale': 'auto',
+          'color': 'auto',
+          'refreshProfile': 'ui',
+        },
+        'launch': <String, Object?>{
+          'singleInstance': true,
+          'args': <Object?>[],
+        },
       }),
     ),
   );
@@ -577,18 +719,18 @@ Uint8List _manifest({String appId = 'dev.example.notes', bool debug = false}) {
 
 Uint8List _buildMetadata(PackageMetadata metadata) {
   return Uint8List.fromList(
-    utf8.encode(
-      jsonEncode(<String, Object?>{
-        'schema': BuildLayoutMetadata.schema,
-        'buildMode': metadata.buildMode,
-        'engineFlavor': metadata.engineFlavor,
-        'flutterVersion': metadata.flutterVersion,
-        'engineCommit': metadata.engineCommit,
-        'target': metadata.target,
-      }),
-    ),
+    utf8.encode(jsonEncode(_buildMetadataDocument(metadata))),
   );
 }
+
+Map<String, Object?> _buildMetadataDocument(PackageMetadata metadata) =>
+    <String, Object?>{
+      'buildMode': metadata.buildMode,
+      'engineFlavor': metadata.engineFlavor,
+      'flutterVersion': metadata.flutterVersion,
+      'engineCommit': metadata.engineCommit,
+      'target': metadata.target,
+    };
 
 Uint8List _canonicalTar(List<PackageEntry> payload) {
   final Map<String, String> hashes = <String, String>{

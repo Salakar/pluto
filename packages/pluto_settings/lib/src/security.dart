@@ -32,7 +32,7 @@ final class SecuritySettings {
     if (payload is bool) {
       return payload;
     }
-    return boolAt(stringMap(payload, 'security.isPinSet'), 'isPinSet');
+    throw const FormatException('Expected security.isPinSet to be a bool.');
   }
 
   /// Sets or replaces the device PIN.
@@ -44,20 +44,8 @@ final class SecuritySettings {
     );
   }
 
-  /// Compatibility helper for string PIN callers.
-  Future<void> setPinString(String pin) async {
-    final DevicePin? parsed = DevicePin.tryParse(pin);
-    if (parsed == null) {
-      throw ArgumentError.value(pin, 'pin', 'must be 4-8 decimal digits');
-    }
-    await setPin(parsed);
-  }
-
   /// Removes the device PIN.
   Future<void> removePin() async {
     await invokeVoid(_transport, securityRemovePinMethod);
   }
 }
-
-/// Compatibility alias for older docs that used `Security`.
-typedef Security = SecuritySettings;

@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -13,15 +14,18 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "presenter/native/rm2/rm2_scan_encoder.h"
+#include "wbf_synth.h"
 
 namespace pluto::native::rm2 {
 namespace {
@@ -81,6 +85,20 @@ public:
       const auto *requested =
           static_cast<uapi::FramebufferVariableInfoArm32 *>(argument);
       panned_offsets.push_back(requested->yoffset);
+      const std::size_t slot_index = requested->yoffset / kRm2ScanoutHeight;
+      std::array<std::uint16_t, 3> before{};
+      if (capture_phase_cells && slot_index < kRm2ActiveSlots) {
+        before = sample_phase_cells(slot_index);
+      }
+      if (pan_delay > std::chrono::nanoseconds::zero()) {
+        std::this_thread::sleep_for(pan_delay);
+      }
+      if (capture_phase_cells && slot_index < kRm2ActiveSlots) {
+        const std::array<std::uint16_t, 3> after =
+            sample_phase_cells(slot_index);
+        latched_slot_mutations += before != after;
+        panned_phase_cells.push_back(after);
+      }
       variable.yoffset = requested->yoffset;
       return 49;
     }
@@ -96,14 +114,40 @@ public:
     return 0;
   }
 
+  std::array<std::uint16_t, 3>
+  sample_phase_cells(std::size_t slot_index) const {
+    std::array<std::uint16_t, 3> result{};
+    for (std::size_t index = 0; index < result.size(); ++index) {
+      std::uint32_t cell = 0;
+      std::memcpy(&cell,
+                  storage.data() + slot_index * kRm2SlotBytes +
+                      phase_cell_offsets[index],
+                  sizeof(cell));
+      result[index] = static_cast<std::uint16_t>(cell);
+    }
+    return result;
+  }
+
   uapi::FramebufferFixedInfoArm32 fixed{};
   uapi::FramebufferVariableInfoArm32 variable{};
   std::vector<std::byte> storage;
   std::vector<std::uintptr_t> blank_values;
   std::vector<std::uint32_t> panned_offsets;
+  std::vector<std::array<std::uint16_t, 3>> panned_phase_cells;
+  std::array<std::size_t, 3> phase_cell_offsets{};
+  std::chrono::nanoseconds pan_delay{};
+  std::size_t latched_slot_mutations = 0;
+  bool capture_phase_cells = false;
   int open_count = 0;
   int close_count = 0;
 };
+
+std::size_t phase_cell_offset_for_user(std::size_t x, std::size_t y) {
+  const std::size_t panel_column = kRm2PanelWidth - 1U - x;
+  const std::size_t panel_row = kRm2PanelHeight - 1U - y;
+  return (4U + panel_column) * kRm2ScanoutStrideBytes +
+         (26U + panel_row / 8U) * sizeof(std::uint32_t);
+}
 
 struct CompletionState {
   std::atomic<int> count{0};
@@ -123,22 +167,27 @@ public:
     namespace fs = std::filesystem;
     static std::atomic<std::uint64_t> sequence{1};
     path_ = (fs::temp_directory_path() /
-             ("pluto_rm2_handoff_320_R405_AFA011_ED103TC2C5_" +
+             ("pluto_rm2_handoff_320_R124_TEST_EDSYNTHRM2_" +
+              std::to_string(static_cast<long long>(::getpid())) + "_" +
               std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) +
               ".wbf"))
                 .string();
-    std::error_code error;
-    fs::copy_file(PLUTO_RM2_WBF_FIXTURE, path_,
-                  fs::copy_options::overwrite_existing, error);
-    if (error) {
+    const test::SyntheticWbf fixture = test::make_synthetic_rm2_program_wbf();
+    std::ofstream output(path_, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char *>(fixture.bytes.data()),
+                 static_cast<std::streamsize>(fixture.bytes.size()));
+    output.close();
+    if (!output) {
       return;
     }
+    sha256_ = wbf_sha256_hex(fixture.expected.sha256);
+    panel_signature_ = fixture.expected.panel_signature;
     profile_ = *generated_device_profile_by_id("rm2");
+    profile_.panel.signature = panel_signature_;
     sources_[0] = {
         .path = path_,
-        .sha256 = "79783d751ba066af12c6ac5aca46279fe7c79d4ef834105bd46824f870"
-                  "f9c6f8",
-        .panel_signature = "ED103TC2C5",
+        .sha256 = sha256_,
+        .panel_signature = panel_signature_,
     };
     profile_.runtime.waveform.accepted_sources = sources_;
     valid_ = true;
@@ -155,6 +204,8 @@ public:
 
 private:
   std::string path_;
+  std::string sha256_;
+  std::string panel_signature_;
   std::array<GeneratedWaveformSourceProfile, 1> sources_{};
   GeneratedDeviceProfile profile_{};
   bool valid_ = false;
@@ -179,6 +230,89 @@ public:
 private:
   std::string path_;
 };
+
+class BackendTemporaryCpuPolicy final {
+public:
+  BackendTemporaryCpuPolicy() {
+    std::string pattern = (std::filesystem::temp_directory_path() /
+                           "pluto-rm2-backend-cpufreq-XXXXXX")
+                              .string();
+    char *created = ::mkdtemp(pattern.data());
+    if (created == nullptr) {
+      return;
+    }
+    root_ = created;
+    policy_ = root_ / "policy0";
+    runtime_ = root_ / "run";
+    std::filesystem::create_directories(policy_);
+    std::filesystem::create_directories(runtime_);
+    write("related_cpus", "0 1\n");
+    write("scaling_min_freq", "792000\n");
+    write("scaling_max_freq", "1200000\n");
+    write("scaling_governor", "ondemand\n");
+    write("thermal_type", "imx_thermal_zone\n");
+    write("cpu_temperature", "33000\n");
+  }
+
+  ~BackendTemporaryCpuPolicy() {
+    std::error_code error;
+    std::filesystem::remove_all(root_, error);
+  }
+
+  bool valid() const { return !root_.empty(); }
+
+  Rm2CpuFrequencyLeasePaths paths() const {
+    return {
+        .policy_path = policy_.string(),
+        .receipt_path = (runtime_ / "rm2-cpufreq-burst").string(),
+        .lock_path = (runtime_ / "rm2-cpufreq-burst.lock").string(),
+        .cpu_thermal_type_path = (policy_ / "thermal_type").string(),
+        .cpu_temperature_path = (policy_ / "cpu_temperature").string(),
+        .owner_start_ticks_for_testing = 67890,
+    };
+  }
+
+  void write(std::string_view name, std::string_view value) const {
+    std::ofstream output(policy_ / name, std::ios::binary | std::ios::trunc);
+    output.write(value.data(), static_cast<std::streamsize>(value.size()));
+  }
+
+  std::string read(std::string_view name) const {
+    std::ifstream input(policy_ / name, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+  }
+
+  bool receipt_exists() const {
+    return std::filesystem::exists(paths().receipt_path);
+  }
+
+  std::uintmax_t receipt_inode() const {
+    struct stat metadata {};
+    return ::stat(paths().receipt_path.c_str(), &metadata) == 0
+               ? static_cast<std::uintmax_t>(metadata.st_ino)
+               : 0;
+  }
+
+private:
+  std::filesystem::path root_;
+  std::filesystem::path policy_;
+  std::filesystem::path runtime_;
+};
+
+bool wait_for_cpu_policy(const BackendTemporaryCpuPolicy &policy,
+                         std::string_view minimum, bool receipt_exists,
+                         std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  do {
+    if (policy.read("scaling_min_freq") == minimum &&
+        policy.receipt_exists() == receipt_exists) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
 
 Rm2HandoffOptions handoff_options(const std::string &path,
                                   GlassHandoffClock (*now)() = nullptr) {
@@ -264,8 +398,13 @@ public:
 bool probe_and_start(LcdifTconDisplayBackend *backend,
                      const LocalRm2Profile &fixture,
                      CompletionState *completion = nullptr) {
-  if (backend == nullptr || !fixture.valid() ||
-      backend->probe(fixture.profile()) != kPlutoStatusOk) {
+  if (backend == nullptr || !fixture.valid()) {
+    return false;
+  }
+  const PlutoStatus probe_status = backend->probe(fixture.profile());
+  if (probe_status != kPlutoStatusOk) {
+    std::fprintf(stderr, "synthetic RM2 fixture probe failed: %d\n",
+                 static_cast<int>(probe_status));
     return false;
   }
   const std::string options = "wbf=" + fixture.waveform_path();
@@ -276,7 +415,12 @@ bool probe_and_start(LcdifTconDisplayBackend *backend,
       .on_complete = completion == nullptr ? nullptr : record_completion,
       .user_data = completion,
   };
-  return backend->start(config) == kPlutoStatusOk;
+  const PlutoStatus start_status = backend->start(config);
+  if (start_status != kPlutoStatusOk) {
+    std::fprintf(stderr, "synthetic RM2 fixture start failed: %d\n",
+                 static_cast<int>(start_status));
+  }
+  return start_status == kPlutoStatusOk;
 }
 
 void draw_fast_pixel(LcdifTconDisplayBackend *backend, std::uint32_t x,
@@ -333,10 +477,10 @@ struct WireSection {
 
 std::optional<WireSection> find_wire_section(std::span<const std::uint8_t> wire,
                                              GlassHandoffSection type) {
-  constexpr std::size_t kBaseHeaderBytes = 192u;
-  constexpr std::size_t kSectionBytes = 32u;
-  const std::uint32_t count = read_u32_le(wire, 24u);
-  const std::uint32_t header_bytes = read_u32_le(wire, 8u);
+  constexpr std::size_t kBaseHeaderBytes = 188u;
+  constexpr std::size_t kSectionBytes = 28u;
+  const std::uint32_t count = read_u32_le(wire, 20u);
+  const std::uint32_t header_bytes = read_u32_le(wire, 4u);
   if (header_bytes != kBaseHeaderBytes + count * kSectionBytes ||
       header_bytes > wire.size()) {
     return std::nullopt;
@@ -345,8 +489,8 @@ std::optional<WireSection> find_wire_section(std::span<const std::uint8_t> wire,
     const std::size_t directory = kBaseHeaderBytes + index * kSectionBytes;
     if (read_u32_le(wire, directory) == static_cast<std::uint32_t>(type)) {
       const WireSection section{
-          .offset = read_u64_le(wire, directory + 8u),
-          .size = read_u64_le(wire, directory + 16u),
+          .offset = read_u64_le(wire, directory + 4u),
+          .size = read_u64_le(wire, directory + 12u),
       };
       if (section.offset <= wire.size() &&
           section.size <= wire.size() - section.offset) {
@@ -389,6 +533,177 @@ void stage_candidate(const LocalRm2Profile &fixture,
   ASSERT_EQ(backend.stage_handoff(&payload->payload, 3000), kPlutoStatusOk);
   backend.stop();
   ASSERT_EQ(::access(handoff_path.c_str(), F_OK), 0);
+}
+
+TEST(LcdifTconBackend,
+     Rm2FrequencyBurstLeaseDebouncesAcrossWorkAndRestoresExactly) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+      .cpu_frequency_debounce_for_testing = std::chrono::milliseconds(500),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  ASSERT_EQ(policy.read("scaling_min_freq"), "1200000\n");
+  ASSERT_TRUE(policy.receipt_exists());
+  const std::uintmax_t receipt_inode = policy.receipt_inode();
+  ASSERT_NE(receipt_inode, 0U);
+
+  draw_fast_pixel(&backend, 3, 5, 0, 101);
+  draw_fast_pixel(&backend, 4, 6, 0x7befU, 102);
+  EXPECT_EQ(policy.read("scaling_min_freq"), "1200000\n");
+  EXPECT_TRUE(policy.receipt_exists());
+  EXPECT_EQ(policy.receipt_inode(), receipt_inode);
+
+  backend.stop();
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(policy.receipt_exists());
+}
+
+TEST(LcdifTconBackend, Rm2FrequencyBurstLeaseRestoresAfterIdleDebounce) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+      .cpu_frequency_debounce_for_testing = std::chrono::milliseconds(10),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  ASSERT_TRUE(
+      wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
+  draw_fast_pixel(&backend, 9, 11, 0, 103);
+  ASSERT_TRUE(
+      wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
+  backend.stop();
+}
+
+TEST(LcdifTconBackend,
+     Rm2FrequencyGuardFailurePreventsFramebufferInitializationAndAdmission) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  policy.write("scaling_max_freq", "996000\n");
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(syscalls.blank_values.empty());
+  EXPECT_TRUE(syscalls.panned_offsets.empty());
+  EXPECT_FALSE(policy.receipt_exists());
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+}
+
+TEST(LcdifTconBackend,
+     Rm2FrequencyGuardRejectsAChangedPolicyBeforeNextPanelSubmission) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+      .cpu_frequency_debounce_for_testing = std::chrono::milliseconds(10),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  ASSERT_TRUE(
+      wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
+
+  policy.write("scaling_max_freq", "996000\n");
+  syscalls.blank_values.clear();
+  syscalls.panned_offsets.clear();
+  OwnedPixelRequest request(3, 7, 0, 104);
+  EXPECT_EQ(backend.submit(&request.request), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(syscalls.panned_offsets.empty());
+  EXPECT_FALSE(policy.receipt_exists());
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+  backend.stop();
+}
+
+TEST(LcdifTconBackend, Rm2FrequencyBurstRejectsPanelTemperatureAt45C) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = policy.paths(),
+      .cpu_frequency_debounce_for_testing = std::chrono::milliseconds(10),
+  };
+  int temperature_reads = 0;
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [&](std::string *) -> std::optional<int> {
+        return ++temperature_reads == 1 ? 24000 : 45000;
+      },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  ASSERT_TRUE(
+      wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
+  syscalls.panned_offsets.clear();
+
+  OwnedPixelRequest request(4, 8, 0, 105);
+  EXPECT_EQ(backend.submit(&request.request), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(std::all_of(syscalls.panned_offsets.begin(),
+                          syscalls.panned_offsets.end(),
+                          [](std::uint32_t offset) {
+                            return offset == kRm2IdleSlot * kRm2ScanoutHeight;
+                          }));
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(policy.receipt_exists());
+  backend.stop();
 }
 
 TEST(LcdifTconBackend, PreflightsThenInitScansAndCompletesOnlyOnFinalIdlePage) {
@@ -640,6 +955,160 @@ TEST(LcdifTconBackend,
   }
 
   fs::remove(local_path, filesystem_error);
+}
+
+TEST(LcdifTconBackend,
+     SparseFullDamageKeepsDisjointRegionsSeparateAndDoesNotExpandPanel) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  constexpr std::size_t kFirstX = 10;
+  constexpr std::size_t kFirstY = 10;
+  constexpr std::size_t kSecondX = 1300;
+  constexpr std::size_t kSecondY = 1800;
+  constexpr std::size_t kUndamagedX = 700;
+  constexpr std::size_t kUndamagedY = 900;
+  BackendFakeLcdifSyscalls syscalls;
+  syscalls.capture_phase_cells = true;
+  syscalls.phase_cell_offsets = {
+      phase_cell_offset_for_user(kFirstX, kFirstY),
+      phase_cell_offset_for_user(kSecondX, kSecondY),
+      phase_cell_offset_for_user(kUndamagedX, kUndamagedY),
+  };
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; });
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  syscalls.panned_phase_cells.clear();
+  syscalls.latched_slot_mutations = 0;
+
+  std::vector<std::uint16_t> pixels(kRm2PanelWidth * kRm2PanelHeight, 0xffffU);
+  pixels[kFirstY * kRm2PanelWidth + kFirstX] = 0;
+  pixels[kSecondY * kRm2PanelWidth + kSecondX] = 0x7befU;
+  pixels[kUndamagedY * kRm2PanelWidth + kUndamagedX] = 0x39e7U;
+  const std::array<PlutoRect, 2> damage{{
+      {.x = static_cast<std::int32_t>(kFirstX),
+       .y = static_cast<std::int32_t>(kFirstY),
+       .width = 1,
+       .height = 1},
+      {.x = static_cast<std::int32_t>(kSecondX),
+       .y = static_cast<std::int32_t>(kSecondY),
+       .width = 1,
+       .height = 1},
+  }};
+  const PlutoPresentRequest request{
+      .struct_size = sizeof(PlutoPresentRequest),
+      .surface =
+          {
+              .pixels = reinterpret_cast<const std::uint8_t *>(pixels.data()),
+              .stride_bytes = kRm2PanelWidth * sizeof(std::uint16_t),
+              .width = static_cast<std::int32_t>(kRm2PanelWidth),
+              .height = static_cast<std::int32_t>(kRm2PanelHeight),
+              .format = kPlutoPixelFormatRgb565,
+          },
+      .damage = damage.data(),
+      .damage_count = damage.size(),
+      .refresh_class = kPlutoRefreshFull,
+      .flags = 0,
+      .frame_id = 0x5a5aU,
+  };
+  ASSERT_EQ(backend.submit(&request), kPlutoStatusOk);
+  ASSERT_EQ(backend.wait_idle(3000), kPlutoStatusOk);
+  EXPECT_EQ(syscalls.latched_slot_mutations, 0U);
+  ASSERT_TRUE(!syscalls.panned_phase_cells.empty());
+  bool first_region_driven = false;
+  bool second_region_driven = false;
+  for (const auto &samples : syscalls.panned_phase_cells) {
+    first_region_driven |= samples[0] != 0;
+    second_region_driven |= samples[1] != 0;
+    EXPECT_EQ(samples[2], 0U);
+  }
+  EXPECT_TRUE(first_region_driven);
+  EXPECT_TRUE(second_region_driven);
+
+  std::vector<std::uint16_t> snapshot_pixels(kRm2PanelWidth * kRm2PanelHeight);
+  PlutoSurface snapshot{
+      .pixels = reinterpret_cast<const std::uint8_t *>(snapshot_pixels.data()),
+      .stride_bytes = kRm2PanelWidth * sizeof(std::uint16_t),
+      .width = static_cast<std::int32_t>(kRm2PanelWidth),
+      .height = static_cast<std::int32_t>(kRm2PanelHeight),
+      .format = kPlutoPixelFormatRgb565,
+  };
+  ASSERT_EQ(backend.snapshot(&snapshot), kPlutoStatusOk);
+  EXPECT_EQ(snapshot_pixels[kFirstY * kRm2PanelWidth + kFirstX], 0U);
+  EXPECT_EQ(snapshot_pixels[kSecondY * kRm2PanelWidth + kSecondX], 0x7befU);
+  EXPECT_EQ(snapshot_pixels[kUndamagedY * kRm2PanelWidth + kUndamagedX],
+            0xffffU);
+  backend.stop();
+}
+
+TEST(LcdifTconBackend, DamageAmplificationUsesUniqueRequestedUnionArea) {
+  const std::array<PlutoRect, 3> damage{{
+      {.x = 0, .y = 0, .width = 10, .height = 10},
+      {.x = 0, .y = 0, .width = 10, .height = 10},
+      {.x = 5, .y = 0, .width = 10, .height = 10},
+  }};
+  EXPECT_EQ(rm2_damage_union_area(damage), 150U);
+}
+
+TEST(LcdifTconBackend,
+     BlockingPanOverlapsNextEncodeAndKeepsLatchedSlotImmutable) {
+  LocalRm2Profile fixture;
+  ASSERT_TRUE(fixture.valid());
+  BackendFakeLcdifSyscalls syscalls;
+  syscalls.pan_delay = std::chrono::milliseconds(8);
+  syscalls.capture_phase_cells = true;
+  const std::size_t sampled_cell =
+      phase_cell_offset_for_user(32U, kRm2PanelHeight / 2U);
+  syscalls.phase_cell_offsets = {sampled_cell, sampled_cell, sampled_cell};
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = {},
+      .phase_encode_delay_for_testing = std::chrono::milliseconds(5),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  syscalls.panned_phase_cells.clear();
+  syscalls.latched_slot_mutations = 0;
+
+  std::vector<std::uint16_t> pixels(kRm2PanelWidth * kRm2PanelHeight, 0x2104U);
+  const PlutoRect damage{
+      .x = 0,
+      .y = 0,
+      .width = 64,
+      .height = static_cast<std::int32_t>(kRm2PanelHeight),
+  };
+  const PlutoPresentRequest request{
+      .struct_size = sizeof(PlutoPresentRequest),
+      .surface =
+          {
+              .pixels = reinterpret_cast<const std::uint8_t *>(pixels.data()),
+              .stride_bytes = kRm2PanelWidth * sizeof(std::uint16_t),
+              .width = static_cast<std::int32_t>(kRm2PanelWidth),
+              .height = static_cast<std::int32_t>(kRm2PanelHeight),
+              .format = kPlutoPixelFormatRgb565,
+          },
+      .damage = &damage,
+      .damage_count = 1,
+      .refresh_class = kPlutoRefreshUi,
+      .flags = 0,
+      .frame_id = 0x90U,
+  };
+  ASSERT_EQ(backend.submit(&request), kPlutoStatusOk);
+  // The former serial path necessarily spent 8 ms in pan plus the injected
+  // 5 ms encode delay and failed the 12.351 ms cadence limit. The production
+  // pipeline overlaps them, so this request completes all four phases.
+  ASSERT_EQ(backend.wait_idle(3000), kPlutoStatusOk);
+  EXPECT_EQ(backend.health().completed_jobs, 1U);
+  EXPECT_EQ(syscalls.latched_slot_mutations, 0U);
+  EXPECT_EQ(syscalls.panned_phase_cells.size(), 4U);
+  backend.stop();
 }
 
 TEST(LcdifTconBackend,

@@ -21,7 +21,7 @@ void main() {
         ..onInvoke(
           plutoSettingsChannel,
           wifiIsEnabledMethod,
-          (Object? arguments) => <String, Object?>{'enabled': true},
+          (Object? arguments) => true,
         )
         ..onInvoke(
           plutoSettingsChannel,
@@ -88,20 +88,6 @@ void main() {
     },
   );
 
-  test('frontlight stream decodes events', () async {
-    final FakePlutoTransport transport = FakePlutoTransport();
-    final Frontlight frontlight = Frontlight.withTransport(transport);
-
-    final Future<FrontlightState> first = frontlight.onChanged.first;
-    transport.emitEvent(plutoSettingsEventsChannel, <String, Object?>{
-      'raw': 2047,
-      'maxRaw': 2047,
-    });
-
-    expect((await first).isOn, isTrue);
-    await transport.close();
-  });
-
   test('invalid raw brightness and invalid PIN fail before wire use', () async {
     final FakePlutoTransport transport = FakePlutoTransport()
       ..onInvoke(
@@ -114,6 +100,32 @@ void main() {
 
     expect(frontlight.setBrightnessRaw(11), throwsRangeError);
     expect(DevicePin.tryParse('abcd'), isNull);
+  });
+
+  test('settings responses reject unknown and non-string fields', () async {
+    final FakePlutoTransport transport = FakePlutoTransport()
+      ..onInvoke(
+        plutoSettingsChannel,
+        frontlightReadMethod,
+        (Object? arguments) => <Object?, Object?>{
+          'raw': 1,
+          'maxRaw': 10,
+          'future': true,
+        },
+      )
+      ..onInvoke(
+        plutoSettingsChannel,
+        powerPolicyMethod,
+        (Object? arguments) => <Object?, Object?>{
+          'idleSuspendDelayMs': 1,
+          'suspendPowerOffDelayMs': 2,
+          3: 'invalid-key',
+        },
+      );
+
+    final PlutoSettings settings = PlutoSettings.withTransport(transport);
+    await expectLater(settings.frontlight.state(), throwsFormatException);
+    await expectLater(settings.power.policy(), throwsFormatException);
   });
 
   test(
@@ -153,23 +165,11 @@ void main() {
         );
 
       final WifiSettings wifi = WifiSettings.withTransport(transport);
-      final Future<WifiStatus> status = wifi.onStatusChanged.first;
-      transport.emitEvent(plutoSettingsEventsChannel, <String, Object?>{
-        'status': 'connected',
-        'connection': <String, Object?>{
-          'ssid': 'Lab',
-          'ipAddress': '192.168.1.74',
-          'signal': 0.9,
-        },
-      });
-
       expect((await wifi.connect(ssid: 'Lab')).ipAddress, '192.168.1.74');
       expect(await wifi.activeConnection(), isNull);
       expect((await wifi.knownNetworks()).single.security, WifiSecurity.sae);
       await wifi.disconnect();
       await wifi.forgetNetwork(ssid: 'Lab');
-      expect(await status, isA<WifiConnected>());
-
       final FakePlutoTransport failing = FakePlutoTransport()
         ..onInvoke(
           plutoSettingsChannel,
@@ -209,11 +209,6 @@ void main() {
         )
         ..onInvoke(
           plutoSettingsChannel,
-          powerSuspendNowMethod,
-          (Object? arguments) => null,
-        )
-        ..onInvoke(
-          plutoSettingsChannel,
           securityRemovePinMethod,
           (Object? arguments) => null,
         )
@@ -229,7 +224,6 @@ void main() {
       final PowerSettings power = PowerSettings.withTransport(transport);
       await power.setIdleSuspendDelay(const Duration(minutes: 10));
       await power.setSuspendPowerOffDelay(const Duration(hours: 1));
-      await power.suspendNow();
       await SecuritySettings.withTransport(transport).removePin();
       final MarkerBatteryStatus? marker = await BatteryTelemetry.withTransport(
         transport,
@@ -238,47 +232,11 @@ void main() {
       expect(marker!.nfcCellLevel, 0);
       expect(
         transport.invocations.map((invocation) => invocation.method),
-        contains(powerSuspendNowMethod),
+        containsAll(<String>[
+          powerSetIdleSuspendDelayMethod,
+          powerSetSuspendPowerOffDelayMethod,
+        ]),
       );
     },
   );
-
-  test('status and battery streams decode remaining variants', () async {
-    final FakePlutoTransport transport = FakePlutoTransport();
-    final WifiSettings wifi = WifiSettings.withTransport(transport);
-    final BatteryTelemetry battery = BatteryTelemetry.withTransport(transport);
-
-    final Future<List<WifiStatus>> statuses = wifi.onStatusChanged
-        .take(3)
-        .toList();
-    transport.emitEvent(plutoSettingsEventsChannel, <String, Object?>{
-      'status': 'disabled',
-    });
-    transport.emitEvent(plutoSettingsEventsChannel, <String, Object?>{
-      'status': 'disconnected',
-    });
-    transport.emitEvent(plutoSettingsEventsChannel, <String, Object?>{
-      'status': 'connecting',
-      'ssid': 'Lab',
-    });
-
-    final Future<BatteryStatus> device = battery.deviceBatteryUpdates().first;
-    transport.emitEvent(plutoSettingsEventsChannel, <String, Object?>{
-      'level': 1.0,
-      'state': 'full',
-      'isUsbPowerPresent': true,
-    });
-    final Future<MarkerBatteryStatus?> marker = battery
-        .markerBatteryUpdates()
-        .first;
-    transport.emitEvent(plutoSettingsEventsChannel, null);
-
-    expect(await statuses, <Matcher>[
-      isA<WifiDisabled>(),
-      isA<WifiDisconnected>(),
-      isA<WifiConnecting>(),
-    ]);
-    expect((await device).state, BatteryChargingState.full);
-    expect(await marker, isNull);
-  });
 }

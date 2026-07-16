@@ -11,9 +11,8 @@
 namespace pluto {
 namespace {
 
-constexpr uint8_t kMagic[8] = {'P', 'L', 'R', 'H', 'N', 'D', '0', '1'};
-constexpr uint32_t kWireVersion = 1;
-constexpr size_t kHeaderSize = 72;
+constexpr uint8_t kMagic[8] = {'P', 'L', 'R', 'S', 'T', 'A', 'T', 'E'};
+constexpr size_t kHeaderSize = 68;
 constexpr size_t kMaximumPayloadBytes = 64u * 1024u * 1024u;
 constexpr uint64_t kCrc64Polynomial = 0x42f0e1eba9ea3693ULL;
 
@@ -406,7 +405,6 @@ PerceptionConstants read_perception(Reader &reader) {
 }
 
 void write_frame_ledger(Writer &writer, const FrameLedgerState &state) {
-  writer.u32(state.version);
   writer.u32(state.config.width);
   writer.u32(state.config.height);
   writer.u32(state.config.tile_px);
@@ -441,7 +439,6 @@ void write_frame_ledger(Writer &writer, const FrameLedgerState &state) {
 
 FrameLedgerState read_frame_ledger(Reader &reader) {
   FrameLedgerState state;
-  state.version = reader.u32();
   state.config.width = reader.u32();
   state.config.height = reader.u32();
   state.config.tile_px = reader.u32();
@@ -546,7 +543,6 @@ ClassifyLadderConfig read_ladder_config(Reader &reader) {
 }
 
 void write_ladder(Writer &writer, const ClassifyLadderState &state) {
-  writer.u32(state.version);
   write_ladder_config(writer, state.config);
   writer.u32(state.epoch);
   writer.u64(state.history.size());
@@ -562,7 +558,6 @@ void write_ladder(Writer &writer, const ClassifyLadderState &state) {
 
 ClassifyLadderState read_ladder(Reader &reader) {
   ClassifyLadderState state;
-  state.version = reader.u32();
   state.config = read_ladder_config(reader);
   state.epoch = reader.u32();
   const uint64_t count = reader.u64();
@@ -587,7 +582,6 @@ ClassifyLadderState read_ladder(Reader &reader) {
 }
 
 void write_ghost(Writer &writer, const GhostLedgerState &state) {
-  writer.u32(state.version);
   write_grid(writer, state.grid);
   writer.u32(state.tau_ms);
   writer.u16(state.owed_threshold);
@@ -601,7 +595,6 @@ void write_ghost(Writer &writer, const GhostLedgerState &state) {
 
 GhostLedgerState read_ghost(Reader &reader) {
   GhostLedgerState state;
-  state.version = reader.u32();
   state.grid = read_grid(reader);
   state.tau_ms = reader.u32();
   state.owed_threshold = reader.u16();
@@ -615,7 +608,6 @@ GhostLedgerState read_ghost(Reader &reader) {
 }
 
 void write_stress(Writer &writer, const StressLedgerState &state) {
-  writer.u32(state.version);
   write_grid(writer, state.grid);
   writer.u64(state.last_decay_us);
   writer.boolean(state.clock_started);
@@ -626,7 +618,6 @@ void write_stress(Writer &writer, const StressLedgerState &state) {
 
 StressLedgerState read_stress(Reader &reader) {
   StressLedgerState state;
-  state.version = reader.u32();
   state.grid = read_grid(reader);
   state.last_decay_us = reader.u64();
   state.clock_started = reader.boolean();
@@ -637,7 +628,6 @@ StressLedgerState read_stress(Reader &reader) {
 }
 
 void write_chroma(Writer &writer, const ChromaPendingState &state) {
-  writer.u32(state.version);
   write_grid(writer, state.grid);
   writer.u64(state.pending_count);
   writer.vector_u8(state.pending);
@@ -645,7 +635,6 @@ void write_chroma(Writer &writer, const ChromaPendingState &state) {
 
 ChromaPendingState read_chroma(Reader &reader) {
   ChromaPendingState state;
-  state.version = reader.u32();
   state.grid = read_grid(reader);
   state.pending_count = reader.u64();
   state.pending = reader.vector_u8();
@@ -675,7 +664,6 @@ SettlePlannerConfig read_planner_config(Reader &reader) {
 }
 
 void write_planner(Writer &writer, const SettlePlannerState &state) {
-  writer.u32(state.version);
   write_planner_config(writer, state.config);
   writer.vector_u64(state.last_damage_us);
   writer.u64(state.forced.size());
@@ -693,7 +681,6 @@ void write_planner(Writer &writer, const SettlePlannerState &state) {
 
 SettlePlannerState read_planner(Reader &reader) {
   SettlePlannerState state;
-  state.version = reader.u32();
   state.config = read_planner_config(reader);
   state.last_damage_us = reader.vector_u64();
   const uint64_t count = reader.u64();
@@ -769,7 +756,6 @@ AutoGhostbusterPlaneState read_auto_plane(Reader &reader) {
 }
 
 void write_auto(Writer &writer, const AutoGhostbusterState &state) {
-  writer.u32(state.version);
   write_grid(writer, state.grid);
   write_auto_config(writer, state.config);
   writer.u64(state.display_pixels);
@@ -794,7 +780,6 @@ void write_auto(Writer &writer, const AutoGhostbusterState &state) {
 
 AutoGhostbusterState read_auto(Reader &reader) {
   AutoGhostbusterState state;
-  state.version = reader.u32();
   state.grid = read_grid(reader);
   state.config = read_auto_config(reader);
   state.display_pixels = reader.u64();
@@ -890,7 +875,6 @@ RegionSchedulerStateConfig read_scheduler_config(Reader &reader) {
 }
 
 void write_scheduler(Writer &writer, const RegionSchedulerState &state) {
-  writer.u32(state.version);
   write_scheduler_config(writer, state.config);
   writer.boolean(state.has_debt_grid);
   write_grid(writer, state.debt_grid);
@@ -903,7 +887,6 @@ void write_scheduler(Writer &writer, const RegionSchedulerState &state) {
 
 RegionSchedulerState read_scheduler(Reader &reader) {
   RegionSchedulerState state;
-  state.version = reader.u32();
   state.config = read_scheduler_config(reader);
   state.has_debt_grid = reader.boolean();
   state.debt_grid = read_grid(reader);
@@ -916,7 +899,6 @@ RegionSchedulerState read_scheduler(Reader &reader) {
 }
 
 void write_top_config(Writer &writer, const RendererHandoffState &state) {
-  writer.u32(state.version);
   writer.u32(state.width);
   writer.u32(state.height);
   writer.u32(state.rotation);
@@ -939,29 +921,21 @@ void write_top_config(Writer &writer, const RendererHandoffState &state) {
 
 void write_configuration(Writer &writer, const RendererHandoffState &state) {
   write_top_config(writer, state);
-  writer.u32(state.frame_ledger.version);
   writer.u32(state.frame_ledger.config.width);
   writer.u32(state.frame_ledger.config.height);
   writer.u32(state.frame_ledger.config.tile_px);
   writer.u64(state.frame_ledger.stride);
   writer.u64(state.frame_ledger.chroma_stride);
-  writer.u32(state.classify_ladder.version);
   write_ladder_config(writer, state.classify_ladder.config);
-  writer.u32(state.ghost_ledger.version);
   write_grid(writer, state.ghost_ledger.grid);
   writer.u32(state.ghost_ledger.tau_ms);
   writer.u16(state.ghost_ledger.owed_threshold);
-  writer.u32(state.stress_ledger.version);
   write_grid(writer, state.stress_ledger.grid);
-  writer.u32(state.chroma_pending.version);
   write_grid(writer, state.chroma_pending.grid);
-  writer.u32(state.settle_planner.version);
   write_planner_config(writer, state.settle_planner.config);
-  writer.u32(state.auto_ghostbuster.version);
   write_grid(writer, state.auto_ghostbuster.grid);
   write_auto_config(writer, state.auto_ghostbuster.config);
   writer.u64(state.auto_ghostbuster.display_pixels);
-  writer.u32(state.region_scheduler.version);
   write_scheduler_config(writer, state.region_scheduler.config);
   writer.boolean(state.region_scheduler.has_debt_grid);
   write_grid(writer, state.region_scheduler.debt_grid);
@@ -988,7 +962,6 @@ void write_body(Writer &writer, const RendererHandoffState &state) {
 
 RendererHandoffState read_body(Reader &reader) {
   RendererHandoffState state;
-  state.version = reader.u32();
   state.width = reader.u32();
   state.height = reader.u32();
   state.rotation = reader.u32();
@@ -1074,8 +1047,6 @@ const char *renderer_handoff_reject_name(RendererHandoffReject reject) {
     return "truncated";
   case RendererHandoffReject::kMagic:
     return "magic";
-  case RendererHandoffReject::kVersion:
-    return "version";
   case RendererHandoffReject::kHeader:
     return "header";
   case RendererHandoffReject::kChecksum:
@@ -1103,8 +1074,8 @@ renderer_handoff_configuration_hash(const RendererHandoffState &state) {
 
 bool renderer_handoff_validate(const RendererHandoffState &state) {
   const size_t bpp = format_bytes(state.pixel_format);
-  if (state.version != RendererHandoffState::kVersion || state.width == 0 ||
-      state.height == 0 || !valid_rotation(state.rotation) || bpp == 0 ||
+  if (state.width == 0 || state.height == 0 ||
+      !valid_rotation(state.rotation) || bpp == 0 ||
       format_bytes(state.presenter_format) == 0 ||
       state.width > std::numeric_limits<size_t>::max() / bpp ||
       state.retained_stride != static_cast<uint64_t>(state.width) * bpp ||
@@ -1270,7 +1241,6 @@ bool renderer_handoff_encode(const RendererHandoffState &state,
 
   Writer header(kHeaderSize);
   header.raw(kMagic);
-  header.u32(kWireVersion);
   header.u32(kHeaderSize);
   header.u64(encoded.bytes().size());
   header.u64(configuration_hash);
@@ -1318,7 +1288,6 @@ bool renderer_handoff_decode(std::span<const uint8_t> bytes,
   for (size_t i = 0; i < sizeof(kMagic); ++i) {
     (void)header.u8();
   }
-  const uint32_t version = header.u32();
   const uint32_t header_size = header.u32();
   const uint64_t total_size = header.u64();
   const uint64_t configuration_hash = header.u64();
@@ -1332,10 +1301,6 @@ bool renderer_handoff_decode(std::span<const uint8_t> bytes,
   if (!header.ok() || header.remaining() != 0 || header_size != kHeaderSize ||
       total_size != bytes.size()) {
     set_reject(RendererHandoffReject::kHeader, reject);
-    return false;
-  }
-  if (version != kWireVersion) {
-    set_reject(RendererHandoffReject::kVersion, reject);
     return false;
   }
   if (header_checksum != crc64(bytes.first(kHeaderSize - sizeof(uint64_t))) ||

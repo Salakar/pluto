@@ -33,15 +33,17 @@ ratio to Flutter. App manifests keep `display.scale: auto` (also the default
 when omitted), and widgets lay out from live `MediaQuery` and parent
 constraints just as they do on other Flutter platforms.
 
-A numeric manifest scale is an explicit legacy compatibility override, not a
-device selector. Likewise, 954 x 1696 values in design systems, golden tests,
+Numeric manifest scales are rejected. The `scale` field may only be omitted or
+set to `auto`. Likewise, 954 x 1696 values in design systems, golden tests,
 document presets, or Move renderer research are reference coordinates with an
 explicit scope; they do not define the runtime viewport on another tablet.
 Compatibility acceptance therefore checks full-surface use, reflow, reachable
 controls, pen/touch coordinate mapping, and screenshots at the native metrics
 of each tested device.
 
-The release embedder reported these presenter metrics on the attached units:
+The generated exact-device profiles define these presenter metrics. Move and
+RM1 have also reported their rows from a running native embedder; RM2 remains a
+layout/input contract until its first safe physical-panel run is completed:
 
 | Device | Native panel surface | Flutter device pixel ratio |
 | --- | ---: | ---: |
@@ -51,7 +53,8 @@ The release embedder reported these presenter metrics on the attached units:
 
 Those are inputs to Flutter's normal logical-pixel model, not three separately
 authored app canvases. The same release Home, Ink, and Codex layouts reflow from
-the resulting constraints.
+the resulting constraints. The RM2 row is not evidence that Pluto has rendered
+to its glass.
 
 ## One public workflow
 

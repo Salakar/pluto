@@ -8,7 +8,7 @@ TMP=${TMPDIR:-/tmp}/pluto-session-debug-authorization-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
 MOVE_WAVEFORM=/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink
-MOVE_BASE_OPTIONS=exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0
+MOVE_BASE_OPTIONS=exact_color=1,enable_rails=1,vcom=-0.62
 SESSION_PID=""
 
 cleanup() {

@@ -25,8 +25,8 @@ Each scene dwells for its nominal duration and is then held frozen for a
 cancelled so it freezes in its final static state, the HUD clock stops, and the
 banner is untouched — the app paints nothing, letting the renderer's quiescence
 settles fire and clear ghost debt between scenes. One full cycle is
-**184 s dwell + 10 × 2.5 s rest = 209 s** (≥ 3 min, matching the dead-man
-discipline). Scenes in loop order (dwell excludes the rest beacon):
+**184 s dwell + 10 × 2.5 s rest = 209 s** (≥ 3 min, matching the device
+restart-safety discipline). Scenes in loop order (dwell excludes the rest beacon):
 
 | # | Scene id | Dwell | Content | Exercises | Expected e-ink behavior |
 |---|----------|-------|---------|-----------|-------------------------|
@@ -88,29 +88,6 @@ pluto build package --device "$DEVICE" --release \
 
 `pluto run` launches an already installed app; bake defines into the package
 and reinstall it before launching.
-
-### Archived direct-backend maintainer diagnostic
-
-The raw embedder's `--dart-entrypoint-args` path predates the common device-aware
-workflow. It is retained only for an isolated direct-backend maintainer
-diagnostic on a disposable test session; it is not a supported installation or
-compatibility procedure, does not apply to normal native sessions, and must not
-replace `pluto build`, `install`, `run`, or `provision`.
-
-In that archived diagnostic, the same options were available at runtime without
-recompiling:
-
-```sh
-/home/root/pluto/bin/pluto-embedder ... \
-    --dart-entrypoint-args=--scene=pen-scribble
-/home/root/pluto/bin/pluto-embedder ... \
-    --dart-entrypoint-args=--mode=manual,--hud=off
-```
-
-Entrypoint args override `--dart-define` values. The direct device supervisor
-(`tools/device/pluto-session.sh`) does not pass per-app entrypoint args yet,
-which is why this remains a raw maintainer-only invocation. Valid scene ids are
-the table above; an unknown id fails fast with the valid list in the error.
 
 ## Running on device
 

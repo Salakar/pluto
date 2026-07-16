@@ -207,6 +207,7 @@ validate_embedder_cmdline() {
   proc_has_arg "$pid" --presenter=native || return 1
   proc_has_arg "$pid" "--engine=$ROOT/engine/release/libflutter_engine.so" || return 1
   proc_has_arg "$pid" "--bundle=$expected_bundle" || return 1
+  proc_has_arg "$pid" "--icu-data=$expected_bundle/icudtl.dat" || return 1
   proc_has_arg "$pid" "--aot-elf=$expected_bundle/lib/app.so" || return 1
   proc_has_arg "$pid" --debug && return 1
   proc_has_arg "$pid" --profile && return 1
@@ -258,8 +259,8 @@ read_temperature() {
   TEMP_SENSOR=
   TEMP_PATH=
   TEMP_MILLIC=
-  case "$PLUTO_PROFILE_ID" in
-    rm1)
+  case "$PLUTO_PROFILE_DISPLAY_DRIVER" in
+    mxcfb_epdc)
       for zone in "$(real_path /sys/class/thermal)"/thermal_zone*; do
         [ -d "$zone" ] || continue
         name=$(cat "$zone/type" 2>/dev/null || true)
@@ -272,7 +273,7 @@ read_temperature() {
         break
       done
       ;;
-    rm2)
+    lcdif_tcon)
       for hwmon in "$(real_path /sys/class/hwmon)"/hwmon*; do
         [ -d "$hwmon" ] || continue
         name=$(cat "$hwmon/name" 2>/dev/null || true)
@@ -290,7 +291,7 @@ read_temperature() {
         break
       done
       ;;
-    move)
+    gallery3_drm)
       candidates=
       for hwmon in "$(real_path /sys/class/hwmon)"/hwmon*; do
         [ -d "$hwmon" ] || continue
@@ -459,9 +460,13 @@ for value in "${PLUTO_PROFILE_ID:-}" "${PLUTO_PROFILE_TARGET:-}" \
   "${PLUTO_PROFILE_KERNEL_RELEASE:-}"; do
   is_safe_token "$value" || fail 'profile contains a malformed required field'
 done
-case "$PLUTO_PROFILE_ID:$PLUTO_PROFILE_TARGET" in
-  rm1:linux-arm|rm2:linux-arm|move:linux-arm64) ;;
-  *) fail "unsupported profile/target pair: $PLUTO_PROFILE_ID/$PLUTO_PROFILE_TARGET" ;;
+case "${PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED:-}" in
+  0|1) ;;
+  *) fail 'profile contains an invalid boot-default recovery gate' ;;
+esac
+case "$PLUTO_PROFILE_ID:$PLUTO_PROFILE_TARGET:$PLUTO_PROFILE_DISPLAY_DRIVER" in
+  rm1:linux-arm:mxcfb_epdc|rm2:linux-arm:lcdif_tcon|move:linux-arm64:gallery3_drm) ;;
+  *) fail "unsupported profile/target/driver tuple: $PLUTO_PROFILE_ID/$PLUTO_PROFILE_TARGET/$PLUTO_PROFILE_DISPLAY_DRIVER" ;;
 esac
 
 FIRMWARE=$(read_one_line "$(real_path /etc/version)") || fail 'firmware build receipt is malformed'
@@ -545,8 +550,12 @@ else
   printf 'service.boot_confirmed=not-required-current-boot\n'
 fi
 if [ "$SELECTED_UNIT" = pluto-session-once.service ]; then
-  [ "$PLUTO_PROFILE_ID" = move ] || fail 'one-shot Pluto ownership is accepted only for Move'
+  [ "$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED" = 0 ] ||
+    fail 'one-shot Pluto ownership contradicts an enabled boot-default recovery gate'
   [ "$XOCHITL_ACTIVE" = inactive ] && [ "$XOCHITL_SUB" = dead ] || fail 'stock xochitl is not inactive during one-shot Pluto ownership'
+else
+  [ "$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED" = 1 ] ||
+    fail 'persistent Pluto ownership contradicts a closed boot-default recovery gate'
 fi
 
 trace 'prove the foreground release/AOT embedder and completion receipts'
@@ -766,8 +775,8 @@ printf 'temperature.millic_end=%s\n' "$TEMP_MILLIC"
 printf 'temperature.delta_millic=%s\n' "$((TEMP_MILLIC - TEMP_START))"
 
 trace 'collect and validate backend-specific presenter timing/fault telemetry'
-case "$PLUTO_PROFILE_ID" in
-  rm1)
+case "$PLUTO_PROFILE_DISPLAY_DRIVER" in
+  mxcfb_epdc)
     TELEMETRY=$(last_active_log_line 'mxcfb: damage telemetry ') || fail 'RM1 damage/update telemetry receipt is absent from an activation-bound process log'
     for field in updates requested_px driven_px amplified full regional_full legacy_full_px_avoided max_amp_milli; do
       value=$(line_field "$TELEMETRY" "$field") || fail "RM1 telemetry field is missing: $field"
@@ -779,7 +788,7 @@ case "$PLUTO_PROFILE_ID" in
     printf 'telemetry.rm1.raw=%s\n' "$TELEMETRY"
     printf 'telemetry.rm1.rejection_count=%s\n' "$REJECTIONS"
     ;;
-  rm2)
+  lcdif_tcon)
     TELEMETRY=$(last_active_log_line 'lcdif_tcon: telemetry ') || fail 'RM2 timing/fault telemetry receipt is absent from an activation-bound process log'
     for field in jobs phases encode_p50_us encode_p95_us encode_p99_us encode_max_us missed_deadlines underflows safe_holds hardware_faults; do
       value=$(line_field "$TELEMETRY" "$field") || fail "RM2 telemetry field is missing: $field"
@@ -790,7 +799,7 @@ case "$PLUTO_PROFILE_ID" in
     [ "$RM2_missed_deadlines" -eq 0 ] && [ "$RM2_underflows" -eq 0 ] && [ "$RM2_hardware_faults" -eq 0 ] || fail 'RM2 timing/fault telemetry is not clean'
     printf 'telemetry.rm2.raw=%s\n' "$TELEMETRY"
     ;;
-  move)
+  gallery3_drm)
     TELEMETRY=$(last_active_log_line 'swtcon stats: ') || fail 'Move presenter timing/fault telemetry receipt is absent from an activation-bound process log'
     for field in builds build_p50_us build_p95_us build_max_us completions dropped color_fault hold_rescans neutral_frames; do
       value=$(line_field "$TELEMETRY" "$field") || fail "Move telemetry field is missing: $field"

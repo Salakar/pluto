@@ -155,27 +155,20 @@ final class PlapArchive {
       manifestEntry.bytes,
       description: 'Package manifest.json',
     );
-    final Object? id = manifest['id'];
-    if (id is! String || !isSafeAppId(id)) {
-      throw ArtifactVerificationException(
-        message: 'Package manifest has no valid "id" (got: $id).',
-        remediation:
-            'App ids must be reverse-DNS style (e.g. dev.example.notes) '
-            'with no path separators.',
-      );
-    }
-    final Object? rawIconPath = manifest['icon'];
-    final String? iconPath = rawIconPath is String ? rawIconPath : null;
-    if (rawIconPath != null && iconPath == null) {
-      throw const ArtifactVerificationException(
-        message: 'Package manifest icon must be a relative string path.',
-      );
-    }
-    if (iconPath != null) {
+    final AppManifest appManifest = _decodeCanonicalManifest(
+      manifestEntry.bytes,
+      description: 'Package manifest.json',
+    );
+    final String id = appManifest.id.value;
+    final Set<String> iconPaths = <String>{
+      appManifest.icon,
+      if (appManifest.iconMono != null) appManifest.iconMono!,
+    };
+    for (final String iconPath in iconPaths) {
       _validateTarPath(iconPath, directory: false);
       if (!iconPath.startsWith('assets/')) {
         throw const ArtifactVerificationException(
-          message: 'Package manifest icon must be under assets/.',
+          message: 'Package manifest icons must be under assets/.',
         );
       }
     }
@@ -214,13 +207,7 @@ final class PlapArchive {
       );
     }
 
-    final Object? runtimeValue = manifest['runtime'];
-    final Object? rawRuntimeType = runtimeValue is Map<String, Object?>
-        ? runtimeValue['type']
-        : null;
-    final String? runtimeType = rawRuntimeType is String
-        ? rawRuntimeType
-        : null;
+    final String runtimeType = appManifest.runtime.kind.wireName;
     final Map<String, PlapTargetSlice> slices = <String, PlapTargetSlice>{};
     _SliceIdentity? commonIdentity;
     for (final MapEntry<String, List<PlapEntry>> target
@@ -230,7 +217,7 @@ final class PlapArchive {
         canonicalEntries: target.value,
         manifestEntry: manifestEntry,
         runtimeType: runtimeType,
-        iconPath: iconPath,
+        iconPaths: iconPaths,
         canonicalHashes: hashes,
       );
       commonIdentity ??= validated.identity;
@@ -246,6 +233,12 @@ final class PlapArchive {
       slices[target.key] = validated.slice;
     }
     final _SliceIdentity identity = commonIdentity!;
+    if (appManifest.engine.flutterVersion != identity.flutterVersion ||
+        appManifest.engine.engineCommit != identity.engineCommit) {
+      throw const ArtifactVerificationException(
+        message: 'Package manifest engine identity does not match its slices.',
+      );
+    }
     return PlapArchive(
       packageTarBytes: tarBytes,
       manifest: Map<String, Object?>.unmodifiable(manifest),
@@ -264,8 +257,8 @@ _ValidatedArchiveSlice _validateTargetSlice({
   required String target,
   required List<PlapEntry> canonicalEntries,
   required PlapEntry manifestEntry,
-  required String? runtimeType,
-  required String? iconPath,
+  required String runtimeType,
+  required Set<String> iconPaths,
   required Map<String, String> canonicalHashes,
 }) {
   final String prefix = 'targets/$target/';
@@ -275,7 +268,7 @@ _ValidatedArchiveSlice _validateTargetSlice({
     final bool allowed =
         path == BuildLayoutMetadata.fileName ||
         path.startsWith('bundle/') ||
-        path == iconPath;
+        iconPaths.contains(path);
     if (!allowed) {
       throw ArtifactVerificationException(
         message: 'Unsupported path in $target slice: $path.',
@@ -289,56 +282,29 @@ _ValidatedArchiveSlice _validateTargetSlice({
       message: '$target slice has no ${BuildLayoutMetadata.fileName}.',
     );
   }
-  if (iconPath != null && !entries.containsKey(iconPath)) {
-    throw ArtifactVerificationException(
-      message: '$target slice has no declared icon $iconPath.',
-    );
+  for (final String iconPath in iconPaths) {
+    if (!entries.containsKey(iconPath)) {
+      throw ArtifactVerificationException(
+        message: '$target slice has no declared icon $iconPath.',
+      );
+    }
   }
-  final Map<String, Object?> metadata = _decodeJsonObject(
+  final BuildLayoutMetadata metadata = BuildLayoutMetadata.decodeBytes(
     metadataEntry.bytes,
     description: '$target ${BuildLayoutMetadata.fileName}',
   );
-  final Object? rawFlutterVersion = metadata['flutterVersion'];
-  final Object? rawEngineCommit = metadata['engineCommit'];
-  final Object? rawBuildMode = metadata['buildMode'];
-  final Object? rawEngineFlavor = metadata['engineFlavor'];
-  final Object? rawTarget = metadata['target'];
-  if (metadata['schema'] != BuildLayoutMetadata.schema ||
-      rawFlutterVersion is! String ||
-      rawFlutterVersion.isEmpty ||
-      rawEngineCommit is! String ||
-      rawEngineCommit.isEmpty ||
-      rawBuildMode is! String ||
-      rawEngineFlavor is! String ||
-      rawTarget != target) {
+  if (metadata.target != target) {
     throw ArtifactVerificationException(
       message: '$target slice has incomplete or conflicting build metadata.',
     );
   }
-  final String buildMode = rawBuildMode;
-  final String engineFlavor = rawEngineFlavor;
+  final String rawFlutterVersion = metadata.flutterVersion;
+  final String rawEngineCommit = metadata.engineCommit;
+  final String buildMode = metadata.buildMode.cliName;
+  final String engineFlavor = metadata.engineFlavor;
   final PlutoTargetPlatform targetPlatform = PlutoTargetPlatform.fromCliName(
     target,
   )!;
-  if (!const <String>{'debug', 'profile', 'release'}.contains(buildMode)) {
-    throw ArtifactVerificationException(
-      message: '$target slice has unknown buildMode "$buildMode".',
-    );
-  }
-  if (engineFlavor != buildMode) {
-    throw ArtifactVerificationException(
-      message:
-          '$target slice engineFlavor "$engineFlavor" does not match '
-          'buildMode "$buildMode".',
-    );
-  }
-  if (targetPlatform == PlutoTargetPlatform.linuxArm &&
-      buildMode != PlutoBuildMode.release.cliName) {
-    throw const ArtifactVerificationException(
-      message: 'linux-arm packages are release-only.',
-      remediation: 'Build a linux-arm release AOT layout.',
-    );
-  }
 
   final bool aotMode = buildMode != 'debug';
   final String expectedRuntime = aotMode
@@ -432,6 +398,29 @@ Map<String, Object?> _decodeJsonObject(
     );
   }
   return decoded;
+}
+
+AppManifest _decodeCanonicalManifest(
+  Uint8List bytes, {
+  required String description,
+}) {
+  final String source;
+  try {
+    source = utf8.decode(bytes);
+  } on FormatException catch (error) {
+    throw ArtifactVerificationException(
+      message: '$description is not valid UTF-8: ${error.message}',
+    );
+  }
+  final Result<AppManifest, ManifestError> result = AppManifest.decode(source);
+  final AppManifest? manifest = result.valueOrNull;
+  if (manifest == null) {
+    throw ArtifactVerificationException(
+      message: '$description is not canonical: ${result.errorOrNull!.message}',
+      remediation: 'Rebuild the package with the current Pluto builder.',
+    );
+  }
+  return manifest;
 }
 
 Map<String, Object?> _decodeIntegrity(PlapEntry? entry) {

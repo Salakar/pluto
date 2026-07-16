@@ -78,6 +78,16 @@ void main() {
   _expectRejected(
     generator,
     source,
+    profileId: 'move',
+    message: 'move Gallery3 presenter options are not canonical',
+    mutateRuntime: (Map<String, Object?> runtime) {
+      runtime['presenterOptions'] =
+          'exact_color=1,enable_rails=1,vcom=-0.62,extra=1';
+    },
+  );
+  _expectRejected(
+    generator,
+    source,
     profileId: 'rm1',
     message: 'rm1 firmware build must be exactly 14 digits',
     mutateRuntime: (Map<String, Object?> runtime) {

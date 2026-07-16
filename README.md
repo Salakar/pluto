@@ -51,15 +51,14 @@ or a successful SSH connection. Exact validation details live in
 | Device | Codename | Tested reMarkable OS | Release status |
 | --- | --- | --- | --- |
 | reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | ✅ Reference device; release platform, Ink, and Codex validated |
-| reMarkable 2 | `zero-sugar` | 3.28.0.162 | 🧪 Runtime and real-panel path verified; final Ink/Codex acceptance in progress |
+| reMarkable 2 | `zero-sugar` | 3.28.0.162 | 🧪 Native CPU/scan pipeline verified; first Pluto panel write and final app acceptance pending |
 | reMarkable 1 | `zero-gravitas` | 3.27.3.0 | 🧪 Runtime and real-panel path verified; final Ink/Codex acceptance in progress |
-| reMarkable Paper Pro | `ferrari` | Not tested | 🚧 Not yet verified |
-| reMarkable Paper Pure | `tatsu` | Not tested | 🚧 Not yet verified |
 
 Only the first row currently represents completed end-to-end application
-acceptance. The two newly tested tablets will be promoted to that status after
-the visible Ink and real Codex runs complete; this README does not treat
-bring-up or a synthetic UI as final acceptance.
+acceptance. The two legacy tablets will be promoted only after the same frozen
+release passes visible Home, switching, Ink, and real Codex runs; this README
+does not treat host tests, CPU-only bring-up, or a synthetic UI as panel
+acceptance.
 
 ## Built-in apps
 
@@ -143,13 +142,12 @@ the [engineering playbook](AGENTS.md) and
 workflow.
 
 **4. An app is a Flutter app plus a `pluto.yaml` manifest** containing its id,
-name, icon, entrypoint, and display preferences. The examples under
+name, version, icon, and display preferences. The examples under
 [`apps/examples/`](apps/examples/) are the template to copy.
 
 `display.scale` defaults to `auto`, so Flutter receives the connected
-presenter's native surface dimensions and device pixel ratio. A numeric scale
-is available only as an explicit compatibility override; apps should normally
-remain automatic and lay out from Flutter's live window metrics.
+presenter's native surface dimensions and device pixel ratio. Numeric scales
+are rejected; apps lay out from Flutter's live window metrics.
 
 Build, install, and run the release app with the same device endpoint. Build
 probes the device and selects the matching native target automatically:

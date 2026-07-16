@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:pluto_manifest/pluto_manifest.dart';
+
 import '../artifacts/checksums.dart';
 import '../artifacts/host_metadata.dart';
 import '../build/plap_reader.dart';
@@ -23,6 +25,10 @@ typedef _ScreenshotCapture = ({
   int stride,
   String format,
 });
+
+bool _hasExactKeys(Map<String, Object?> value, Set<String> expected) =>
+    value.length == expected.length &&
+    value.keys.every((String key) => expected.contains(key));
 
 /// A single runtime payload file to stage onto the device.
 final class PayloadFile {
@@ -374,7 +380,7 @@ final class LiveDeviceOperations {
   }) {
     return Uint8List.fromList(
       utf8.encode(
-        '${const JsonEncoder.withIndent('  ').convert(<String, Object?>{'schema': 1, 'appId': appId, 'installedAt': DateTime.now().toUtc().toIso8601String(), 'installedBy': 'pluto 0.1.0', 'source': source, 'buildMode': buildMode, 'engineFlavor': engineFlavor, 'sizeBytes': sizeBytes, 'payload': payload})}\n',
+        '${const JsonEncoder.withIndent('  ').convert(<String, Object?>{'appId': appId, 'installedAt': DateTime.now().toUtc().toIso8601String(), 'installedBy': 'pluto 0.1.0', 'source': source, 'buildMode': buildMode, 'engineFlavor': engineFlavor, 'sizeBytes': sizeBytes, 'payload': payload})}\n',
       ),
     );
   }
@@ -391,25 +397,30 @@ final class LiveDeviceOperations {
       );
     }
     final Uint8List manifestBytes;
-    final Object? decoded;
+    final AppManifest parsedManifest;
     try {
       manifestBytes = Uint8List.fromList(manifest.readAsBytesSync());
-      decoded = jsonDecode(utf8.decode(manifestBytes));
+      final Result<AppManifest, ManifestError> result = AppManifest.decode(
+        utf8.decode(manifestBytes),
+      );
+      final AppManifest? value = result.valueOrNull;
+      if (value == null) {
+        throw DeviceOperationException(
+          'invalid manifest for ${app.appId}',
+          result.errorOrNull!.message,
+        );
+      }
+      parsedManifest = value;
     } on FileSystemException catch (error) {
       throw DeviceOperationException(
         'could not read manifest for ${app.appId}',
         error.message,
       );
-    } on FormatException catch (error) {
-      throw DeviceOperationException(
-        'invalid manifest for ${app.appId}',
-        error.message,
-      );
     }
-    if (decoded is! Map<String, Object?>) {
+    if (parsedManifest.id.value != app.appId) {
       throw DeviceOperationException(
-        'invalid manifest for ${app.appId}',
-        'Expected ${manifest.path} to contain a JSON object.',
+        'manifest identity does not match ${app.appId}',
+        'The canonical manifest declares ${parsedManifest.id.value}.',
       );
     }
     final File buildMetadata = File(
@@ -437,12 +448,14 @@ final class LiveDeviceOperations {
       );
     }
     final Set<String> seen = <String>{_buildMetadataFileName};
-    for (final String field in const <String>['icon', 'iconMono']) {
-      if (!decoded.containsKey(field)) {
-        continue;
-      }
-      final Object? value = decoded[field];
-      if (value is! String || !_isSafeLayoutPath(value)) {
+    for (final (String, String) icon in <(String, String)>[
+      ('icon', parsedManifest.icon),
+      if (parsedManifest.iconMono != null)
+        ('iconMono', parsedManifest.iconMono!),
+    ]) {
+      final String field = icon.$1;
+      final String value = icon.$2;
+      if (!_isSafeLayoutPath(value)) {
         throw DeviceOperationException(
           'unsafe $field path for ${app.appId}',
           '$field must be a non-empty relative path without dot segments or '
@@ -692,10 +705,11 @@ final class LiveDeviceOperations {
     final String candidate = '$_releaseStore/$nonce';
     await _run(
       'if [ -e ${_q(deviceRoot)} ] && [ ! -L ${_q(deviceRoot)} ]; then '
-      'echo ${_q('$deviceRoot is a retired non-transactional layout')} >&2; '
+      'echo ${_q('$deviceRoot conflicts with the managed release symlink')} >&2; '
       'exit 78; fi',
       failure:
-          'the unpublished non-transactional runtime must be uninstalled first',
+          'runtime root ownership is unsafe; remove or relocate the '
+          'conflicting path',
     );
     await _run(
       'mkdir -p ${_q(_releaseStore)} '
@@ -970,7 +984,6 @@ final class LiveDeviceOperations {
   }) async {
     final String requestId = _nextNonce();
     final String request = jsonEncode(<String, Object?>{
-      'schema': 1,
       'requestId': requestId,
       'action': action,
       ...fields,
@@ -1005,7 +1018,6 @@ final class LiveDeviceOperations {
       );
     }
     if (decoded is! Map<String, Object?> ||
-        decoded['schema'] != 1 ||
         decoded['requestId'] != requestId ||
         decoded['ok'] is! bool) {
       throw DeviceOperationException(
@@ -1015,16 +1027,43 @@ final class LiveDeviceOperations {
       );
     }
     if (decoded['ok'] != true) {
+      if (!_hasExactKeys(decoded, const <String>{'requestId', 'ok', 'error'})) {
+        throw DeviceOperationException(
+          'invalid Pluto device control response',
+          'The Pluto $controlName failure envelope has unknown or missing '
+              'fields.',
+        );
+      }
       final Object? error = decoded['error'];
+      if (error is! Map<String, Object?> ||
+          !_hasExactKeys(error, const <String>{'code', 'message'}) ||
+          error['code'] is! String ||
+          error['message'] is! String) {
+        throw DeviceOperationException(
+          'invalid Pluto device control response',
+          'The Pluto $controlName failure detail is not exact.',
+        );
+      }
       throw DeviceOperationException(
         'Pluto device control rejected $action',
-        error is Map<String, Object?>
-            ? '${error['code'] ?? 'error'}: ${error['message'] ?? ''}'
-            : '$error',
+        '${error['code']}: ${error['message']}',
+      );
+    }
+    if (!_hasExactKeys(decoded, const <String>{'requestId', 'ok', 'result'})) {
+      throw DeviceOperationException(
+        'invalid Pluto device control response',
+        'The Pluto $controlName success envelope has unknown or missing '
+            'fields.',
       );
     }
     final Object? result = decoded['result'];
-    return result is Map<String, Object?> ? result : const <String, Object?>{};
+    if (result is! Map<String, Object?>) {
+      throw DeviceOperationException(
+        'invalid Pluto device control response',
+        'The Pluto $controlName result is not an object.',
+      );
+    }
+    return result;
   }
 
   Future<int> _foregroundPid() async {
@@ -1070,6 +1109,23 @@ final class LiveDeviceOperations {
     required String requestedSurface,
     required int expectedPid,
   }) {
+    if (!_hasExactKeys(capture, const <String>{
+      'path',
+      'bytes',
+      'sha256',
+      'appId',
+      'pid',
+      'surface',
+      'width',
+      'height',
+      'stride',
+      'format',
+    })) {
+      throw const DeviceOperationException(
+        'invalid Pluto screenshot response',
+        'The embedder returned unknown or missing screenshot metadata.',
+      );
+    }
     final Object? rawBytes = capture['bytes'];
     final Object? rawDigest = capture['sha256'];
     final Object? rawAppId = capture['appId'];

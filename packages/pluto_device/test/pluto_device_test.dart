@@ -27,11 +27,7 @@ void main() {
       ..onInvoke(
         plutoDeviceChannel,
         deviceCapabilitiesMethod,
-        (Object? arguments) => <Object?>[
-          'frontlight',
-          'colorPanel',
-          'futureCapability',
-        ],
+        (Object? arguments) => <Object?>['frontlight', 'colorPanel'],
       );
 
     final PlutoDevice device = PlutoDevice.withTransport(transport);
@@ -48,43 +44,55 @@ void main() {
     expect(capabilities.supports(Capability.wifi), isFalse);
   });
 
-  test('device info preserves unknown codenames and value semantics', () async {
-    final FakePlutoTransport transport = FakePlutoTransport()
-      ..onInvoke(
-        plutoDeviceChannel,
-        deviceInfoMethod,
-        (Object? arguments) => <String, Object?>{
-          'model': 'futureModel',
-          'codename': 'future-board',
-          'firmwareBuild': '1',
-          'osVersion': '2',
-          'panel': <String, Object?>{
-            'width': 100,
-            'height': 200,
-            'dpi': 100,
-            'pixelFormat': 'gray8',
-            'colorMode': 'monochrome',
+  test(
+    'device info rejects an identity outside the generated profiles',
+    () async {
+      final FakePlutoTransport transport = FakePlutoTransport()
+        ..onInvoke(
+          plutoDeviceChannel,
+          deviceInfoMethod,
+          (Object? arguments) => <String, Object?>{
+            'model': 'futureModel',
+            'codename': 'future-board',
+            'firmwareBuild': '1',
+            'osVersion': '2',
+            'serialNumber': null,
+            'panel': <String, Object?>{
+              'width': 100,
+              'height': 200,
+              'dpi': 100,
+              'pixelFormat': 'gray8',
+              'colorMode': 'monochrome',
+            },
           },
-        },
+        );
+
+      await expectLater(
+        PlutoDevice.withTransport(transport).deviceInfo(),
+        throwsA(isA<FormatException>()),
       );
+    },
+  );
 
-    final DeviceInfo info = await PlutoDevice.withTransport(
-      transport,
-    ).deviceInfo();
-
-    expect(info.model, RemarkableModel.unknown);
-    expect(info.codename, 'future-board');
-    expect(info.isColor, isFalse);
-    expect(info.panel.physicalSizeMm.width, closeTo(25.4, 0.001));
-    expect(
-      info.panel,
-      const PanelGeometry(
-        width: 100,
-        height: 200,
-        dpi: 100,
-        pixelFormat: PanelPixelFormat.gray8,
-        colorMode: PanelColorMode.monochrome,
-      ),
-    );
-  });
+  test(
+    'device capabilities reject unknown, duplicate, and non-string names',
+    () async {
+      for (final List<Object?> payload in <List<Object?>>[
+        <Object?>['futureCapability'],
+        <Object?>['wifi', 'wifi'],
+        <Object?>['wifi', 1],
+      ]) {
+        final FakePlutoTransport transport = FakePlutoTransport()
+          ..onInvoke(
+            plutoDeviceChannel,
+            deviceCapabilitiesMethod,
+            (Object? arguments) => payload,
+          );
+        await expectLater(
+          PlutoDevice.withTransport(transport).capabilities(),
+          throwsA(isA<FormatException>()),
+        );
+      }
+    },
+  );
 }

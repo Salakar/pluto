@@ -185,6 +185,7 @@ case "$TARGET_PLATFORM" in
     TARGET_GLIBC_CEILING=2.35
     SNAPSHOT_ARCH=arm
     HAS_PROFILE_ENGINE=0
+    DEVICE_SCRIPTS+=(pluto-rm2-cpufreq-restore.sh)
     ;;
   *) die "unsupported target platform: $TARGET_PLATFORM" ;;
 esac

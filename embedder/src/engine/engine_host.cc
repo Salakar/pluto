@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "engine/pen_pointer_timestamp.h"
+#include "generated/device_profiles.h"
 #include "input/evdev.h"
 #include "input/pen.h"
 #include "input/pen_ring.h"
@@ -28,6 +29,7 @@
 #include "input/transform.h"
 #include "presenter/host_preview.h"
 #include "presenter/png_encoder.h"
+#include "presenter/presenter_contract.h"
 #include "sensors/iio.h"
 
 namespace pluto {
@@ -39,14 +41,6 @@ std::string join_path(const std::string &base, const char *leaf) {
 
 bool file_exists(const std::string &path) {
   return !path.empty() && std::filesystem::exists(path);
-}
-
-bool presenter_has_pen_focus_hook(const PlutoPresenterOps *ops) {
-  constexpr size_t kRequiredOpsSize =
-      offsetof(PlutoPresenterOps, set_pen_focus) +
-      sizeof(PlutoPresenterOps::set_pen_focus);
-  return ops != nullptr && ops->struct_size >= kRequiredOpsSize &&
-         ops->set_pen_focus != nullptr;
 }
 
 void trace_startup(const char *message) {
@@ -390,6 +384,12 @@ bool apply_presenter_display_info(const PlutoDisplayInfo &info,
     }
     return false;
   }
+  if (info.struct_size != sizeof(PlutoDisplayInfo)) {
+    if (error != nullptr) {
+      *error = "presenter reported a non-current display info layout";
+    }
+    return false;
+  }
   if (info.width <= 0 || info.height <= 0 || info.dpi <= 0) {
     if (error != nullptr) {
       *error = "presenter reported invalid display geometry " +
@@ -469,12 +469,6 @@ void EngineHost::resolve_paths() {
   if (config_.aot_elf_path.empty() && !config_.bundle_path.empty()) {
     config_.aot_elf_path = join_path(config_.bundle_path, "lib/app.so");
   }
-  if (config_.engine_path.empty()) {
-    config_.engine_path = "third_party/engine/linux-arm64/libflutter_engine.so";
-  }
-  if (config_.icu_data_path.empty()) {
-    config_.icu_data_path = "third_party/engine/linux-arm64/icudtl.dat";
-  }
 }
 
 bool EngineHost::initialize(std::string *error) {
@@ -492,6 +486,18 @@ bool EngineHost::initialize(std::string *error) {
     if (error != nullptr) {
       *error = "startup configuration failed: --health-file must be an "
                "absolute path";
+    }
+    return false;
+  }
+  if (config_.engine_path.empty()) {
+    if (error != nullptr) {
+      *error = "startup configuration failed: --engine is required";
+    }
+    return false;
+  }
+  if (config_.icu_data_path.empty()) {
+    if (error != nullptr) {
+      *error = "startup configuration failed: --icu-data is required";
     }
     return false;
   }
@@ -856,6 +862,7 @@ bool build_direct_touch_tap_events(
 }
 
 bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
+                                        std::int64_t expected_pid,
                                         DirectPointerResult *result,
                                         DirectControlFailure *failure) {
   const auto fail = [failure](const char *code, const char *message) {
@@ -867,6 +874,10 @@ bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
   };
   if (result == nullptr || failure == nullptr) {
     return false;
+  }
+  const std::int64_t process_pid = static_cast<std::int64_t>(::getpid());
+  if (expected_pid != process_pid) {
+    return fail("wrong-pid", "expected PID is not the foreground Ink embedder");
   }
   if (requested_app_id != config_.app_id) {
     return fail("wrong-app", "requested app is not the foreground embedder");
@@ -899,7 +910,7 @@ bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
   }
   *result = DirectPointerResult{
       .app_id = config_.app_id,
-      .pid = static_cast<std::int64_t>(::getpid()),
+      .pid = process_pid,
       .event_count = events.size(),
   };
   return true;
@@ -1026,11 +1037,12 @@ void EngineHost::start_foreground_services() {
             return capture_direct_screenshot(surface, requested_app_id, capture,
                                              failure);
           };
-      control.draw_stroke = [this](const std::string &requested_app_id,
-                                   DirectPointerResult *result,
-                                   DirectControlFailure *failure) {
-        return send_direct_ink_stroke(requested_app_id, result, failure);
-      };
+      control.draw_stroke =
+          [this](const std::string &requested_app_id, std::int64_t expected_pid,
+                 DirectPointerResult *result, DirectControlFailure *failure) {
+            return send_direct_ink_stroke(requested_app_id, expected_pid,
+                                          result, failure);
+          };
       control.prepare_ink_canvas = [this](const std::string &requested_app_id,
                                           std::int64_t expected_pid,
                                           DirectInkCanvasResult *result,
@@ -1404,7 +1416,7 @@ void EngineHost::start_ink_thread() {
     // renderer present(). InkThread is joined before presenter detach/close
     // and is started only after attach, so this pointer has a lifecycle fence.
     // The hook carries metadata only: it cannot create pixels or damage.
-    if (presenter_has_pen_focus_hook(presenter_ops_) && presenter_ != nullptr) {
+    if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
       const Point previous =
           input.has_previous ? input.previous : input.current;
       const Point predicted =
@@ -1775,8 +1787,7 @@ bool EngineHost::hibernate() {
     frame_renderer_->set_auto_maintenance_allowed(true);
     return false;
   }
-  if (presenter_ops_ != nullptr && presenter_ops_->close != nullptr &&
-      presenter_ != nullptr) {
+  if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
     presenter_ops_->close(presenter_);
   }
   presenter_ = nullptr;
@@ -1813,8 +1824,7 @@ bool EngineHost::resume() {
   if (frame_renderer_ == nullptr ||
       !frame_renderer_->attach_presenter(presenter_ops_, presenter_)) {
     std::cerr << "resume: renderer could not attach reopened presenter\n";
-    if (presenter_ops_ != nullptr && presenter_ops_->close != nullptr &&
-        presenter_ != nullptr) {
+    if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
       presenter_ops_->close(presenter_);
     }
     presenter_ = nullptr;
@@ -1951,8 +1961,7 @@ void EngineHost::shutdown() {
     engine_library_.procs().CollectAOTData(aot_data_);
     aot_data_ = nullptr;
   }
-  if (presenter_ops_ != nullptr && presenter_ops_->close != nullptr &&
-      presenter_ != nullptr) {
+  if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
     presenter_ops_->close(presenter_);
   }
   presenter_ = nullptr;
@@ -2048,6 +2057,14 @@ bool EngineHost::open_presenter(std::string *error) {
     }
     return false;
   }
+  if (!presenter_ops_are_current(presenter_ops_)) {
+    if (error != nullptr) {
+      *error = "startup step 4 failed: presenter operation table is not "
+               "current";
+    }
+    presenter_ops_ = nullptr;
+    return false;
+  }
   PlutoPresenterConfig presenter_config{};
   presenter_config.struct_size = sizeof(presenter_config);
   presenter_config.backend_name = config_.presenter_name.c_str();
@@ -2064,29 +2081,25 @@ bool EngineHost::open_presenter(std::string *error) {
     return false;
   }
   presenter_display_info_valid_ = false;
-  if (presenter_ops_->info != nullptr) {
-    PlutoDisplayInfo info{};
-    info.struct_size = sizeof(info);
-    const PlutoStatus info_status = presenter_ops_->info(presenter_, &info);
-    std::string geometry_error;
-    if (info_status != kPlutoStatusOk ||
-        !apply_presenter_display_info(info, &config_, &geometry_error)) {
-      if (presenter_ops_->close != nullptr) {
-        presenter_ops_->close(presenter_);
-      }
-      presenter_ = nullptr;
-      presenter_ops_ = nullptr;
-      if (error != nullptr) {
-        *error = info_status != kPlutoStatusOk
-                     ? "startup step 4 failed: presenter info returned " +
-                           std::to_string(static_cast<int>(info_status))
-                     : "startup step 4 failed: " + geometry_error;
-      }
-      return false;
+  PlutoDisplayInfo info{};
+  info.struct_size = sizeof(info);
+  const PlutoStatus info_status = presenter_ops_->info(presenter_, &info);
+  std::string geometry_error;
+  if (info_status != kPlutoStatusOk ||
+      !apply_presenter_display_info(info, &config_, &geometry_error)) {
+    presenter_ops_->close(presenter_);
+    presenter_ = nullptr;
+    presenter_ops_ = nullptr;
+    if (error != nullptr) {
+      *error = info_status != kPlutoStatusOk
+                   ? "startup step 4 failed: presenter info returned " +
+                         std::to_string(static_cast<int>(info_status))
+                   : "startup step 4 failed: " + geometry_error;
     }
-    presenter_display_info_ = info;
-    presenter_display_info_valid_ = true;
+    return false;
   }
+  presenter_display_info_ = info;
+  presenter_display_info_valid_ = true;
   rebuild_channel_context();
   return true;
 }
@@ -2103,7 +2116,7 @@ bool EngineHost::setup_renderer(std::string *error) {
   renderer_config.health_file_path = config_.health_file_path;
   renderer_config.start_presenter_thread = true;
   renderer_config.presenter_pen_focus_from_host =
-      presenter_has_pen_focus_hook(presenter_ops_);
+      presenter_ops_are_current(presenter_ops_);
   // Automatic optical hygiene requires both waveform-class control and real
   // device completion. Select it from behavior instead of a model or backend
   // name so every native driver follows the same scheduler path.
@@ -2277,10 +2290,22 @@ void EngineHost::rebuild_channel_context() {
   if (presenter_display_info_valid_) {
     context.is_color = presenter_display_info_.is_color;
   }
-  context.rotation = config_.rotation;
   context.pixel_format =
       config_.pixel_format == kPlutoPixelFormatGray8 ? "gray8" : "rgb565";
-  context.presenter_name = config_.presenter_name;
+  if (const GeneratedDeviceProfile *profile =
+          generated_device_profile_by_id(device_identity_.profile_id);
+      profile != nullptr) {
+    context.frontlight_brightness_path =
+        std::string(profile->runtime.frontlight_brightness_path);
+    if (!profile->runtime.vpdd_timeout_path.empty()) {
+      context.vpdd_length_path =
+          (std::filesystem::path(
+               std::string(profile->runtime.vpdd_timeout_path))
+               .parent_path() /
+           "vpdd_length")
+              .string();
+    }
+  }
   context.request_shutdown = [this] { request_shutdown(); };
   if (config_.enable_hibernation) {
     context.request_hibernate = [this] { request_hibernate(); };
@@ -2304,7 +2329,6 @@ void EngineHost::rebuild_channel_context() {
     return frame_renderer_->request_ghost_control(control);
   };
   context.system_ui_ready = [this] { return reveal_system_ui(); };
-  context.set_rotation = [this](int32_t rotation) { apply_rotation(rotation); };
   channels_.set_context(std::move(context));
 }
 

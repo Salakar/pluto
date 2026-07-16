@@ -76,6 +76,9 @@ metadata remain the local trust anchors. Provisioning never fills a missing
 payload from checkout source, a committed engine directory, or an embedder
 build tree. The frozen source revision is also installed as
 `/home/root/pluto/share/release-revision` for exact-device acceptance.
+The unpublished release manifest and each app's `build-metadata.json` have one
+exact current shape with no schema/format discriminator or compatibility path;
+all object fields and nested records are validated exactly.
 
 The same command provisions any tested device:
 

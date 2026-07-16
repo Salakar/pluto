@@ -1,6 +1,7 @@
 #ifndef PLUTO_PEN_RING_H_
 #define PLUTO_PEN_RING_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -12,7 +13,6 @@
 #endif
 
 #define PLUTO_PEN_RING_MAGIC 0x52544C50u
-#define PLUTO_PEN_RING_VERSION 1u
 #define PLUTO_PEN_RING_RECORD_SIZE 40u
 #define PLUTO_TOUCH_RING_RECORD_SIZE 32u
 #define PLUTO_PEN_RING_DEFAULT_CAPACITY 4096u
@@ -90,9 +90,9 @@ typedef struct PLUTO_PACKED pluto_touch_ring_record {
 
 typedef struct pluto_pen_ring_header {
   uint32_t magic;
-  uint32_t version;
   uint32_t record_size;
   uint32_t capacity;
+  uint32_t reserved;
   PLUTO_RING_ATOMIC_U64 write_index;
   PLUTO_RING_ATOMIC_U64 dropped;
   uint8_t pad[32];
@@ -102,12 +102,12 @@ typedef struct pluto_pen_ring_header {
 extern "C" {
 #endif
 
-const pluto_pen_ring_header* pluto_pen_ring(void);
-const pluto_pen_ring_header* pluto_touch_ring(void);
-void pluto_ring_set_wakeup(void (*fn)(void*), void* ctx);
+const pluto_pen_ring_header *pluto_pen_ring(void);
+const pluto_pen_ring_header *pluto_touch_ring(void);
+void pluto_ring_set_wakeup(void (*fn)(void *), void *ctx);
 
 #ifdef __cplusplus
-}  // extern "C"
+} // extern "C"
 
 static_assert(sizeof(pluto_pen_ring_record) == PLUTO_PEN_RING_RECORD_SIZE,
               "pluto_pen_ring_record must stay ABI-compatible");
@@ -115,8 +115,20 @@ static_assert(sizeof(pluto_touch_ring_record) == PLUTO_TOUCH_RING_RECORD_SIZE,
               "pluto_touch_ring_record must stay ABI-compatible");
 static_assert(sizeof(pluto_pen_ring_header) == 64,
               "pluto_pen_ring_header must stay one cache line");
+static_assert(offsetof(pluto_pen_ring_header, magic) == 0,
+              "pluto_pen_ring_header magic offset changed");
+static_assert(offsetof(pluto_pen_ring_header, record_size) == 4,
+              "pluto_pen_ring_header record_size offset changed");
+static_assert(offsetof(pluto_pen_ring_header, capacity) == 8,
+              "pluto_pen_ring_header capacity offset changed");
+static_assert(offsetof(pluto_pen_ring_header, reserved) == 12,
+              "pluto_pen_ring_header reserved offset changed");
+static_assert(offsetof(pluto_pen_ring_header, write_index) == 16,
+              "pluto_pen_ring_header write_index offset changed");
+static_assert(offsetof(pluto_pen_ring_header, dropped) == 24,
+              "pluto_pen_ring_header dropped offset changed");
 #endif
 
 #undef PLUTO_RING_ATOMIC_U64
 
-#endif  // PLUTO_PEN_RING_H_
+#endif // PLUTO_PEN_RING_H_

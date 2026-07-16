@@ -1,3 +1,8 @@
+// This standalone verifier is executed with tools/pluto's package config so it
+// can reuse the release manifest implementation without publishing that
+// implementation as a product API.
+// ignore_for_file: avoid_relative_lib_imports
+
 import 'dart:convert';
 import 'dart:io';
 

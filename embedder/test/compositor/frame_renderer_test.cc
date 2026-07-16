@@ -22,8 +22,10 @@
 #include <thread>
 #include <vector>
 
+#include "compositor/frame_recording.h"
 #include "compositor/software_compositor.h"
 #include "input/ink_thread.h"
+#include "presenter_ops_test_support.h"
 #include "renderer/bluenoise_64.h"
 #include "renderer/quantize.h"
 #include "renderer/rect_utils.h"
@@ -145,9 +147,8 @@ void reset_mono_capture() {
 
 const PlutoPresenterOps *mono_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "mono-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("mono-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
       PlutoDisplayInfo info{};
@@ -285,16 +286,6 @@ const PlutoPresenterOps *mono_capture_ops() {
       return g_mono_capture.handoff_confirm_status;
     };
     return o;
-  }();
-  return &ops;
-}
-
-const PlutoPresenterOps *mono_capture_ops_without_wait_idle() {
-  static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps copy = *mono_capture_ops();
-    copy.name = "mono-capture-no-wait-idle";
-    copy.wait_idle = nullptr;
-    return copy;
   }();
   return &ops;
 }
@@ -1093,62 +1084,40 @@ TEST(FrameRendererTest, ActiveResetDetachBackpressureHonorsAbsoluteDeadline) {
   EXPECT_TRUE(renderer.detach_presenter(5000));
 }
 
-TEST(FrameRendererTest,
-     ActiveResetDetachWithoutWaitIdleCannotRetireAnUnfinishedRail) {
+TEST(FrameRendererTest, RejectsNonCurrentPresenterOperationTables) {
   reset_mono_capture();
-  {
-    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    g_mono_capture.reports_completion = true;
-  }
   FrameRendererConfig config = mono_capture_config();
-  config.presenter_ops = mono_capture_ops_without_wait_idle();
+
+  PlutoPresenterOps short_table = *mono_capture_ops();
+  short_table.struct_size = sizeof(short_table) - 1u;
+  config.presenter_ops = &short_table;
+  FrameRenderer short_renderer(config);
+  EXPECT_FALSE(short_renderer.valid());
+
+  PlutoPresenterOps oversized_table = *mono_capture_ops();
+  oversized_table.struct_size = sizeof(oversized_table) + 1u;
+  config.presenter_ops = &oversized_table;
+  FrameRenderer oversized_renderer(config);
+  EXPECT_FALSE(oversized_renderer.valid());
+
+  PlutoPresenterOps missing_hook = *mono_capture_ops();
+  missing_hook.wait_idle = nullptr;
+  config.presenter_ops = &missing_hook;
+  FrameRenderer missing_hook_renderer(config);
+  EXPECT_FALSE(missing_hook_renderer.valid());
+}
+
+TEST(FrameRendererTest, UnsupportedMandatoryPenFocusHookDoesNotBlockDetach) {
+  reset_mono_capture();
+  PlutoPresenterOps ops = *mono_capture_ops();
+  ops.set_pen_focus = [](PlutoPresenter *, const PlutoPenFocus *) {
+    return kPlutoStatusUnsupported;
+  };
+  FrameRendererConfig config = mono_capture_config();
+  config.presenter_ops = &ops;
+  config.presenter_pen_focus_from_host = true;
   FrameRenderer renderer(config);
   ASSERT_TRUE(renderer.valid());
-
-  std::vector<uint16_t> pixels(64 * 64, 0xffff);
-  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
-  const auto complete_latest = [&] {
-    uint64_t frame_id = 0;
-    {
-      std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-      ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
-      frame_id = g_mono_capture.frame_id_history.back();
-    }
-    renderer.notify_present_complete(frame_id);
-  };
-  const auto complete_and_change = [&](size_t pixel, uint64_t time_ns) {
-    complete_latest();
-    pixels[pixel] = 0x0000;
-    ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, time_ns)));
-  };
-
-  complete_latest();
-  ASSERT_TRUE(renderer.request_ghost_control(GhostControlMode::kBleachNow));
-  {
-    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    ASSERT_EQ(g_mono_capture.flags_history.size(), 2u);
-    EXPECT_NE(g_mono_capture.flags_history.back() &
-                  kPlutoPresentFlagPixelResetBlack,
-              0u);
-  }
-
-  const auto started = std::chrono::steady_clock::now();
-  EXPECT_FALSE(renderer.detach_presenter(25));
-  const auto elapsed = std::chrono::steady_clock::now() - started;
-  EXPECT_TRUE(elapsed < std::chrono::seconds(1));
-  EXPECT_TRUE(renderer.valid());
-  {
-    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    EXPECT_EQ(g_mono_capture.flags_history.size(), 2u)
-        << "sleeping without wait_idle is not optical completion proof";
-  }
-
-  // Complete the interrupted black/white/restore sequence explicitly so the
-  // fixture tears down without relying on the missing wait_idle operation.
-  complete_and_change(0, 2);
-  complete_and_change(1, 3);
-  complete_and_change(2, 4);
-  complete_latest();
   EXPECT_TRUE(renderer.detach_presenter());
 }
 
@@ -2034,9 +2003,8 @@ ColorCapture g_color_capture;
 
 const PlutoPresenterOps *color_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "color-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("color-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);
@@ -2184,9 +2152,8 @@ InkCapture g_ink_capture;
 
 const PlutoPresenterOps *ink_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "ink-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("ink-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);
@@ -2243,9 +2210,8 @@ InkCapture g_exact_focus_capture;
 
 const PlutoPresenterOps *exact_focus_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "exact-focus-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("exact-focus-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);
@@ -2360,29 +2326,6 @@ TEST(FrameRendererTest,
     EXPECT_EQ(g_mono_capture.pen_focus_history.back().flags, kPlutoPenFocusNone)
         << "rotation=" << test.rotation;
   }
-}
-
-TEST(FrameRendererTest, LegacyPresenterOpsNeverReadsOptionalPenFocusTail) {
-  reset_mono_capture();
-  static std::atomic<int> legacy_tail_calls{0};
-  legacy_tail_calls.store(0, std::memory_order_release);
-  PlutoPresenterOps legacy = *mono_capture_ops();
-  legacy.struct_size = offsetof(PlutoPresenterOps, set_pen_focus);
-  legacy.set_pen_focus = [](PlutoPresenter *, const PlutoPenFocus *) {
-    legacy_tail_calls.fetch_add(1, std::memory_order_relaxed);
-    return kPlutoStatusOk;
-  };
-  FrameRendererConfig config = mono_capture_config();
-  config.presenter_ops = &legacy;
-  FrameRenderer renderer(config);
-  ASSERT_TRUE(renderer.valid());
-  renderer.note_pen_render_hint(pen_hint_at(20, 20, false, 1));
-  std::vector<uint16_t> pixels(64u * 64u, 0xffffu);
-  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
-  renderer.note_pen_render_hint(terminal_pen_hint_at(20, 20, 2));
-  pixels.back() = 0u;
-  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2000)));
-  EXPECT_EQ(legacy_tail_calls.load(std::memory_order_acquire), 0);
 }
 
 TEST(FrameRendererTest,
@@ -3400,11 +3343,26 @@ TEST(FrameRendererTest, FrameRecorderCapturesSubmittedPackets) {
     in.read(reinterpret_cast<char *>(&value), sizeof(value));
     return value;
   };
-  EXPECT_EQ(read_u32(), 0x52464c50u); // "PLFR"
-  EXPECT_EQ(read_u32(), 1u);          // version
+  const auto verify_checksum = [&in](std::streampos frame_start,
+                                     uint32_t frame_bytes, uint32_t checksum) {
+    const std::streampos end = in.tellg();
+    in.seekg(frame_start);
+    std::vector<uint8_t> bytes(frame_bytes - sizeof(checksum));
+    in.read(reinterpret_cast<char *>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    ASSERT_TRUE(in.good());
+    EXPECT_EQ(pluto::frame_recording::crc32(bytes.data(), bytes.size()),
+              checksum);
+    in.seekg(end);
+  };
+  EXPECT_EQ(read_u32(), pluto::frame_recording::kFileMagic);
 
   // Frame 1: did_update with full payload.
-  EXPECT_EQ(read_u32(), 0x304d5246u); // "FRM0"
+  const std::streampos first_start = in.tellg();
+  EXPECT_EQ(read_u32(), pluto::frame_recording::kFrameMagic);
+  const uint32_t first_bytes = read_u32();
+  EXPECT_EQ(first_bytes,
+            pluto::frame_recording::kMinimumFrameBytes + 8u * 8u * 2u);
   EXPECT_EQ(read_u64(), 1000u);
   EXPECT_EQ(read_u32(), 8u);
   EXPECT_EQ(read_u32(), 8u);
@@ -3418,9 +3376,14 @@ TEST(FrameRendererTest, FrameRecorderCapturesSubmittedPackets) {
   for (const uint16_t px : payload) {
     ASSERT_EQ(px, 0x1234u);
   }
+  const uint32_t first_checksum = read_u32();
+  verify_checksum(first_start, first_bytes, first_checksum);
 
   // Frame 2: idle, header only.
-  EXPECT_EQ(read_u32(), 0x304d5246u);
+  const std::streampos second_start = in.tellg();
+  EXPECT_EQ(read_u32(), pluto::frame_recording::kFrameMagic);
+  const uint32_t second_bytes = read_u32();
+  EXPECT_EQ(second_bytes, pluto::frame_recording::kMinimumFrameBytes);
   EXPECT_EQ(read_u64(), 2000u);
   EXPECT_EQ(read_u32(), 8u);
   EXPECT_EQ(read_u32(), 8u);
@@ -3428,6 +3391,8 @@ TEST(FrameRendererTest, FrameRecorderCapturesSubmittedPackets) {
   EXPECT_EQ(read_u32(), 0u); // did_update
   EXPECT_EQ(read_u32(), 0u); // paint_bounds_count
   EXPECT_EQ(read_u32(), 0u); // payload_bytes
+  const uint32_t second_checksum = read_u32();
+  verify_checksum(second_start, second_bytes, second_checksum);
   ASSERT_TRUE(in.good());
   in.get();
   EXPECT_TRUE(in.eof());
@@ -3455,9 +3420,8 @@ ScrollCap g_scroll_capture;
 
 const PlutoPresenterOps *scroll_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "scroll-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("scroll-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);

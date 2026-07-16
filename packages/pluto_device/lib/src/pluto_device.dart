@@ -2,6 +2,7 @@ import 'package:meta/meta.dart';
 import 'package:pluto_core/pluto_core.dart';
 
 import 'device_info.dart';
+import 'generated/remarkable_models.g.dart';
 
 /// Entry point for device identity and capability queries.
 final class PlutoDevice {
@@ -23,9 +24,6 @@ final class PlutoDevice {
     return _deviceInfo ??= _readDeviceInfo();
   }
 
-  /// Compatibility alias for earlier scaffold consumers.
-  Future<DeviceInfo> info() => deviceInfo();
-
   /// Fetches the supported capability set.
   Future<DeviceCapabilities> capabilities() {
     return _capabilities ??= _readCapabilities();
@@ -36,10 +34,22 @@ final class PlutoDevice {
       channel: plutoDeviceChannel,
       method: deviceInfoMethod,
     );
-    final Map<String, Object?> map = _stringMap(payload, 'deviceInfo');
-    final Map<String, Object?> panel = _stringMap(
+    final Map<String, Object?> map = _exactStringMap(
+      payload,
+      'deviceInfo',
+      const <String>{
+        'model',
+        'codename',
+        'firmwareBuild',
+        'osVersion',
+        'panel',
+        'serialNumber',
+      },
+    );
+    final Map<String, Object?> panel = _exactStringMap(
       map['panel'],
       'deviceInfo.panel',
+      const <String>{'width', 'height', 'dpi', 'pixelFormat', 'colorMode'},
     );
     final String modelName = _string(map, 'model');
     final String codename = _string(map, 'codename');
@@ -69,26 +79,46 @@ final class PlutoDevice {
     }
     final Set<Capability> capabilities = <Capability>{};
     for (final Object? value in payload) {
-      if (value is String) {
-        for (final Capability capability in Capability.values) {
-          if (capability.name == value) {
-            capabilities.add(capability);
-          }
-        }
+      if (value is! String) {
+        throw const FormatException('Capability names must be strings.');
+      }
+      final Capability capability;
+      try {
+        capability = Capability.values.singleWhere(
+          (Capability candidate) => candidate.name == value,
+        );
+      } on StateError {
+        throw FormatException('Unknown capability: $value');
+      }
+      if (!capabilities.add(capability)) {
+        throw FormatException('Duplicate capability: $value');
       }
     }
     return DeviceCapabilities(capabilities);
   }
 }
 
-Map<String, Object?> _stringMap(Object? value, String path) {
+Map<String, Object?> _exactStringMap(
+  Object? value,
+  String path,
+  Set<String> expectedKeys,
+) {
   if (value is Map<Object?, Object?>) {
     final Map<String, Object?> result = <String, Object?>{};
     for (final MapEntry<Object?, Object?> entry in value.entries) {
       final Object? key = entry.key;
-      if (key is String) {
-        result[key] = entry.value;
+      if (key is! String) {
+        throw FormatException('Expected every $path key to be a string.');
       }
+      result[key] = entry.value;
+    }
+    final Set<String> actualKeys = result.keys.toSet();
+    if (actualKeys.length != expectedKeys.length ||
+        !actualKeys.containsAll(expectedKeys)) {
+      throw FormatException(
+        'Expected exact $path keys ${expectedKeys.toList()..sort()}, got '
+        '${actualKeys.toList()..sort()}.',
+      );
     }
     return result;
   }

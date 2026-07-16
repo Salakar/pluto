@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:pluto_core/pluto_core.dart';
 import 'package:pluto_device/pluto_device.dart';
 import 'package:pluto_manifest/pluto_manifest.dart';
 import 'package:pluto_settings/pluto_settings.dart';
@@ -103,7 +104,7 @@ final class FakeManifestRepository implements ManifestRepository {
   }
 }
 
-/// Fake `plutod` session manager.
+/// Fake Pluto supervisor session manager.
 final class FakeSessionManager implements SessionManager {
   /// Creates a fake session manager.
   FakeSessionManager({
@@ -111,20 +112,7 @@ final class FakeSessionManager implements SessionManager {
     this.switcherRequest,
     this.statusOverlayRequest,
     this.powerMenuRequest,
-    SessionInfo? info,
-  }) : _info = info ?? _defaultSessionInfo;
-
-  static const SessionInfo _defaultSessionInfo = SessionInfo(
-    plutoVersion: '0.1.0-host',
-    engineVersion: 'a10d8ac38de835021c8d2f920dbf50a920ccc030',
-    flutterVersion: '3.44.4',
-    dartVersion: '3.12.2',
-    returnInstructions: 'restart the native Pluto session over SSH.',
-  );
-
-  final SessionInfo _info;
-  final StreamController<SessionEvent> _events =
-      StreamController<SessionEvent>.broadcast();
+  });
 
   /// Result returned by the next launch request.
   LaunchResult nextLaunchResult;
@@ -167,29 +155,6 @@ final class FakeSessionManager implements SessionManager {
 
   /// Optional failure surfaced by [handoffStandbyToSupervisor].
   Object? standbyHandoffError;
-
-  /// Whether the display test card was requested.
-  bool didRunDisplayTestCard = false;
-
-  /// Last damage overlay state set through this fake.
-  bool? damageOverlayEnabled;
-
-  /// Last Pluto uninstall options.
-  PlutoUninstallOptions? lastUninstallOptions;
-
-  @override
-  Stream<SessionEvent> get events => _events.stream;
-
-  @override
-  Future<void> beginPlutoUninstall(PlutoUninstallOptions options) async {
-    lastUninstallOptions = options;
-  }
-
-  @override
-  Future<void> cancelLaunch(AppId id) async {}
-
-  @override
-  Future<SessionInfo> info() async => _info;
 
   @override
   Future<LaunchResult> launch(AppId id) async {
@@ -250,30 +215,8 @@ final class FakeSessionManager implements SessionManager {
     }
   }
 
-  @override
-  Future<LauncherDeveloperStats> developerStats() async {
-    return const LauncherDeveloperStats(
-      vmServiceUri: 'ws://host-preview/ws',
-      renderer: 'RGB565, tile-diff damage',
-      ghostPartialsSinceFull: 4,
-      ghostBudget: 12,
-      buildMs: 4.1,
-      rasterMs: 11.8,
-    );
-  }
-
-  @override
-  Future<void> runDisplayTestCard() async {
-    didRunDisplayTestCard = true;
-  }
-
-  @override
-  Future<void> setDamageOverlayEnabled(bool enabled) async {
-    damageOverlayEnabled = enabled;
-  }
-
-  /// Disposes stream resources.
-  Future<void> dispose() => _events.close();
+  /// Releases resources owned by the fake.
+  Future<void> dispose() async {}
 }
 
 /// Fake settings facade with deterministic status and Wi-Fi data.
@@ -364,6 +307,8 @@ final class FakeLauncherSettings implements LauncherSettings {
   int scanWifiCalls = 0;
   int connectWifiCalls = 0;
   int setWifiEnabledCalls = 0;
+  int frontlightReadCalls = 0;
+  final List<int> frontlightWrites = <int>[];
   String? lastWifiPassphrase;
 
   /// Last standby timeout set through this fake.
@@ -451,7 +396,10 @@ final class FakeLauncherSettings implements LauncherSettings {
   }
 
   @override
-  Future<FrontlightState> frontlight() async => _frontlight;
+  Future<FrontlightState> frontlight() async {
+    frontlightReadCalls += 1;
+    return _frontlight;
+  }
 
   @override
   Future<void> removePin() async {
@@ -474,6 +422,7 @@ final class FakeLauncherSettings implements LauncherSettings {
 
   @override
   Future<void> setFrontlightRaw(int raw) async {
+    frontlightWrites.add(raw);
     _frontlight = FrontlightState(raw: raw, maxRaw: _frontlight.maxRaw);
     _status = StatusSnapshot(
       time: _status.time,
@@ -590,24 +539,86 @@ WifiStatus _wifiStatusFromSnapshot(StatusSnapshot status) {
 /// Fake device info repository.
 final class FakeLauncherDeviceRepository implements LauncherDeviceRepository {
   /// Creates a fake device repository.
-  const FakeLauncherDeviceRepository();
+  const FakeLauncherDeviceRepository({
+    this.model = RemarkableModel.paperProMove,
+    this.supportedCapabilities,
+  });
+
+  static const Set<Capability> _moveCapabilities = <Capability>{
+    Capability.frontlight,
+    Capability.colorPanel,
+    Capability.wifi,
+    Capability.devicePin,
+    Capability.powerPolicy,
+  };
+  static const Set<Capability> _rmCapabilities = <Capability>{
+    Capability.wifi,
+    Capability.devicePin,
+    Capability.powerPolicy,
+  };
+
+  /// Model represented by this fake.
+  final RemarkableModel model;
+
+  /// Optional explicit capabilities returned to launcher surfaces.
+  final Set<Capability>? supportedCapabilities;
+
+  @override
+  Future<DeviceCapabilities> capabilities() async {
+    return DeviceCapabilities(
+      supportedCapabilities ??
+          (model == RemarkableModel.paperProMove
+              ? _moveCapabilities
+              : _rmCapabilities),
+    );
+  }
 
   @override
   Future<DeviceInfo> deviceInfo() async {
-    return const DeviceInfo(
-      model: RemarkableModel.paperProMove,
-      codename: 'chiappa',
-      firmwareBuild: '20260629074044',
-      osVersion: '3.20.0.0',
-      panel: PanelGeometry(
-        width: 954,
-        height: 1696,
-        dpi: 264,
-        pixelFormat: PanelPixelFormat.rgb565,
-        colorMode: PanelColorMode.gallery3,
+    return switch (model) {
+      RemarkableModel.remarkable1 => const DeviceInfo(
+        model: RemarkableModel.remarkable1,
+        codename: 'zero-gravitas',
+        firmwareBuild: '20260629074044',
+        osVersion: '3.20.0.0',
+        panel: PanelGeometry(
+          width: 1404,
+          height: 1872,
+          dpi: 226,
+          pixelFormat: PanelPixelFormat.gray8,
+          colorMode: PanelColorMode.monochrome,
+        ),
+        serialNumber: 'host-preview-rm1',
       ),
-      serialNumber: 'host-preview',
-    );
+      RemarkableModel.remarkable2 => const DeviceInfo(
+        model: RemarkableModel.remarkable2,
+        codename: 'zero-sugar',
+        firmwareBuild: '20260629074044',
+        osVersion: '3.20.0.0',
+        panel: PanelGeometry(
+          width: 1404,
+          height: 1872,
+          dpi: 226,
+          pixelFormat: PanelPixelFormat.gray8,
+          colorMode: PanelColorMode.monochrome,
+        ),
+        serialNumber: 'host-preview-rm2',
+      ),
+      RemarkableModel.paperProMove => const DeviceInfo(
+        model: RemarkableModel.paperProMove,
+        codename: 'chiappa',
+        firmwareBuild: '20260629074044',
+        osVersion: '3.20.0.0',
+        panel: PanelGeometry(
+          width: 954,
+          height: 1696,
+          dpi: 264,
+          pixelFormat: PanelPixelFormat.rgb565,
+          colorMode: PanelColorMode.gallery3,
+        ),
+        serialNumber: 'host-preview',
+      ),
+    };
   }
 }
 
@@ -769,7 +780,7 @@ LauncherApp _sampleApp({
   );
   return LauncherApp(
     manifest: manifest,
-    installRecord: _decodeInstallRecord(sizeBytes: sizeBytes),
+    installRecord: _decodeInstallRecord(appId: id, sizeBytes: sizeBytes),
     installKind: LauncherInstallKind.release,
     health: health,
     isPinned: isPinned,
@@ -789,7 +800,6 @@ AppManifest _decodeManifest({
 }) {
   final Result<AppManifest, ManifestError> result = AppManifest.decode('''
 {
-  "schema": 1,
   "id": "$id",
   "name": "$name",
   "version": "$version",
@@ -802,14 +812,13 @@ AppManifest _decodeManifest({
   },
   "engine": {
     "flutterVersion": "3.44.4",
-    "engineCommit": "a10d8ac38de835021c8d2f920dbf50a920ccc030",
-    "plutoAbi": 1
+    "engineCommit": "a10d8ac38de835021c8d2f920dbf50a920ccc030"
   },
   "permissions": ["device.info", "settings.read"],
   "display": {
     "orientations": ["portrait", "landscapeLeft", "landscapeRight"],
     "defaultOrientation": "portrait",
-    "scale": 2.0,
+    "scale": "auto",
     "color": "auto",
     "refreshProfile": "ui"
   },
@@ -823,10 +832,13 @@ AppManifest _decodeManifest({
   return manifest;
 }
 
-InstallRecord _decodeInstallRecord({required int sizeBytes}) {
+InstallRecord _decodeInstallRecord({
+  required String appId,
+  required int sizeBytes,
+}) {
   final Result<InstallRecord, ManifestError> result = InstallRecord.decode('''
 {
-  "schema": 1,
+  "appId": "$appId",
   "installedAt": "2026-07-01T14:03:00Z",
   "installedBy": "pluto 0.1.0",
   "source": "pluto-cli",

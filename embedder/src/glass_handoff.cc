@@ -21,15 +21,15 @@
 namespace pluto {
 namespace {
 
-constexpr std::size_t kBaseHeaderBytes = 192;
-constexpr std::size_t kSectionEntryBytes = 32;
+constexpr std::size_t kBaseHeaderBytes = 188;
+constexpr std::size_t kSectionEntryBytes = 28;
 constexpr std::uint32_t kKnownFlags = kGlassHandoffFlagExactColor;
 constexpr std::uint32_t kEndianMarker = 0x01020304u;
 constexpr std::size_t kWireScratchBytes = 16u * 1024u;
 constexpr std::size_t kIoChunkBytes = 64u * 1024u;
 constexpr std::uint64_t kMaximumRendererPayloadBytes = 64ull << 20;
 constexpr std::uint64_t kCrc64Polynomial = 0x42f0e1eba9ea3693ull;
-constexpr std::size_t kHeaderChecksumOffset = 184;
+constexpr std::size_t kHeaderChecksumOffset = 180;
 constexpr unsigned kUniqueNameAttempts = 128;
 
 std::atomic<std::uint64_t> g_unique_name_sequence{0};
@@ -321,7 +321,6 @@ std::vector<std::uint8_t> encode_header(const WireHeader &header,
   std::vector<std::uint8_t> bytes(header.header_bytes, 0);
   std::size_t cursor = 0;
   put_u32(bytes, &cursor, kGlassHandoffMagic);
-  put_u32(bytes, &cursor, kGlassHandoffVersion);
   put_u32(bytes, &cursor, header.header_bytes);
   put_u32(bytes, &cursor, kEndianMarker);
   put_u32(bytes, &cursor, header.identity.flags);
@@ -368,7 +367,6 @@ std::vector<std::uint8_t> encode_header(const WireHeader &header,
   cursor = kBaseHeaderBytes;
   for (const SectionView &section : sections) {
     put_u32(bytes, &cursor, static_cast<std::uint32_t>(section.type));
-    put_u32(bytes, &cursor, 0); // section flags, none in schema 2
     put_u64(bytes, &cursor, section.offset);
     put_u64(bytes, &cursor, section.size);
     put_u64(bytes, &cursor, section.checksum);
@@ -415,14 +413,13 @@ bool claim_header_matches(int fd, const GlassHandoffClaim &claim) {
   std::span<const std::uint8_t> bytes(base);
   std::size_t cursor = 0;
   std::uint32_t magic = 0;
-  std::uint32_t version = 0;
   std::uint32_t header_bytes = 0;
   std::uint32_t endian = 0;
-  if (!get_u32(bytes, &cursor, &magic) || !get_u32(bytes, &cursor, &version) ||
+  if (!get_u32(bytes, &cursor, &magic) ||
       !get_u32(bytes, &cursor, &header_bytes) ||
       !get_u32(bytes, &cursor, &endian) || magic != kGlassHandoffMagic ||
-      version != kGlassHandoffVersion || endian != kEndianMarker ||
-      header_bytes < kBaseHeaderBytes || header_bytes > claim.file_bytes ||
+      endian != kEndianMarker || header_bytes < kBaseHeaderBytes ||
+      header_bytes > claim.file_bytes ||
       header_bytes > kBaseHeaderBytes + 16u * kSectionEntryBytes ||
       (header_bytes - kBaseHeaderBytes) % kSectionEntryBytes != 0) {
     return false;
@@ -1055,8 +1052,6 @@ const char *glass_handoff_reject_name(GlassHandoffReject reject) {
     return "partial";
   case GlassHandoffReject::kMagic:
     return "magic";
-  case GlassHandoffReject::kVersion:
-    return "version";
   case GlassHandoffReject::kLayout:
     return "layout";
   case GlassHandoffReject::kTooLarge:
@@ -1161,14 +1156,13 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
   std::span<const std::uint8_t> all(base_header);
   std::size_t cursor = 0;
   std::uint32_t magic = 0;
-  std::uint32_t version = 0;
   std::uint32_t endian = 0;
   WireHeader header;
   std::uint32_t profile = 0;
   std::uint32_t tile_cols = 0;
   std::uint32_t tile_rows = 0;
   std::uint64_t realtime = 0;
-  if (!get_u32(all, &cursor, &magic) || !get_u32(all, &cursor, &version) ||
+  if (!get_u32(all, &cursor, &magic) ||
       !get_u32(all, &cursor, &header.header_bytes) ||
       !get_u32(all, &cursor, &endian)) {
     return GlassHandoffReject::kPartial;
@@ -1176,8 +1170,8 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
   if (magic != kGlassHandoffMagic) {
     return GlassHandoffReject::kMagic;
   }
-  if (version != kGlassHandoffVersion || endian != kEndianMarker) {
-    return GlassHandoffReject::kVersion;
+  if (endian != kEndianMarker) {
+    return GlassHandoffReject::kLayout;
   }
   if (header.header_bytes < kBaseHeaderBytes ||
       header.header_bytes > kBaseHeaderBytes + 16u * kSectionEntryBytes ||
@@ -1186,7 +1180,7 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
     return GlassHandoffReject::kLayout;
   }
   // Only the bounded directory is retained. Payload sections are read once,
-  // directly into their final vectors after all metadata compatibility checks
+  // directly into their final vectors after all exact metadata checks
   // pass, avoiding a second whole-bundle allocation.
   std::vector<std::uint8_t> header_storage(header.header_bytes);
   std::memcpy(header_storage.data(), base_header.data(), base_header.size());
@@ -1261,13 +1255,11 @@ GlassHandoffReject glass_handoff_load(const GlassHandoffLease &lease,
   std::uint32_t previous_type = 0;
   for (std::uint32_t i = 0; i < header.section_count; ++i) {
     std::uint32_t raw_type = 0;
-    std::uint32_t section_flags = 0;
     SectionView section;
     if (!get_u32(all, &cursor, &raw_type) ||
-        !get_u32(all, &cursor, &section_flags) ||
         !get_u64(all, &cursor, &section.offset) ||
         !get_u64(all, &cursor, &section.size) ||
-        !get_u64(all, &cursor, &section.checksum) || section_flags != 0 ||
+        !get_u64(all, &cursor, &section.checksum) ||
         raw_type <
             static_cast<std::uint32_t>(GlassHandoffSection::kEngineLevels) ||
         raw_type >
@@ -1663,23 +1655,17 @@ bool glass_handoff_discard(const GlassHandoffLease &lease,
     }
     return errno == ENOENT ? Presence::kAbsent : Presence::kUnknown;
   };
-  const std::string temporary = path + ".tmp";
   const Presence final_before = presence(path);
-  const Presence temporary_before = presence(temporary);
   if (!lease.valid_for_path(path)) {
     return false;
   }
   (void)::unlink(path.c_str());
-  (void)::unlink(temporary.c_str());
   // Attempt the durability fence unconditionally. If no directory entry ever
   // existed there is no unlink to persist, so a missing parent is still a safe
   // and useful idempotent success for host backends.
   const bool sync_ok = sync_parent_directory(path);
-  const bool both_were_absent = final_before == Presence::kAbsent &&
-                                temporary_before == Presence::kAbsent;
   return presence(path) == Presence::kAbsent &&
-         presence(temporary) == Presence::kAbsent &&
-         (both_were_absent || sync_ok);
+         (final_before == Presence::kAbsent || sync_ok);
 }
 
 } // namespace pluto

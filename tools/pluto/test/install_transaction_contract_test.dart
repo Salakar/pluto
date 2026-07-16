@@ -10,6 +10,8 @@ import 'package:test/test.dart';
 
 import 'support/aot_fixture.dart';
 
+const String _engineCommit = 'a10d8ac38de835021c8d2f920dbf50a920ccc030';
+
 /// Contract test: drives [LiveDeviceOperations.installPackage] against a
 /// local `sh` and the REAL `tools/device/pluto-install-transaction.sh`, so
 /// the CLI's staging layout and the device-side transaction cannot drift
@@ -59,9 +61,33 @@ void main() {
               path: 'manifest.json',
               bytes: Uint8List.fromList(
                 utf8.encode(
-                  '{"id":"dev.example.notes","name":"Notes","runtime":'
-                  '{"type":"flutter-aot","appElf":"lib/app.so",'
-                  '"assets":"flutter_assets"}}',
+                  jsonEncode(<String, Object?>{
+                    'id': 'dev.example.notes',
+                    'name': 'Notes',
+                    'version': '1.0.0',
+                    'icon': 'assets/pluto/icon.png',
+                    'runtime': <String, Object?>{
+                      'type': 'flutter-aot',
+                      'appElf': 'lib/app.so',
+                      'assets': 'flutter_assets',
+                    },
+                    'engine': <String, Object?>{
+                      'flutterVersion': '3.44.4',
+                      'engineCommit': _engineCommit,
+                    },
+                    'permissions': <Object?>[],
+                    'display': <String, Object?>{
+                      'orientations': <Object?>['portrait'],
+                      'defaultOrientation': 'portrait',
+                      'scale': 'auto',
+                      'color': 'auto',
+                      'refreshProfile': 'ui',
+                    },
+                    'launch': <String, Object?>{
+                      'singleInstance': true,
+                      'args': <Object?>[],
+                    },
+                  }),
                 ),
               ),
             ),
@@ -70,10 +96,14 @@ void main() {
               path: 'bundle/flutter_assets/AssetManifest.bin',
               bytes: Uint8List.fromList(<int>[4]),
             ),
+            PackageEntry(
+              path: 'assets/pluto/icon.png',
+              bytes: Uint8List.fromList(<int>[5]),
+            ),
           ]),
           metadata: const PackageMetadata(
             flutterVersion: '3.44.4',
-            engineCommit: 'abc',
+            engineCommit: _engineCommit,
             plutoVersion: '0.1.0',
           ),
         );

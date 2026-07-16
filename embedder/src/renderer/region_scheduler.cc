@@ -2327,7 +2327,6 @@ bool RegionScheduler::export_state(RegionSchedulerState *out) const {
     return false;
   }
   RegionSchedulerState state;
-  state.version = kStateVersion;
   state.config = persistent_config(config_);
   state.has_debt_grid = !last_submit_us_.empty();
   if (state.has_debt_grid) {
@@ -2347,7 +2346,7 @@ bool RegionScheduler::import_state(const RegionSchedulerState &state) {
   constexpr uint64_t kMaxCbsSlots =
       (static_cast<uint64_t>(std::numeric_limits<size_t>::max()) - 1u) / 100u;
   if (!valid_ || !idle() || !rect_is_empty(pen_focus_rect_) ||
-      pen_focus_expires_us_ != 0 || state.version != kStateVersion ||
+      pen_focus_expires_us_ != 0 ||
       !same_config(state.config, persistent_config(config_)) ||
       state.has_debt_grid != has_debt_grid ||
       state.cbs_total_slots > kMaxCbsSlots ||

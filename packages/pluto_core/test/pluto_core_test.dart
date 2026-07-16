@@ -22,9 +22,9 @@ void main() {
       arguments: const <String, Object?>{'verbose': true},
     );
     final Future<Object?> firstEvent = transport
-        .events(channel: plutoSettingsEventsChannel)
+        .events(channel: plutoPenEventsChannel)
         .first;
-    transport.emitEvent(plutoSettingsEventsChannel, 'ready');
+    transport.emitEvent(plutoPenEventsChannel, 'ready');
     final Object? event = await firstEvent;
 
     expect(response, const <String, Object?>{'ok': true});
@@ -61,25 +61,12 @@ void main() {
       isA<PlutoPermissionException>(),
     );
     expect(
-      convertPlatformException(
-        PlatformException(
-          code: 'protocol',
-          details: <String, Object?>{
-            'clientProtocol': 1,
-            'embedderProtocol': 2,
-          },
-        ),
-      ),
-      isA<PlutoProtocolException>(),
-    );
-    expect(
       convertPlatformException(PlatformException(code: 'io')),
       isA<PlutoPlatformException>(),
     );
   });
 
-  test('protocol helpers and ring writer validate inputs', () {
-    expect(packageNameForChannel(plutoPenEventsChannel), 'pluto_pen');
+  test('ring writer validates inputs', () {
     expect(() => PenRingWriter(capacity: 3), throwsA(isA<ArgumentError>()));
     final PenRingWriter writer = PenRingWriter(capacity: 2)
       ..write(
@@ -123,53 +110,36 @@ void main() {
       );
 
     expect(writer.data.getUint32(0, Endian.little), PenRingWriter.magic);
+    expect(writer.data.getUint32(4, Endian.little), PenRingWriter.recordSize);
+    expect(writer.data.getUint32(8, Endian.little), 2);
+    expect(writer.data.getUint32(12, Endian.little), 0);
     expect(writer.data.getUint64(16, Endian.little), 3);
     expect(writer.data.getUint64(24, Endian.little), 1);
   });
 
-  test(
-    'channel transport performs handshake and invokes method channel',
-    () async {
-      final List<MethodCall> calls = <MethodCall>[];
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(const MethodChannel(plutoCoreChannel), (
-            MethodCall call,
-          ) async {
-            calls.add(call);
-            return <String, Object?>{
-              'protocol': plutoProtocolVersion,
-              'embedderVersion': 'test',
-              'model': 'chiappa',
-            };
-          });
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(const MethodChannel(plutoDeviceChannel), (
-            MethodCall call,
-          ) async {
-            calls.add(call);
-            return <String, Object?>{'ok': true};
-          });
+  test('channel transport invokes only the requested method', () async {
+    final List<MethodCall> calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel(plutoDeviceChannel), (
+          MethodCall call,
+        ) async {
+          calls.add(call);
+          return <String, Object?>{'ok': true};
+        });
 
-      final Object? response = await ChannelTransport.shared.invoke<Object?>(
-        channel: plutoDeviceChannel,
-        method: deviceInfoMethod,
-      );
+    final Object? response = await ChannelTransport.shared.invoke<Object?>(
+      channel: plutoDeviceChannel,
+      method: deviceInfoMethod,
+    );
 
-      expect(response, const <String, Object?>{'ok': true});
-      expect(
-        calls.map((MethodCall call) => call.method),
-        contains('handshake'),
-      );
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-            const MethodChannel(plutoCoreChannel),
-            null,
-          );
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-            const MethodChannel(plutoDeviceChannel),
-            null,
-          );
-    },
-  );
+    expect(response, const <String, Object?>{'ok': true});
+    expect(calls.map((MethodCall call) => call.method), <String>[
+      deviceInfoMethod,
+    ]);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel(plutoDeviceChannel),
+          null,
+        );
+  });
 }

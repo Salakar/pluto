@@ -231,6 +231,8 @@ void main(List<String> arguments) {
     'tools/pluto/lib/src/device/generated/device_profiles.g.dart': _formatDart(
       _dart(profiles),
     ),
+    'packages/pluto_device/lib/src/generated/remarkable_models.g.dart':
+        _formatDart(_deviceModelsDart(profiles)),
     'tools/device/generated/device-profiles.sh': _shell(profiles),
     'docs/generated/device-support-matrix.md': _markdown(profiles),
   };
@@ -501,6 +503,7 @@ void _validate(List<_Profile> profiles) {
       );
     }
     _validateWaveformOptionContract(profile);
+    _validatePresenterOptionsContract(profile);
     for (final String path in <String>[
       profile.runtime.displayDevice,
       profile.runtime.pen.byPath,
@@ -525,6 +528,25 @@ void _validate(List<_Profile> profiles) {
       _fail('${profile.id} bezel redraw paths must both be present or absent');
     }
     _validateRecoveryContract(profile);
+  }
+}
+
+void _validatePresenterOptionsContract(_Profile profile) {
+  switch (profile.displayDriver) {
+    case 'gallery3_drm':
+      if (profile.runtime.presenterOptions !=
+          'exact_color=1,enable_rails=1,vcom=-0.62') {
+        _fail('${profile.id} Gallery3 presenter options are not canonical');
+      }
+      break;
+    case 'mxcfb_epdc':
+    case 'lcdif_tcon':
+      if (profile.runtime.presenterOptions != null) {
+        _fail('${profile.id} native presenter options must be absent');
+      }
+      break;
+    default:
+      _fail('${profile.id} has an unvalidated presenter options driver');
   }
 }
 
@@ -668,7 +690,6 @@ void _validateRecoveryContract(_Profile profile) {
           recovery.rootPartitions!.any((int partition) => partition <= 0) ||
           recovery.expectedBootLimit == null ||
           recovery.failureStrategy != 'uboot_env_force_reboot' ||
-          !recovery.bootDefaultEnabled ||
           recovery.helperPath != null ||
           recovery.counterDirectory != null) {
         _fail('${profile.id} U-Boot environment recovery contract is invalid');
@@ -1167,6 +1188,55 @@ void _cppWaveformSourceArray(
   output
     ..writeln('}};')
     ..writeln();
+}
+
+String _deviceModelsDart(List<_Profile> profiles) {
+  final StringBuffer output = StringBuffer()
+    ..writeln('// GENERATED FILE. Edit config/device_profiles.json, then run')
+    ..writeln('// dart tools/codegen/generate_device_profiles.dart.')
+    ..writeln()
+    ..writeln('/// reMarkable models accepted by this exact Pluto release.')
+    ..writeln('enum RemarkableModel {');
+  for (int index = 0; index < profiles.length; index += 1) {
+    final _Profile profile = profiles[index];
+    final String terminator = index == profiles.length - 1 ? ';' : ',';
+    output
+      ..writeln('  /// ${profile.marketingName}.')
+      ..writeln(
+        '  ${profile.wireModel}(wireName: ${_dartString(profile.wireModel)}, codename: ${_dartString(profile.codename)})$terminator',
+      )
+      ..writeln();
+  }
+  output
+    ..writeln('  const RemarkableModel({')
+    ..writeln('    required this.wireName,')
+    ..writeln('    required this.codename,')
+    ..writeln('  });')
+    ..writeln()
+    ..writeln('  /// Exact protocol model name.')
+    ..writeln('  final String wireName;')
+    ..writeln()
+    ..writeln('  /// Exact board codename.')
+    ..writeln('  final String codename;')
+    ..writeln()
+    ..writeln('  /// Resolves only an exact generated model/codename pair.')
+    ..writeln('  static RemarkableModel parse(String name, String codename) {')
+    ..writeln('    return switch ((name, codename)) {');
+  for (final _Profile profile in profiles) {
+    output.writeln(
+      '      (${_dartString(profile.wireModel)}, ${_dartString(profile.codename)}) => RemarkableModel.${profile.wireModel},',
+    );
+  }
+  output
+    ..writeln('      _ => throw FormatException(')
+    ..writeln(
+      "        'Unsupported exact device identity: \$name / \$codename',",
+    )
+    ..writeln('      ),')
+    ..writeln('    };')
+    ..writeln('  }')
+    ..writeln('}');
+  return output.toString();
 }
 
 String _dart(List<_Profile> profiles) {
@@ -1691,30 +1761,34 @@ String _shell(List<_Profile> profiles) {
     ..writeln(
       "  _pluto_arch=\$(printf '%s' \"\$4\" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')",
     )
-    ..writeln("  _pluto_matches=''");
+    ..writeln("  _pluto_board_matches=''")
+    ..writeln("  _pluto_compatible_matches=''");
   for (final _Profile profile in profiles) {
     output
-      ..writeln('  case "\$_pluto_arch" in')
+      ..writeln('  case "\$_pluto_board" in')
       ..writeln(
-        '    ${profile.identity.architectures.map(_shellExactPattern).join('|')})',
+        '    ${profile.identity.boardTokens.map(_shellContainsPattern).join('|')}) _pluto_board_matches="\$_pluto_board_matches ${profile.id}" ;;',
       )
-      ..writeln('      case "\$_pluto_board" in')
+      ..writeln('  esac')
+      ..writeln('  case "\$_pluto_compatible" in')
       ..writeln(
-        '        ${profile.identity.boardTokens.map(_shellContainsPattern).join('|')})',
+        '    ${profile.identity.compatibleTokens.map(_shellContainsPattern).join('|')}) _pluto_compatible_matches="\$_pluto_compatible_matches ${profile.id}" ;;',
       )
-      ..writeln('          case "\$_pluto_compatible" in')
-      ..writeln(
-        '            ${profile.identity.compatibleTokens.map(_shellContainsPattern).join('|')}) _pluto_matches="\$_pluto_matches ${profile.id}" ;;',
-      )
-      ..writeln('          esac')
-      ..writeln('          ;;')
-      ..writeln('      esac')
-      ..writeln('      ;;')
       ..writeln('  esac');
   }
-  output.writeln('  case "\$_pluto_matches" in');
+  output.writeln(
+    '  case "\$_pluto_board_matches:\$_pluto_compatible_matches" in',
+  );
   for (final _Profile profile in profiles) {
-    output.writeln('    " ${profile.id}") pluto_profile_load ${profile.id} ;;');
+    output
+      ..writeln('    " ${profile.id}: ${profile.id}")')
+      ..writeln('      case "\$_pluto_arch" in')
+      ..writeln(
+        '        ${profile.identity.architectures.map(_shellExactPattern).join('|')}) pluto_profile_load ${profile.id} ;;',
+      )
+      ..writeln('        *) return 1 ;;')
+      ..writeln('      esac')
+      ..writeln('      ;;');
   }
   output
     ..writeln('    *) return 1 ;;')
@@ -1829,16 +1903,34 @@ _rejectedFixtures(List<_Profile> profiles) {
       .take(2)
       .toList(growable: false);
   if (sameArchitecture.length == 2) {
-    fixtures.add((
-      machine: sameArchitecture
-          .map((_Profile profile) => profile.identity.boardTokens.first)
-          .join(' '),
-      model: '',
-      compatible: sameArchitecture
-          .map((_Profile profile) => profile.identity.compatibleTokens.first)
-          .join(' '),
-      arch: sameArchitecture.first.identity.architectures.first,
-    ));
+    final String conflictingBoards = sameArchitecture
+        .map((_Profile profile) => profile.identity.boardTokens.first)
+        .join(' ');
+    final String conflictingCompatible = sameArchitecture
+        .map((_Profile profile) => profile.identity.compatibleTokens.first)
+        .join(' ');
+    fixtures.addAll(
+      <({String machine, String model, String compatible, String arch})>[
+        (
+          machine: conflictingBoards,
+          model: '',
+          compatible: sameArchitecture.first.identity.compatibleTokens.first,
+          arch: sameArchitecture.first.identity.architectures.first,
+        ),
+        (
+          machine: sameArchitecture.first.identity.boardTokens.first,
+          model: '',
+          compatible: conflictingCompatible,
+          arch: sameArchitecture.first.identity.architectures.first,
+        ),
+        (
+          machine: conflictingBoards,
+          model: '',
+          compatible: conflictingCompatible,
+          arch: sameArchitecture.first.identity.architectures.first,
+        ),
+      ],
+    );
   }
   return fixtures;
 }

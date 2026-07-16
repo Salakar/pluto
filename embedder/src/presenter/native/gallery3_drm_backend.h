@@ -11,8 +11,8 @@ extern "C" {
 // factory. It is intentionally not registered as a user-selectable presenter.
 const PlutoPresenterOps *pluto_gallery3_drm_presenter_ops(void);
 
-// Gallery 3 drive counters for diagnostics and host tests. This is an internal
-// append-only ABI: callers pass struct_size and never see existing fields move.
+// Gallery 3 drive counters for diagnostics and host tests. Callers and the
+// presenter must use this exact in-tree layout.
 typedef struct PlutoGallery3DrmDebugStats {
   size_t struct_size;
   uint64_t updates_completed;

@@ -6,9 +6,8 @@
 // The handoff file is an explicitly encoded, little-endian tmpfs bundle. It
 // is intentionally not a C/C++ object dump: every geometry/configuration
 // field and every section length is validated before any live renderer state
-// is mutated. The current schema is a clean break from the old monochrome
-// plane-only format; old files are rejected and take the normal cold-clear
-// path.
+// is mutated. There is one exact current layout; non-matching files take the
+// normal cold-clear path.
 //
 // Lifecycle (the presenter/renderer handshake is defined in presenter.h):
 //   1. The outgoing renderer stages its quiescent renderer payload.
@@ -37,7 +36,6 @@
 namespace pluto {
 
 inline constexpr std::uint32_t kGlassHandoffMagic = 0x48474c50u; // "PLGH"
-inline constexpr std::uint32_t kGlassHandoffVersion = 2;
 inline constexpr std::uint32_t kGlassHandoffMaxChain = 8;
 inline constexpr std::int64_t kGlassHandoffMaxAgeSec = 60;
 inline constexpr std::uint64_t kGlassHandoffMaxBytes = 128ull << 20;
@@ -84,9 +82,8 @@ struct GlassHandoffClock {
   std::uint64_t boot_id_hash = 0;
 };
 
-// Presenter-owned compatibility identity. Hashes cover bytes, never paths.
-// `pipeline_hash` includes the schema/algorithm revision and canonical
-// PixelEngine/DcLedger configuration.
+// Presenter-owned exact identity. Hashes cover bytes, never paths.
+// `pipeline_hash` includes the canonical PixelEngine/DcLedger configuration.
 struct GlassHandoffIdentity {
   std::uint32_t flags = kGlassHandoffFlagNone;
   GlassHandoffProfile profile = GlassHandoffProfile::kMonochrome;
@@ -210,7 +207,6 @@ enum class GlassHandoffReject : std::uint8_t {
   kIo,
   kPartial,
   kMagic,
-  kVersion,
   kLayout,
   kTooLarge,
   kChecksum,
@@ -274,13 +270,12 @@ bool glass_handoff_claim(const GlassHandoffLease &lease,
                          const GlassHandoffClaim &claim);
 
 // Conservative invalidation used before first admission and on unsafe close.
-// Attempts to remove both the final path and the obsolete shared canonical
-// temporary path, synchronizes their parent directory when either name
-// existed, and returns true only when both names are confirmed absent. Unique
-// writer temporaries and claims remain private and are never removed by a
-// competing process while recent; abandoned private files older than the
-// maximum handoff age are reclaimed. An already-absent pair is success even
-// if its parent directory does not exist.
+// Removes the final path, synchronizes its parent directory when the name
+// existed, and returns true only when it is confirmed absent. Unique writer
+// temporaries and claims remain private and are never removed by a competing
+// process while recent; abandoned private files older than the maximum
+// handoff age are reclaimed. An already-absent path is success even if its
+// parent directory does not exist.
 bool glass_handoff_discard(const GlassHandoffLease &lease,
                            const std::string &path);
 

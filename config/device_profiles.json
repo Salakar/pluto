@@ -85,7 +85,7 @@
         "recovery": {
           "confirmationStrategy": "uboot_env",
           "failureStrategy": "uboot_env_force_reboot",
-          "bootDefaultEnabled": true,
+          "bootDefaultEnabled": false,
           "mmcDevice": "/dev/mmcblk1",
           "rootPartitions": [
             2,
@@ -192,7 +192,7 @@
         "recovery": {
           "confirmationStrategy": "uboot_env",
           "failureStrategy": "uboot_env_force_reboot",
-          "bootDefaultEnabled": true,
+          "bootDefaultEnabled": false,
           "mmcDevice": "/dev/mmcblk2",
           "rootPartitions": [
             2,
@@ -276,7 +276,7 @@
           ]
         },
         "waveformOptionKey": "eink",
-        "presenterOptions": "exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0",
+        "presenterOptions": "exact_color=1,enable_rails=1,vcom=-0.62",
         "pen": {
           "byPath": "/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse",
           "name": "Elan marker input"

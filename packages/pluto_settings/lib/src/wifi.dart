@@ -21,9 +21,6 @@ final class WifiSettings {
     if (payload is bool) {
       return payload;
     }
-    if (payload is Map<Object?, Object?>) {
-      return boolAt(stringMap(payload, 'wifi.isEnabled'), 'enabled');
-    }
     throw const FormatException('Expected Wi-Fi enabled state.');
   }
 
@@ -123,22 +120,7 @@ final class WifiSettings {
         KnownWifiNetwork.fromMap(stringMap(item, 'known wifi network')),
     ];
   }
-
-  /// Connection status stream.
-  Stream<WifiStatus> get onStatusChanged {
-    return _transport
-        .events(
-          channel: plutoSettingsEventsChannel,
-          arguments: const <String, Object?>{'topic': 'wifi'},
-        )
-        .map(
-          (Object? event) => WifiStatus.fromMap(stringMap(event, 'wifi event')),
-        );
-  }
 }
-
-/// Compatibility alias for older docs that used `WiFi`.
-typedef WiFi = WifiSettings;
 
 /// Security type of a Wi-Fi network.
 enum WifiSecurity {
@@ -184,6 +166,17 @@ final class WifiNetwork {
 
   /// Creates a visible network from a protocol map.
   factory WifiNetwork.fromMap(Map<String, Object?> map) {
+    requireExactKeys(
+      map,
+      'wifi network',
+      required: const <String>{
+        'ssid',
+        'signal',
+        'security',
+        'isKnown',
+        'isActive',
+      },
+    );
     return WifiNetwork(
       ssid: stringAt(map, 'ssid'),
       signal: doubleAt(map, 'signal'),
@@ -216,6 +209,11 @@ final class KnownWifiNetwork {
 
   /// Creates a saved network profile from a protocol map.
   factory KnownWifiNetwork.fromMap(Map<String, Object?> map) {
+    requireExactKeys(
+      map,
+      'known wifi network',
+      required: const <String>{'ssid', 'security'},
+    );
     return KnownWifiNetwork(
       ssid: stringAt(map, 'ssid'),
       security: WifiSecurity.parse(stringAt(map, 'security')),
@@ -240,6 +238,11 @@ final class WifiConnection {
 
   /// Creates an established connection from a protocol map.
   factory WifiConnection.fromMap(Map<String, Object?> map) {
+    requireExactKeys(
+      map,
+      'wifi connection',
+      required: const <String>{'ssid', 'ipAddress', 'signal'},
+    );
     return WifiConnection(
       ssid: stringAt(map, 'ssid'),
       ipAddress: stringAt(map, 'ipAddress'),

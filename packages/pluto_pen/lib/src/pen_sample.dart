@@ -96,9 +96,6 @@ final class PenSample {
   /// Normalized hover distance from 0 to 1.
   final double distance;
 
-  /// Compatibility alias for [distance].
-  double get hoverDistance => distance;
-
   /// Raw ABS_DISTANCE value.
   final int rawDistance;
 
@@ -210,17 +207,14 @@ final class PenCapabilities {
 
   /// Creates capabilities from a protocol map.
   factory PenCapabilities.fromMap(Map<String, Object?> map) {
-    final Map<String, Object?> axes = _optionalMap(map, 'axes') ?? map;
+    final Map<String, Object?> axes = _mapAt(map, 'axes');
     return PenCapabilities(
       rawXMax: _intAt(axes, 'rawXMax'),
       rawYMax: _intAt(axes, 'rawYMax'),
       rawPressureMax: _intAt(axes, 'rawPressureMax'),
       rawDistanceMax: _intAt(axes, 'rawDistanceMax'),
       rawTiltMaxCentiDegrees: _intAt(axes, 'rawTiltMaxCentiDegrees'),
-      estimatedSampleRateHz:
-          _optionalDoubleAt(map, 'estimatedSampleRateHz') ??
-          _optionalDoubleAt(map, 'sampleRateHzEstimate') ??
-          0,
+      estimatedSampleRateHz: _doubleAt(map, 'estimatedSampleRateHz'),
     );
   }
 
@@ -249,28 +243,27 @@ const double _defaultRawDistanceMax = 65535;
 double _tiltRadians(int centiDegrees) => centiDegrees * math.pi / 18000;
 
 PenTool _toolFromWire(Object? value) {
-  if (value is int) {
-    return value == 2 ? PenTool.eraser : PenTool.pen;
-  }
-  if (value is String) {
-    return value == 'eraser' ? PenTool.eraser : PenTool.pen;
-  }
-  return PenTool.pen;
+  return switch (value) {
+    1 => PenTool.pen,
+    2 => PenTool.eraser,
+    _ => throw FormatException('Unknown pen tool: $value'),
+  };
 }
 
-Map<String, Object?>? _optionalMap(Map<String, Object?> map, String key) {
+Map<String, Object?> _mapAt(Map<String, Object?> map, String key) {
   final Object? value = map[key];
   if (value is Map<Object?, Object?>) {
     final Map<String, Object?> result = <String, Object?>{};
     for (final MapEntry<Object?, Object?> entry in value.entries) {
       final Object? entryKey = entry.key;
-      if (entryKey is String) {
-        result[entryKey] = entry.value;
+      if (entryKey is! String) {
+        throw FormatException('Expected $key keys to be strings.');
       }
+      result[entryKey] = entry.value;
     }
     return result;
   }
-  return null;
+  throw FormatException('Expected $key to be a map.');
 }
 
 int _intAt(Map<String, Object?> map, String key) {
@@ -283,20 +276,6 @@ int _intAt(Map<String, Object?> map, String key) {
 
 double _doubleAt(Map<String, Object?> map, String key) {
   final Object? value = map[key];
-  if (value is int) {
-    return value.toDouble();
-  }
-  if (value is double) {
-    return value;
-  }
-  throw FormatException('Expected $key to be a number.');
-}
-
-double? _optionalDoubleAt(Map<String, Object?> map, String key) {
-  final Object? value = map[key];
-  if (value == null) {
-    return null;
-  }
   if (value is int) {
     return value.toDouble();
   }

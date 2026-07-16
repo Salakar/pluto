@@ -79,7 +79,9 @@ embedder code must pass both the AArch64 and ARMv7 device builds.
 - Release-only invariant: default builds, installs, and provisioning are
   product AOT. Nothing outside explicit `--debug` flows may introduce a
   JIT kernel, a debug engine, or a VM service on the device.
-- C ABI changes must bump `PLUTO_ABI_VERSION`.
+- Pluto-owned presenter structs and operation tables are an unpublished,
+  single-release contract: update both sides together and require exact
+  current layouts.
 - Keep device payloads under their managed `/home/root/` roots. Device writes
   must go through the public `pluto provision`, `pluto install`,
   `pluto provision --restore-remarkable`, and

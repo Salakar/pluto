@@ -18,11 +18,32 @@ fail() {
 }
 
 mkdir -p "$ROOT/bin" "$BIN"
+mkdir -p "$ROOT/share"
 cat > "$ROOT/bin/pluto-session.sh" <<'SUPERVISOR'
 #!/bin/sh
 exit 0
 SUPERVISOR
-chmod 0755 "$ROOT/bin/pluto-session.sh"
+cp "$SCRIPT" "$ROOT/bin/pluto-session-once.sh"
+cat > "$ROOT/share/device-profiles.sh" <<'PROFILES'
+pluto_profile_load() {
+  case "$1" in
+    rm1) PLUTO_PROFILE_DISPLAY_DRIVER=mxcfb_epdc ;;
+    rm2) PLUTO_PROFILE_DISPLAY_DRIVER=lcdif_tcon ;;
+    move) PLUTO_PROFILE_DISPLAY_DRIVER=gallery3_drm ;;
+    *) return 1 ;;
+  esac
+  PLUTO_PROFILE_NATIVE_SESSION_ENABLED=1
+  export PLUTO_PROFILE_DISPLAY_DRIVER PLUTO_PROFILE_NATIVE_SESSION_ENABLED
+}
+pluto_profile_probe() { return 1; }
+PROFILES
+cat > "$ROOT/bin/pluto-rm2-cpufreq-restore.sh" <<'RESTORE'
+#!/bin/sh
+printf 'cpufreq-restore\n' >> "$PLUTO_TEST_EVENTS"
+[ "${PLUTO_TEST_FAIL_CPUFREQ:-0}" != 1 ]
+RESTORE
+chmod 0755 "$ROOT/bin/pluto-session.sh" "$ROOT/bin/pluto-session-once.sh" \
+  "$ROOT/bin/pluto-rm2-cpufreq-restore.sh"
 
 cat > "$BIN/systemctl" <<'SYSTEMCTL'
 #!/bin/sh
@@ -42,12 +63,15 @@ SYSTEMCTL
 chmod 0755 "$BIN/systemctl"
 
 run_once() {
+  local profile="${PLUTO_TEST_PROFILE_ID:-rm1}"
   PLUTO_ROOT="$ROOT" \
   PLUTO_RUN_DIR="$RUN" \
   PLUTO_SYSTEMCTL="$BIN/systemctl" \
   PLUTO_SYSTEMD_RUNTIME_DIR="$UNITS" \
   PLUTO_TEST_EVENTS="$EVENTS" \
   PLUTO_TEST_ACTIVE="$ACTIVE" \
+  PLUTO_TESTING=1 \
+  PLUTO_TEST_PROFILE_ID="$profile" \
     sh "$SCRIPT" "$@"
 }
 
@@ -65,8 +89,11 @@ grep -q "^Environment=PLUTO_RUN_DIR=$RUN$" "$UNIT" ||
   fail "one-shot service has the wrong control directory"
 grep -q "^ExecStart=$ROOT/bin/pluto-session.sh start$" "$UNIT" ||
   fail "one-shot service does not start the common supervisor"
-grep -q '^ExecStopPost=/bin/systemctl --no-block start xochitl.service$' "$UNIT" ||
-  fail "one-shot service cannot restore stock after exit"
+grep -q "^ExecStopPost=$ROOT/bin/pluto-session-once.sh restore-stock$" "$UNIT" ||
+  fail "one-shot service does not use the profile-aware stock handoff"
+if grep -q 'rm2-cpufreq' "$UNIT"; then
+  fail "RM1 one-shot service embeds an RM2-only helper"
+fi
 grep -q '^Restart=no$' "$UNIT" ||
   fail "one-shot service can enter a restart loop"
 [[ "$UNIT" == "$TMP/run/"* ]] || fail "one-shot service persisted outside /run"
@@ -77,6 +104,9 @@ run_once stop >/dev/null || fail "one-shot session did not stop"
 [ ! -e "$UNIT" ] || fail "stopped one-shot service remained published"
 grep -q '^stop pluto-session-once.service$' "$EVENTS" ||
   fail "stop did not end the transient supervisor"
+if grep -q '^cpufreq-restore$' "$EVENTS"; then
+  fail "RM1 explicit stop ran RM2 CPU-frequency recovery"
+fi
 grep -q '^start xochitl.service$' "$EVENTS" ||
   fail "stop did not request stock xochitl"
 
@@ -89,6 +119,8 @@ PLUTO_SYSTEMD_RUNTIME_DIR="$UNITS" \
 PLUTO_TEST_EVENTS="$EVENTS" \
 PLUTO_TEST_ACTIVE="$ACTIVE" \
 PLUTO_TEST_FAIL_START=1 \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=rm1 \
   sh "$SCRIPT" start >/dev/null 2>&1
 FAILED_START=$?
 set -e
@@ -97,9 +129,47 @@ set -e
 grep -q '^start xochitl.service$' "$EVENTS" ||
   fail "failed transient start did not restore stock"
 
+# RM2 alone requires the device-specific receipt recovery. The single
+# profile-aware ExecStopPost helper cannot start stock after recovery fails.
+: > "$EVENTS"
+export PLUTO_TEST_PROFILE_ID=rm2
+run_once start >/dev/null || fail "one-shot session did not restart"
+export PLUTO_TEST_FAIL_CPUFREQ=1
+set +e
+run_once stop >/dev/null 2>&1
+FAILED_RESTORE=$?
+set -e
+unset PLUTO_TEST_FAIL_CPUFREQ
+[ "$FAILED_RESTORE" -ne 0 ] || fail "cpufreq recovery failure returned success"
+grep -q '^cpufreq-restore$' "$EVENTS" || fail "failed recovery was not attempted"
+if grep -q '^start xochitl.service$' "$EVENTS"; then
+  fail "direct fallback started stock after cpufreq recovery failed"
+fi
+
+unset PLUTO_TEST_FAIL_CPUFREQ
+: > "$EVENTS"
+run_once stop >/dev/null || fail "RM2 one-shot stop did not retry recovery"
+grep -q '^cpufreq-restore$' "$EVENTS" ||
+  fail "RM2 explicit stop did not run CPU-frequency recovery"
+grep -q '^start xochitl.service$' "$EVENTS" ||
+  fail "RM2 explicit stop did not restore stock"
+unset PLUTO_TEST_PROFILE_ID
+
+# Move follows the same current-boot flow but does not depend on the RM2 helper.
+rm -f "$ROOT/bin/pluto-rm2-cpufreq-restore.sh"
+export PLUTO_TEST_PROFILE_ID=move
+: > "$EVENTS"
+run_once start >/dev/null || fail "Move one-shot session required the RM2 helper"
+run_once stop >/dev/null || fail "Move one-shot stop required the RM2 helper"
+if grep -q '^cpufreq-restore$' "$EVENTS"; then
+  fail "Move one-shot stop ran RM2 CPU-frequency recovery"
+fi
+unset PLUTO_TEST_PROFILE_ID
+
 if PLUTO_ROOT='../unsafe' PLUTO_SYSTEMCTL="$BIN/systemctl" \
   PLUTO_SYSTEMD_RUNTIME_DIR="$UNITS" PLUTO_TEST_EVENTS="$EVENTS" \
-  PLUTO_TEST_ACTIVE="$ACTIVE" sh "$SCRIPT" start >/dev/null 2>&1; then
+  PLUTO_TEST_ACTIVE="$ACTIVE" PLUTO_TESTING=1 PLUTO_TEST_PROFILE_ID=rm1 \
+  sh "$SCRIPT" start >/dev/null 2>&1; then
   fail "unsafe Pluto root was accepted"
 fi
 

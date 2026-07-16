@@ -1,7 +1,7 @@
 #!/bin/sh
 # Pluto session supervisor (device-side). No Dart runtime on device, so this
-# native supervisor is the "plutod" that owns the profile-selected display
-# handoff between the launcher and app embedders.
+# native supervisor owns the profile-selected display handoff between the
+# launcher and app embedders.
 #
 # App registry:  $ROOT/apps/<app-id>/{manifest.json, bundle/}
 # Flavor engines: $ROOT/engine/{release,profile,debug}/libflutter_engine.so;
@@ -74,6 +74,7 @@ POWER_OFF_COMMAND="${PLUTO_POWER_OFF_COMMAND:-systemctl poweroff}"
 # Falls back to the launcher when unset or when the app cannot start.
 DEFAULT_APP_FILE="$ROOT/state/default-app"
 PROFILE_FILE="${PLUTO_PROFILE_FILE:-$ROOT/share/device-profiles.sh}"
+CPU_FREQUENCY_RESTORE="$ROOT/bin/pluto-rm2-cpufreq-restore.sh"
 BOOT_CONFIRM_DISPATCHER="${PLUTO_BOOT_CONFIRM_DISPATCHER:-/usr/libexec/pluto-boot-recovery}"
 BACKLIGHT_BRIGHTNESS="${PLUTO_BACKLIGHT_BRIGHTNESS:-}"
 VPDD_TIMEOUT_FILE="${PLUTO_VPDD_TIMEOUT_FILE:-}"
@@ -301,6 +302,8 @@ configure_profile() {
       PLUTO_PROFILE_RECOVERY_HELPER="$PLUTO_TEST_RECOVERY_HELPER"
     [ -z "${PLUTO_TEST_RECOVERY_COUNTER_DIR:-}" ] ||
       PLUTO_PROFILE_RECOVERY_COUNTER_DIR="$PLUTO_TEST_RECOVERY_COUNTER_DIR"
+    [ -z "${PLUTO_TEST_CPU_FREQUENCY_RESTORE:-}" ] ||
+      CPU_FREQUENCY_RESTORE="$PLUTO_TEST_CPU_FREQUENCY_RESTORE"
     export PLUTO_PROFILE_RECOVERY_HELPER
     export PLUTO_PROFILE_RECOVERY_COUNTER_DIR
   fi
@@ -365,6 +368,20 @@ configure_profile() {
   export PLUTO_BEZEL_REDRAW_ENABLE="$BEZEL_REDRAW_ENABLE"
   PROFILE_CONFIGURED=1
   log "profile accepted: $PLUTO_PROFILE_ID driver=$PLUTO_PROFILE_DISPLAY_DRIVER target=$PLUTO_PROFILE_TARGET resident=$MAX_RESIDENT_APPS control_poll_ms=$SUPERVISOR_CONTROL_POLL_MS"
+}
+
+restore_cpu_frequency_burst() {  # lifecycle context
+  [ "${PLUTO_PROFILE_DISPLAY_DRIVER:-}" = lcdif_tcon ] || return 0
+  cpufreq_context=$1
+  if [ ! -x "$CPU_FREQUENCY_RESTORE" ]; then
+    log "CPU-frequency recovery failed closed at $cpufreq_context: missing $CPU_FREQUENCY_RESTORE"
+    return 69
+  fi
+  "$CPU_FREQUENCY_RESTORE" || {
+    cpufreq_rc=$?
+    log "CPU-frequency recovery failed closed at $cpufreq_context (rc=$cpufreq_rc)"
+    return "$cpufreq_rc"
+  }
 }
 
 proc_start_ticks() {
@@ -1400,6 +1417,11 @@ restore_stock() {
     }
   fi
   drain_warm_pool
+  if ! restore_cpu_frequency_burst stock-handoff; then
+    mark_boot_fatal "CPU-frequency policy could not be restored before stock handoff" \
+      "$APP_READY_FILE" "$APP_HEALTH_FILE"
+    return 74
+  fi
   log "restoring stock xochitl"
   if hijacked; then
     # Preserve the confirmed owned attempt while replacing this exact service
@@ -1477,6 +1499,11 @@ start() {
   rm -f "$WARM_DIR"/*.pid "$WARM_DIR"/*.used "$WARM_DIR"/*.ready \
     "$WARM_DIR"/*.health "$WARM_DIR/sequence" \
     "$HIBERNATED_DIR"/* "$CTL/previews"/* 2>/dev/null || true
+  if ! restore_cpu_frequency_burst supervisor-startup; then
+    mark_boot_fatal "CPU-frequency startup recovery failed" \
+      "$APP_READY_FILE" "$APP_HEALTH_FILE"
+    return 74
+  fi
   if hijacked; then
     # We ARE xochitl.service (boot-first override): no stock xochitl to stop.
     log "boot-first: this supervisor is xochitl.service; taking the panel"
@@ -1502,6 +1529,15 @@ start() {
   system_host=none
   fails=0
   while :; do
+    # The prior foreground may have died after publishing a burst receipt but
+    # before its destructor restored policy0. Do not resume or create another
+    # panel owner until that exact stale lease is either absent or recovered.
+    if ! restore_cpu_frequency_burst foreground-boundary; then
+      mark_boot_fatal "CPU-frequency recovery failed before foreground launch" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      drain_warm_pool
+      return 74
+    fi
     t0=$(uptime_seconds)
     was_standby="$standby"
     # A suspend request belongs to exactly one standby child. Clear anything

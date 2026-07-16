@@ -47,7 +47,10 @@ local.
 
 ```sh
 # One time, and again whenever the rig moves.
-tools/setup/camera/capture.sh configure
+tools/setup/camera/capture.sh configure \
+  --device-profile 1=move \
+  --device-profile 2=rm1 \
+  --device-profile 3=rm2
 
 # Full rig view: red device regions and bright-green final capture footprints.
 tools/setup/camera/capture.sh identify --output /tmp/pluto-devices.jpg
@@ -61,8 +64,40 @@ tools/setup/camera/capture.sh video \
   --device 2 --seconds 10 --output /tmp/device-2.mp4
 ```
 
-For the release hardware smoke, use the stage hook to capture every foreground
-app, the real switcher selection, and the completed Ink stroke automatically:
+Run lifecycle acceptance first, using its own camera directory so its frames can
+never be mistaken for the fresh final acceptance set. It semantically opens a
+real Ink canvas, draws through Flutter, parks that exact process in the stopped
+warm pool, and keeps the same Home process (PID, process start ticks, and
+launch-specific ready/health paths) across every suspend/resume cycle. After the
+soak it resumes the original Ink process and photographs the preserved canvas
+before testing crash-to-Home recovery:
+
+```sh
+export PLUTO_CAMERA_RIG=2
+export PLUTO_ACCEPTANCE_STAGE_HOOK="$PWD/tools/setup/camera/capture-acceptance-stage.sh"
+export PLUTO_ACCEPTANCE_STAGE_DELAY=1
+export PLUTO_ACCEPTANCE_RELEASE_REVISION="$(git rev-parse HEAD)"
+export PLUTO_ACCEPTANCE_PROFILE_ID=rm1
+# This directory is lifecycle-only. Never reuse it below.
+export PLUTO_CAMERA_ACCEPTANCE_DIR="$PWD/analysis/native-cutover/final-acceptance/rm1/lifecycle-camera"
+export PLUTO_LIFECYCLE_SCREENSHOT_DIR="$PWD/analysis/native-cutover/final-acceptance/rm1/lifecycle-screenshots"
+# The CLI and raw SSH checks must name the same explicit user, host, and port.
+# Use the device's direct USB endpoint because a forwarding process can drop
+# while the tablet sleeps.
+export PLUTO_ACCEPTANCE_SSH_TARGET=root@10.11.99.1
+unset PLUTO_ACCEPTANCE_SSH_PORT
+export PLUTO_ACCEPTANCE_SSH_BIND_ADDRESS=HOST_USB_LINK_ADDRESS
+export PLUTO_LIFECYCLE_CYCLES=20
+
+tools/device/test/release-lifecycle-hardware-smoke.sh root@10.11.99.1
+```
+
+Then collect the final app/switcher/Ink evidence into new directories. The
+canonical repository hook is mandatory; arbitrary executable hooks are accepted
+only by the explicit unit-test seam, which is permanently recorded and cannot
+satisfy production verification. `COLLECT_ONLY` is mandatory in final visual
+mode and prevents this first pass from claiming acceptance before the frames are
+reviewed:
 
 ```sh
 export PLUTO_CAMERA_RIG=2
@@ -70,20 +105,74 @@ export PLUTO_CAMERA_ACCEPTANCE_DIR="$PWD/analysis/native-cutover/final-acceptanc
 export PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$PWD/analysis/native-cutover/final-acceptance/rm1/screenshots"
 export PLUTO_ACCEPTANCE_STAGE_HOOK="$PWD/tools/setup/camera/capture-acceptance-stage.sh"
 export PLUTO_ACCEPTANCE_STAGE_DELAY=1
+export PLUTO_ACCEPTANCE_CAPTURE_SETTLE=1
 export PLUTO_ACCEPTANCE_CODEX_REQUEST=1
+export PLUTO_ACCEPTANCE_REQUIRE_VISUAL=1
+export PLUTO_ACCEPTANCE_COLLECT_ONLY=1
+export PLUTO_ACCEPTANCE_RELEASE_REVISION="$(git rev-parse HEAD)"
+export PLUTO_ACCEPTANCE_PROFILE_ID=rm1
+export PLUTO_ACCEPTANCE_RELEASE_MANIFEST="$PWD/build/pluto-release/release-manifest.json"
 export PLUTO_ACCEPTANCE_SSH_TARGET=root@127.0.0.1
 export PLUTO_ACCEPTANCE_SSH_PORT=22202
 
 tools/device/test/release-aot-hardware-smoke.sh root@127.0.0.1:22202
 ```
 
-Use the correct SSH target and configured rig number for each tablet. The hook
+`DEVICE` (the script argument) and `PLUTO_ACCEPTANCE_SSH_TARGET` must resolve to
+the same explicit user, host, and port; omitted ports canonicalize to `22`.
+Bracketed CLI IPv6 and raw OpenSSH IPv6 are equivalent, for example
+`root@[fe80::1%en7]` and `root@fe80::1%en7`. A split endpoint is accepted only
+by `PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1` and the resulting evidence remains
+marked as test-only.
+
+Use the correct SSH target and configured rig number for each tablet. Every
+device entry in the frozen camera config carries an exact `profile_id`; the
+selected rig must match `PLUTO_ACCEPTANCE_PROFILE_ID`. The hook
 writes numbered JPEGs plus `stages.tsv`, which binds every label and filename to
 the image SHA-256. When `PLUTO_ACCEPTANCE_SCREENSHOT_DIR` is set, the smoke also
 writes a native PNG and digest record for every identical stage. Camera glass
 remains authoritative; the paired PNG proves which settled framebuffer Pluto
-reported. A capture failure fails the smoke run instead of silently leaving an
-evidence gap.
+reported. The hook also freezes `camera-provenance.tsv` and the exact
+`camera-config.json`; every stage rechecks the repository wrapper, Python
+driver, camera configuration, rig, and their hashes before and after capture.
+The final metrics bundle independently verifies every immutable installed byte
+against the frozen universal release manifest. Final visual mode requires
+fresh, nonexistent camera and screenshot
+directories, the exact installed release revision and profile, the universal
+release-manifest digest, target and SSH identity, the numbered camera rig, all
+eleven unique interaction stages, and a real authenticated Codex CLI request.
+The Codex app camera stage proves its UI is visible; the authenticated CLI
+request is a separate end-to-end backend check and is not represented as UI
+interaction. A capture failure or reused evidence path fails the run instead of
+silently leaving an evidence gap.
+
+View all eleven JPEG/PNG pairs. Confirm that the label names what is actually
+visible on the named physical tablet, including the switcher-selected Codex UI,
+the empty Ink canvas, the visibly changed Ink stroke, and final Home. Only after
+that review, write the hash-bound receipt and run the final verifier:
+
+```sh
+tools/device/diagnostics/record-visual-review.sh \
+  --camera-dir "$PLUTO_CAMERA_ACCEPTANCE_DIR" \
+  --screenshot-dir "$PLUTO_ACCEPTANCE_SCREENSHOT_DIR" \
+  --reviewer YOUR_NAME --confirm-all-visible
+
+tools/device/diagnostics/verify-visual-acceptance.sh \
+  --camera-dir "$PLUTO_CAMERA_ACCEPTANCE_DIR" \
+  --screenshot-dir "$PLUTO_ACCEPTANCE_SCREENSHOT_DIR"
+```
+
+The verifier fully decodes every JPEG and PNG, checks exact profile-native PNG
+geometry and app binding, rejects unchanged consecutive frames, recomputes the
+installed-byte proof with pinned Dart, and requires the Ink stroke to change
+decoded pixels in its deterministic central corridor. Its cross-modal pixel
+gate aligns every camera frame to its paired post-dither PNG, rejects permuted
+or unrelated stages, and requires the deterministic Ink curve in both
+modalities. Human review remains necessary for legibility and e-ink artifacts
+but cannot override a failed automated proof. Every review row binds the camera
+digest, native digest, metadata, metrics bundle, and immutable camera
+provenance. Capture a full-rig identify frame before and after the three-device
+run as additional inventory evidence.
 
 Every successful command prints the absolute output/config path as the final
 stdout line. Parent directories for capture outputs are created automatically.
@@ -127,7 +216,7 @@ unverified crop.
 Candidate frames, the selected rig frame, and crop previews are sent to the
 OpenAI Codex service. They may include the camera's surroundings. The command
 prints a notice immediately before each upload. `identify`, `image`, `video`,
-and the legacy capture form never call Codex.
+and all configured capture subcommands never call Codex.
 
 The normal path uses `gpt-5.6-luna` with low reasoning for quick camera and
 full-rig detection, then `gpt-5.4` with low reasoning for the close-up geometry
@@ -160,7 +249,7 @@ by Git. Schema 6 records:
 - the selected backend, camera index/path and diagnostic name;
 - capture resolution, frame rate, pixel format, and settle delay;
 - the number of configured devices;
-- each red label number;
+- each red label number and its explicit `profile_id` (`rm1`, `rm2`, or `move`);
 - normalized and pixel screen/label boxes;
 - ordered normalized/pixel screen corners, an expanded intermediate transform,
   the model's active-display prior, the locally fitted physical boundaries,
@@ -182,7 +271,8 @@ overlays still line up with physical labels.
 Use another config without changing the repository-local default:
 
 ```sh
-tools/setup/camera/capture.sh configure --config /tmp/rig-a.json
+tools/setup/camera/capture.sh configure --config /tmp/rig-a.json \
+  --device-profile 1=move --device-profile 2=rm1 --device-profile 3=rm2
 tools/setup/camera/capture.sh image \
   --config /tmp/rig-a.json --device 2 --output /tmp/device-2.jpg
 ```
@@ -298,8 +388,3 @@ Failure artifacts and directories explicitly retained with `--artifacts` or
 `--keep-artifacts` are not deleted automatically. Their `camera-N.jpg` files
 can include the surrounding room; remove the retained directory after
 diagnosis when it is no longer needed.
-
-For backward compatibility, `capture.sh OUTPUT.jpg` and
-`capture.sh OUTPUT.mp4 --seconds 10` still perform an unconfigured full-camera
-capture using `CAMERA_DEVICE`, `CAMERA_SIZE`, and `CAMERA_INPUT`. New agent
-workflows should use the configured subcommands above.

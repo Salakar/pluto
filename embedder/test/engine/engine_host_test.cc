@@ -85,7 +85,7 @@ TEST(EngineHostConfig, DefaultsToReleaseAot) {
   EXPECT_FALSE(config.dpr_explicitly_set);
 }
 
-TEST(EngineHostGeometry, AdoptsLegacyPresenterBeforeWindowMetrics) {
+TEST(EngineHostGeometry, AdoptsPresenterBeforeWindowMetrics) {
   pluto::EngineHostConfig config;
   PlutoDisplayInfo info{};
   info.struct_size = sizeof(info);
@@ -106,6 +106,21 @@ TEST(EngineHostGeometry, AdoptsLegacyPresenterBeforeWindowMetrics) {
   EXPECT_EQ(metrics.width, static_cast<size_t>(1404));
   EXPECT_EQ(metrics.height, static_cast<size_t>(1872));
   EXPECT_NEAR(metrics.pixel_ratio, 226.0 / 160.0, 1e-12);
+}
+
+TEST(EngineHostGeometry, RejectsNonCurrentDisplayInfoLayouts) {
+  pluto::EngineHostConfig config;
+  PlutoDisplayInfo info{};
+  info.width = 1404;
+  info.height = 1872;
+  info.dpi = 226;
+  std::string error;
+
+  info.struct_size = sizeof(info) - 1u;
+  EXPECT_FALSE(pluto::apply_presenter_display_info(info, &config, &error));
+  EXPECT_NE(error.find("non-current display info layout"), std::string::npos);
+  info.struct_size = sizeof(info) + 1u;
+  EXPECT_FALSE(pluto::apply_presenter_display_info(info, &config, &error));
 }
 
 TEST(EngineHostGeometry, WindowMetricsFollowRotationAfterAdoption) {
@@ -528,6 +543,26 @@ TEST(EngineHostConfig, RejectsRelativeHealthFileBeforeStartup) {
   EXPECT_EQ(error,
             "startup configuration failed: --health-file must be an absolute "
             "path");
+}
+
+TEST(EngineHostConfig, RequiresExplicitEnginePath) {
+  pluto::EngineHostConfig config;
+  config.icu_data_path = "/explicit/icudtl.dat";
+  pluto::EngineHost host(std::move(config));
+  std::string error;
+
+  EXPECT_FALSE(host.initialize(&error));
+  EXPECT_EQ(error, "startup configuration failed: --engine is required");
+}
+
+TEST(EngineHostConfig, RequiresExplicitIcuDataPath) {
+  pluto::EngineHostConfig config;
+  config.engine_path = "/explicit/libflutter_engine.so";
+  pluto::EngineHost host(std::move(config));
+  std::string error;
+
+  EXPECT_FALSE(host.initialize(&error));
+  EXPECT_EQ(error, "startup configuration failed: --icu-data is required");
 }
 
 TEST(EngineHostPaths, UsesCanonicalAotElf) {

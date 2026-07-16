@@ -47,7 +47,7 @@ pluto_profile_load() {
       PLUTO_PROFILE_BEZEL_REDRAW_ENABLE=''
       PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY='uboot_env'
       PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY='uboot_env_force_reboot'
-      PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED='1'
+      PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED='0'
       PLUTO_PROFILE_RECOVERY_MMC_DEVICE='/dev/mmcblk1'
       PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS='2,3'
       PLUTO_PROFILE_RECOVERY_BOOT_LIMIT='1'
@@ -101,7 +101,7 @@ pluto_profile_load() {
       PLUTO_PROFILE_BEZEL_REDRAW_ENABLE=''
       PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY='uboot_env'
       PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY='uboot_env_force_reboot'
-      PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED='1'
+      PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED='0'
       PLUTO_PROFILE_RECOVERY_MMC_DEVICE='/dev/mmcblk2'
       PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS='2,3'
       PLUTO_PROFILE_RECOVERY_BOOT_LIMIT='1'
@@ -142,7 +142,7 @@ pluto_profile_load() {
       PLUTO_PROFILE_DAMAGE_ALIGNMENT=8
       PLUTO_PROFILE_PHASE_INTERVAL_NS='11764706'
       PLUTO_PROFILE_WAVEFORM_OPTION_KEY='eink'
-      PLUTO_PROFILE_PRESENTER_OPTIONS='exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0'
+      PLUTO_PROFILE_PRESENTER_OPTIONS='exact_color=1,enable_rails=1,vcom=-0.62'
       PLUTO_PROFILE_PEN_DEVICE='/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse'
       PLUTO_PROFILE_PEN_NAME='Elan marker input'
       PLUTO_PROFILE_TOUCH_DEVICE='/dev/input/by-path/platform-44360000.spi-cs-0-event'
@@ -260,44 +260,45 @@ pluto_profile_detect() {
   _pluto_board=$(printf '%s %s' "$1" "$2" | tr '[:upper:]' '[:lower:]')
   _pluto_compatible=$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')
   _pluto_arch=$(printf '%s' "$4" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-  _pluto_matches=''
-  case "$_pluto_arch" in
-    "armv7l")
-      case "$_pluto_board" in
-        *"remarkable 1.0"*|*"remarkable 1.n"*|*"zero-gravitas"*)
-          case "$_pluto_compatible" in
-            *"remarkable,zero-gravitas"*|*"fsl,imx6sl"*) _pluto_matches="$_pluto_matches rm1" ;;
-          esac
-          ;;
+  _pluto_board_matches=''
+  _pluto_compatible_matches=''
+  case "$_pluto_board" in
+    *"remarkable 1.0"*|*"remarkable 1.n"*|*"zero-gravitas"*) _pluto_board_matches="$_pluto_board_matches rm1" ;;
+  esac
+  case "$_pluto_compatible" in
+    *"remarkable,zero-gravitas"*|*"fsl,imx6sl"*) _pluto_compatible_matches="$_pluto_compatible_matches rm1" ;;
+  esac
+  case "$_pluto_board" in
+    *"remarkable 2.0"*|*"remarkable 2.n"*|*"zero-sugar"*) _pluto_board_matches="$_pluto_board_matches rm2" ;;
+  esac
+  case "$_pluto_compatible" in
+    *"fsl,imx7d-sdb"*) _pluto_compatible_matches="$_pluto_compatible_matches rm2" ;;
+  esac
+  case "$_pluto_board" in
+    *"chiappa"*) _pluto_board_matches="$_pluto_board_matches move" ;;
+  esac
+  case "$_pluto_compatible" in
+    *"fsl,imx93"*) _pluto_compatible_matches="$_pluto_compatible_matches move" ;;
+  esac
+  case "$_pluto_board_matches:$_pluto_compatible_matches" in
+    " rm1: rm1")
+      case "$_pluto_arch" in
+        "armv7l") pluto_profile_load rm1 ;;
+        *) return 1 ;;
       esac
       ;;
-  esac
-  case "$_pluto_arch" in
-    "armv7l")
-      case "$_pluto_board" in
-        *"remarkable 2.0"*|*"remarkable 2.n"*|*"zero-sugar"*)
-          case "$_pluto_compatible" in
-            *"fsl,imx7d-sdb"*) _pluto_matches="$_pluto_matches rm2" ;;
-          esac
-          ;;
+    " rm2: rm2")
+      case "$_pluto_arch" in
+        "armv7l") pluto_profile_load rm2 ;;
+        *) return 1 ;;
       esac
       ;;
-  esac
-  case "$_pluto_arch" in
-    "aarch64")
-      case "$_pluto_board" in
-        *"chiappa"*)
-          case "$_pluto_compatible" in
-            *"fsl,imx93"*) _pluto_matches="$_pluto_matches move" ;;
-          esac
-          ;;
+    " move: move")
+      case "$_pluto_arch" in
+        "aarch64") pluto_profile_load move ;;
+        *) return 1 ;;
       esac
       ;;
-  esac
-  case "$_pluto_matches" in
-    " rm1") pluto_profile_load rm1 ;;
-    " rm2") pluto_profile_load rm2 ;;
-    " move") pluto_profile_load move ;;
     *) return 1 ;;
   esac
 }

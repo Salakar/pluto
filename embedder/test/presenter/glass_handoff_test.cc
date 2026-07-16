@@ -29,13 +29,13 @@ static_assert(!std::is_copy_assignable_v<GlassHandoffLease>);
 static_assert(std::is_nothrow_move_constructible_v<GlassHandoffLease>);
 static_assert(std::is_nothrow_move_assignable_v<GlassHandoffLease>);
 
-constexpr std::size_t kWireHeaderBytesOffset = 8u;
-constexpr std::size_t kWireSectionCountOffset = 24u;
-constexpr std::size_t kWireTotalBytesOffset = 168u;
-constexpr std::size_t kWirePayloadChecksumOffset = 176u;
-constexpr std::size_t kWireHeaderChecksumOffset = 184u;
-constexpr std::size_t kWireBaseHeaderBytes = 192u;
-constexpr std::size_t kWireSectionEntryBytes = 32u;
+constexpr std::size_t kWireHeaderBytesOffset = 4u;
+constexpr std::size_t kWireSectionCountOffset = 20u;
+constexpr std::size_t kWireTotalBytesOffset = 164u;
+constexpr std::size_t kWirePayloadChecksumOffset = 172u;
+constexpr std::size_t kWireHeaderChecksumOffset = 180u;
+constexpr std::size_t kWireBaseHeaderBytes = 188u;
+constexpr std::size_t kWireSectionEntryBytes = 28u;
 
 std::uint32_t read_u32_le(std::span<const std::uint8_t> bytes,
                           std::size_t offset) {
@@ -697,13 +697,13 @@ TEST(GlassHandoffTest,
             static_cast<std::uint32_t>(GlassHandoffSection::kPresenter));
 
   const std::uint64_t renderer_offset =
-      read_u64_le(bytes, kRendererDirectory + 8u);
+      read_u64_le(bytes, kRendererDirectory + 4u);
   const std::uint64_t renderer_size =
-      read_u64_le(bytes, kRendererDirectory + 16u);
+      read_u64_le(bytes, kRendererDirectory + 12u);
   const std::uint64_t presenter_offset =
-      read_u64_le(bytes, kPresenterDirectory + 8u);
+      read_u64_le(bytes, kPresenterDirectory + 4u);
   const std::uint64_t presenter_size =
-      read_u64_le(bytes, kPresenterDirectory + 16u);
+      read_u64_le(bytes, kPresenterDirectory + 12u);
   EXPECT_EQ(renderer_offset + renderer_size, presenter_offset);
   EXPECT_EQ(presenter_size, source.presenter_payload.size());
   EXPECT_EQ(presenter_offset + presenter_size, wire.size());
@@ -714,7 +714,7 @@ TEST(GlassHandoffTest,
                     static_cast<std::size_t>(presenter_size));
   EXPECT_TRUE(std::equal(presenter_bytes.begin(), presenter_bytes.end(),
                          source.presenter_payload.begin()));
-  EXPECT_EQ(read_u64_le(bytes, kPresenterDirectory + 24u),
+  EXPECT_EQ(read_u64_le(bytes, kPresenterDirectory + 20u),
             glass_handoff_crc64(presenter_bytes));
 
   std::vector<std::uint8_t> header(wire.begin(),
@@ -781,7 +781,7 @@ TEST(GlassHandoffTest,
   expect_reject(duplicate_renderer, GlassHandoffReject::kLayout);
 
   std::vector<std::uint8_t> zero_sized = good;
-  write_u64_le(zero_sized, presenter_directory + 16u, 0);
+  write_u64_le(zero_sized, presenter_directory + 12u, 0);
   expect_reject(zero_sized, GlassHandoffReject::kLayout);
 
   std::vector<std::uint8_t> unknown_type = good;
@@ -811,8 +811,8 @@ TEST(GlassHandoffTest, PresenterPayloadBoundFailsClosedOnSaveAndLoad) {
   ASSERT_EQ(read_u32_le(wire, presenter_directory),
             static_cast<std::uint32_t>(GlassHandoffSection::kPresenter));
   const std::uint64_t presenter_offset =
-      read_u64_le(wire, presenter_directory + 8u);
-  ASSERT_EQ(read_u64_le(wire, presenter_directory + 16u),
+      read_u64_le(wire, presenter_directory + 4u);
+  ASSERT_EQ(read_u64_le(wire, presenter_directory + 12u),
             kGlassHandoffMaxPresenterPayloadBytes);
   ASSERT_EQ(presenter_offset + kGlassHandoffMaxPresenterPayloadBytes,
             wire.size());
@@ -820,12 +820,12 @@ TEST(GlassHandoffTest, PresenterPayloadBoundFailsClosedOnSaveAndLoad) {
   wire.push_back(0xa5u);
   const std::uint64_t oversized_payload_bytes =
       kGlassHandoffMaxPresenterPayloadBytes + 1u;
-  write_u64_le(wire, presenter_directory + 16u, oversized_payload_bytes);
+  write_u64_le(wire, presenter_directory + 12u, oversized_payload_bytes);
   const std::span<const std::uint8_t> bytes(wire);
   const auto presenter_bytes =
       bytes.subspan(static_cast<std::size_t>(presenter_offset),
                     static_cast<std::size_t>(oversized_payload_bytes));
-  write_u64_le(wire, presenter_directory + 24u,
+  write_u64_le(wire, presenter_directory + 20u,
                glass_handoff_crc64(presenter_bytes));
   write_u64_le(wire, kWireTotalBytesOffset, wire.size());
   write_u64_le(wire, kWirePayloadChecksumOffset,
@@ -945,7 +945,7 @@ TEST(GlassHandoffTest, ClaimRejectsAndConsumesPartialOrCorruptCandidate) {
                 shortly_after(source), &loaded)),
             static_cast<int>(GlassHandoffReject::kNone));
   const std::vector<std::uint8_t> good = read_file(temporary.path());
-  ASSERT_GT(good.size(), 192u);
+  ASSERT_GT(good.size(), kWireBaseHeaderBytes);
 
   const std::vector<std::uint8_t> partial(good.begin(), good.begin() + 80);
   ASSERT_TRUE(write_file(temporary.path(), partial));
@@ -959,7 +959,7 @@ TEST(GlassHandoffTest, ClaimRejectsAndConsumesPartialOrCorruptCandidate) {
                 shortly_after(source), &loaded)),
             static_cast<int>(GlassHandoffReject::kNone));
   std::vector<std::uint8_t> corrupt = read_file(temporary.path());
-  ASSERT_GT(corrupt.size(), 192u);
+  ASSERT_GT(corrupt.size(), kWireBaseHeaderBytes);
   corrupt[40] ^= 0x40u;
   ASSERT_TRUE(write_file(temporary.path(), corrupt));
   EXPECT_FALSE(
@@ -991,9 +991,10 @@ TEST(GlassHandoffTest, RejectsPartialTrailingReorderedAndCorruptFiles) {
             static_cast<int>(GlassHandoffReject::kLayout));
 
   std::vector<std::uint8_t> reordered = good;
-  // Base header is 192 bytes; swap only the first two directory type words.
+  // Swap only the first two directory type words.
   for (std::size_t i = 0; i < 4; ++i) {
-    std::swap(reordered[192 + i], reordered[224 + i]);
+    std::swap(reordered[kWireBaseHeaderBytes + i],
+              reordered[kWireBaseHeaderBytes + kWireSectionEntryBytes + i]);
   }
   ASSERT_TRUE(write_file(temporary.path(), reordered));
   EXPECT_EQ(static_cast<int>(glass_handoff_load(
@@ -1100,13 +1101,14 @@ TEST(GlassHandoffTest, ExactMoveProfilePreservesFullHistoryWords) {
   ASSERT_TRUE(glass_handoff_save(temporary.lease(), temporary.path(), source));
   const std::vector<std::uint8_t> wire = read_file(temporary.path());
   // Color has no level plane, so history is the fourth directory entry.
-  constexpr std::size_t kHistoryDirectory = 192u + 3u * 32u;
-  ASSERT_GT(wire.size(), kHistoryDirectory + 32u);
+  constexpr std::size_t kHistoryDirectory =
+      kWireBaseHeaderBytes + 3u * kWireSectionEntryBytes;
+  ASSERT_GT(wire.size(), kHistoryDirectory + kWireSectionEntryBytes);
   EXPECT_EQ(wire[kHistoryDirectory], 5u);
   std::uint64_t history_offset = 0;
   for (unsigned shift = 0; shift < 64; shift += 8) {
     history_offset |=
-        static_cast<std::uint64_t>(wire[kHistoryDirectory + 8u + shift / 8u])
+        static_cast<std::uint64_t>(wire[kHistoryDirectory + 4u + shift / 8u])
         << shift;
   }
   ASSERT_GT(wire.size(), static_cast<std::size_t>(history_offset + 7u));
@@ -1157,7 +1159,6 @@ TEST(GlassHandoffTest, FailedReplacementKeepsTheLastAtomicFinal) {
   incomplete.renderer_payload.clear();
   EXPECT_FALSE(
       glass_handoff_save(temporary.lease(), temporary.path(), incomplete));
-  EXPECT_FALSE(std::filesystem::exists(temporary.path() + ".tmp"));
 
   GlassHandoffBundle loaded;
   EXPECT_EQ(static_cast<int>(glass_handoff_load(
@@ -1166,29 +1167,8 @@ TEST(GlassHandoffTest, FailedReplacementKeepsTheLastAtomicFinal) {
             static_cast<int>(GlassHandoffReject::kNone));
   EXPECT_TRUE(loaded.renderer_payload == source.renderer_payload);
 
-  ASSERT_TRUE(write_file(temporary.path() + ".tmp", {1, 2, 3}));
   EXPECT_TRUE(glass_handoff_discard(temporary.lease(), temporary.path()));
   EXPECT_FALSE(std::filesystem::exists(temporary.path()));
-  EXPECT_FALSE(std::filesystem::exists(temporary.path() + ".tmp"));
-}
-
-TEST(GlassHandoffTest, UniqueWriterNeverTruncatesTheCanonicalLegacyTemp) {
-  TempBundlePath temporary;
-  const GlassHandoffBundle source = mono_bundle();
-  const std::vector<std::uint8_t> sentinel = {0xde, 0xad, 0xbe, 0xef};
-  ASSERT_TRUE(write_file(temporary.path() + ".tmp", sentinel));
-
-  ASSERT_TRUE(glass_handoff_save(temporary.lease(), temporary.path(), source));
-  EXPECT_TRUE(read_file(temporary.path() + ".tmp") == sentinel);
-
-  GlassHandoffBundle loaded;
-  EXPECT_EQ(static_cast<int>(glass_handoff_load(
-                temporary.lease(), temporary.path(), source.identity,
-                shortly_after(source), &loaded)),
-            static_cast<int>(GlassHandoffReject::kNone));
-  EXPECT_TRUE(glass_handoff_discard(temporary.lease(), temporary.path()));
-  EXPECT_FALSE(std::filesystem::exists(temporary.path()));
-  EXPECT_FALSE(std::filesystem::exists(temporary.path() + ".tmp"));
 }
 
 TEST(GlassHandoffTest, ReclaimsOnlyOldPrivateWriterAndClaimFiles) {

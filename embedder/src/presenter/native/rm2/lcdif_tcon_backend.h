@@ -1,9 +1,12 @@
 #ifndef PLUTO_PRESENTER_NATIVE_RM2_LCDIF_TCON_BACKEND_H_
 #define PLUTO_PRESENTER_NATIVE_RM2_LCDIF_TCON_BACKEND_H_
 
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -11,6 +14,7 @@
 #include "pluto/glass_handoff.h"
 #include "presenter/native/native_display_backend.h"
 #include "presenter/native/rm2/mxs_lcdif_device.h"
+#include "presenter/native/rm2/rm2_cpu_frequency_lease.h"
 
 namespace pluto::native::rm2 {
 
@@ -24,7 +28,18 @@ struct Rm2HandoffOptions {
   std::string path = kGlassHandoffDefaultPath;
   bool allow_insecure_path_for_testing = false;
   GlassHandoffClock (*now_for_testing)() = nullptr;
+  // Deterministic host-only scheduling probe. Production leaves this zero;
+  // tests use it to prove encode work overlaps a blocking pan.
+  std::chrono::nanoseconds phase_encode_delay_for_testing{};
+  // Production selects the exact RM2 policy0 paths only in Linux ARM builds.
+  // Host tests may inject isolated regular-file fixtures through this field.
+  std::optional<Rm2CpuFrequencyLeasePaths> cpu_frequency_paths_for_testing{};
+  std::chrono::milliseconds cpu_frequency_debounce_for_testing{50};
 };
+
+// Exact union area used as the denominator for damage-amplification
+// telemetry. Overlapping or duplicate framework rectangles count once.
+std::uint64_t rm2_damage_union_area(std::span<const PlutoRect> rectangles);
 
 class LcdifTconDisplayBackend final : public NativeDisplayBackend {
 public:

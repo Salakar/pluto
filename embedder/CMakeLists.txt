@@ -11,14 +11,6 @@ option(PLUTO_FETCH_GTEST "Fetch GoogleTest when it is not installed" OFF)
 
 find_package(Threads REQUIRED)
 
-add_library(pluto_abi STATIC src/abi.cc)
-target_include_directories(
-  pluto_abi
-  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_compile_features(pluto_abi PUBLIC cxx_std_20)
-
 add_library(
   pluto_renderer
   STATIC
@@ -47,7 +39,6 @@ target_include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(pluto_renderer PUBLIC pluto_abi)
 target_compile_features(pluto_renderer PUBLIC cxx_std_20)
 
 add_library(
@@ -99,6 +90,7 @@ add_library(
     src/presenter/native/native_presenter.cc
     src/presenter/native/rm2/lcdif_tcon_backend.cc
     src/presenter/native/rm2/mxs_lcdif_device.cc
+    src/presenter/native/rm2/rm2_cpu_frequency_lease.cc
     src/presenter/native/rm2/rm2_scan_encoder.cc
     src/presenter/native/rm2/rm2_waveform_program.cc
     src/presenter/native/rm2/wbf_decoder.cc
@@ -139,7 +131,7 @@ set_source_files_properties(
   src/presenter/host_preview.cc
   PROPERTIES
     COMPILE_DEFINITIONS
-      "pluto_presenter_by_name=pluto_host_preview_presenter_by_name_legacy;pluto_presenter_probe=pluto_host_preview_presenter_probe_legacy"
+      "pluto_presenter_by_name=pluto_host_preview_presenter_by_name_internal;pluto_presenter_probe=pluto_host_preview_presenter_probe_internal"
 )
 target_include_directories(
   pluto_embedder_core
@@ -151,7 +143,6 @@ target_include_directories(
 target_link_libraries(
   pluto_embedder_core
   PUBLIC
-    pluto_abi
     pluto_renderer
     pluto_input
     Threads::Threads
@@ -186,8 +177,8 @@ target_link_libraries(pluto_presenter_bench PRIVATE pluto_embedder_core)
 target_include_directories(pluto_presenter_bench PRIVATE test/presenter)
 target_compile_features(pluto_presenter_bench PRIVATE cxx_std_20)
 
-# RM2 preparation A/B: exhaustive RGB565 gray4 codegen and pre-expanded
-# WBF transition lookup. Host numbers are relative; ARMv7 is the release gate.
+# RM2 preparation evidence: exhaustive RGB565 correctness, WBF representation,
+# exact scan-cell packing, and paced phase soak. ARMv7 is the release gate.
 add_executable(rm2_encoder_bench bench/presenter/rm2_encoder_bench.cc)
 target_link_libraries(rm2_encoder_bench PRIVATE pluto_embedder_core)
 target_include_directories(rm2_encoder_bench PRIVATE test/presenter)
@@ -302,7 +293,11 @@ if(BUILD_TESTING)
   add_test(NAME pluto_embedder_smoke COMMAND pluto-embedder)
   add_test(
     NAME pluto_embedder_default_release
-    COMMAND pluto-embedder --print-config
+    COMMAND
+      pluto-embedder
+      --engine=/explicit/test-engine.so
+      --icu-data=/explicit/test-icudtl.dat
+      --print-config
   )
   set_tests_properties(
     pluto_embedder_default_release
@@ -310,7 +305,12 @@ if(BUILD_TESTING)
   )
   add_test(
     NAME pluto_embedder_explicit_debug
-    COMMAND pluto-embedder --debug --print-config
+    COMMAND
+      pluto-embedder
+      --engine=/explicit/test-engine.so
+      --icu-data=/explicit/test-icudtl.dat
+      --debug
+      --print-config
   )
   set_tests_properties(
     pluto_embedder_explicit_debug
@@ -326,7 +326,6 @@ if(BUILD_TESTING)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(pluto_abi PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_renderer PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_input PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_embedder_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -346,8 +345,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
-  add_subdirectory(test)
-
   find_package(GTest QUIET)
   if(NOT GTest_FOUND AND PLUTO_FETCH_GTEST)
     include(FetchContent)
@@ -605,6 +602,7 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
       pluto_rm2_native_test
       test/presenter/lcdif_tcon_backend_test.cc
       test/presenter/mxs_lcdif_device_test.cc
+      test/presenter/rm2_cpu_frequency_lease_test.cc
       test/presenter/rm2_scan_encoder_test.cc
       test/presenter/rm2_waveform_program_test.cc
     )
@@ -620,6 +618,7 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
       pluto_rm2_native_test
       test/presenter/lcdif_tcon_backend_test.cc
       test/presenter/mxs_lcdif_device_test.cc
+      test/presenter/rm2_cpu_frequency_lease_test.cc
       test/presenter/rm2_scan_encoder_test.cc
       test/presenter/rm2_waveform_program_test.cc
       test/renderer/gtest_main.cc

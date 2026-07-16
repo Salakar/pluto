@@ -374,14 +374,13 @@ hardcoded Full, overriding the ladder. Every large view switch still
 flashed GC16 through this path even after the session-2 fixes. Now Text on
 gray glass / Full on color, mirroring the ladder + settle planner.
 
-**Exact-color warm glass handoff (schema v2)**
+**Exact-color warm glass handoff (exact current layout)**
 (`include/pluto/glass_handoff.h`, `renderer/renderer_handoff.{h,cc}`, SWTCON
 presenter + compositor): every app launch/exit swaps embedder processes, and a
 presenter without trustworthy knowledge of the bistable panel must run the
-known-state cold rail clear. The earlier monochrome handoff carried only a settled
-5-bit plane and could not preserve exact Gallery-3 color decisions. Schema v2
-is a clean break with no old-format reader. Its canonical little-endian tmpfs
-bundle carries all correlated state needed to make the next color diff exact:
+known-state cold rail clear. The canonical little-endian tmpfs bundle has one
+unversioned shape and carries all correlated state needed to make the next
+color diff exact:
 
 - the complete 968×1698 Xochitl history allocation as interleaved 16-bit A/B
   values, including guard pixels and flags/history that differ even when the
@@ -439,7 +438,7 @@ cache. That cache is invalidated by the next `begin_pass` and cannot affect a
 future transition; rebuilding it as zero-stamped scratch removes 204,384 bytes
 relative to encoding the same Move state while preserving exact behavior:
 
-| Schema-v2 bundle benchmark | Initial same-schema path | Optimised path |
+| Exact-layout bundle benchmark | Initial path | Optimised path |
 |---|---:|---:|
 | Host save | 199.747 ms p50 / 205.930 ms p95 | 9.333–9.892 ms p50 / 9.475–11.853 ms p95 |
 | Host load | 204.075 ms p50 / 210.867 ms p95 | 7.670–8.045 ms p50 / 7.899–9.050 ms p95 |
@@ -556,11 +555,9 @@ engine's `kAdmitFlagInk` ride-along arbitrates overlap).
 - **Pause-stress removal**: transitions no longer promote their own tiles
   into flashing GC16 settles (`pauses` count freely, stress stays 0; live
   stats after transition storms show builds/completions flowing).
-- The live warm-handoff observation from this 2026-07-10 session exercised the
-  superseded monochrome plane seed only. It is historical evidence for the
-  cold-clear avoidance concept, not acceptance evidence for the exact-color
-  schema v2. The later hash-bound camera and first-visible-latch acceptance is
-  recorded in the exact-color section above.
+- The live warm-handoff observation from this 2026-07-10 session did not cover
+  the current exact-color layout. The later hash-bound camera and
+  first-visible-latch acceptance is recorded in the exact-color section above.
 
 ## Session 4 (2026-07-10): animation/ink latency + sparkle ghost repair
 

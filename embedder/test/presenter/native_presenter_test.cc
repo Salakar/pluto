@@ -85,3 +85,17 @@ TEST(NativePresenter, RejectsAttemptsToSpoofAnInternalDriverName) {
             kPlutoStatusInvalidArgument);
   EXPECT_EQ(presenter, nullptr);
 }
+
+TEST(NativePresenter, RejectsNonCurrentConfigLayouts) {
+  const PlutoPresenterOps *ops = pluto_native_presenter_ops();
+  ASSERT_EQ(ops->struct_size, sizeof(PlutoPresenterOps));
+
+  PlutoPresenterConfig config{};
+  config.backend_name = "native";
+  PlutoPresenter *presenter = nullptr;
+  config.struct_size = sizeof(config) - 1u;
+  EXPECT_EQ(ops->open(&config, &presenter), kPlutoStatusInvalidArgument);
+  config.struct_size = sizeof(config) + 1u;
+  EXPECT_EQ(ops->open(&config, &presenter), kPlutoStatusInvalidArgument);
+  EXPECT_EQ(presenter, nullptr);
+}

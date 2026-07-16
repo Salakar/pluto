@@ -69,28 +69,34 @@ RemarkableDeviceIdentity classify_remarkable_device_identity(
                      [](unsigned char value) { return std::isspace(value); }),
       architecture.end());
 
-  const GeneratedDeviceProfile *match = nullptr;
+  const GeneratedDeviceProfile *board_match = nullptr;
+  const GeneratedDeviceProfile *compatible_match = nullptr;
   for (const GeneratedDeviceProfile &profile : kGeneratedDeviceProfiles) {
-    const bool architecture_matches =
-        std::find(profile.architectures.begin(), profile.architectures.end(),
-                  architecture) != profile.architectures.end();
-    if (!architecture_matches || !contains_any(board, profile.board_tokens) ||
-        !contains_any(compatible, profile.compatible_tokens)) {
-      continue;
+    if (contains_any(board, profile.board_tokens)) {
+      if (board_match != nullptr) {
+        return {};
+      }
+      board_match = &profile;
     }
-    if (match != nullptr) {
-      return {};
+    if (contains_any(compatible, profile.compatible_tokens)) {
+      if (compatible_match != nullptr) {
+        return {};
+      }
+      compatible_match = &profile;
     }
-    match = &profile;
   }
-  if (match != nullptr) {
-    return {
-        .profile_id = std::string(match->id),
-        .model = std::string(match->wire_model),
-        .codename = std::string(match->codename),
-    };
+  if (board_match == nullptr || compatible_match == nullptr ||
+      board_match != compatible_match ||
+      std::find(board_match->architectures.begin(),
+                board_match->architectures.end(),
+                architecture) == board_match->architectures.end()) {
+    return {};
   }
-  return {};
+  return {
+      .profile_id = std::string(board_match->id),
+      .model = std::string(board_match->wire_model),
+      .codename = std::string(board_match->codename),
+  };
 }
 
 RemarkableDeviceIdentity

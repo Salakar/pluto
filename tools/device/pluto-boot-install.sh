@@ -25,6 +25,7 @@ INSTALL_LOCK_DIR="${PLUTO_BOOT_INSTALL_LOCK_DIR:-/run/pluto/boot-install.lock}"
 RUN_DIR="${PLUTO_RUN_DIR:-/run/pluto}"
 ATTEMPT_FILE="$RUN_DIR/boot-attempt"
 SUPERVISOR="${PLUTO_SUPERVISOR:-$ROOT/bin/pluto-session.sh}"
+CPU_FREQUENCY_RESTORE="${PLUTO_CPU_FREQUENCY_RESTORE:-$ROOT/bin/pluto-rm2-cpufreq-restore.sh}"
 
 DROPIN_DIR_REL="$UNIT_DIR_REL/xochitl.service.d"
 DROPIN_REL="$DROPIN_DIR_REL/zz-pluto.conf"
@@ -198,6 +199,9 @@ acquire_install_lock() {
 require_payload() {
   [ -x "$ROOT/bin/pluto-embedder" ] || return 1
   [ -x "$ROOT/bin/pluto-session.sh" ] || return 1
+  if [ "${PLUTO_PROFILE_DISPLAY_DRIVER:-}" = lcdif_tcon ]; then
+    [ -x "$ROOT/bin/pluto-rm2-cpufreq-restore.sh" ] || return 1
+  fi
   [ -x "$ROOT/bin/pluto-boot-confirm.sh" ] || return 1
   [ -d "$ROOT/launcher/bundle" ] || return 1
   [ -f "$ROOT/launcher/bundle/lib/app.so" ] || return 1
@@ -631,10 +635,12 @@ rollback_uninstall_to_pluto() {
 }
 
 do_install() {
+  load_recovery_profile || die "cannot load generated recovery profile"
+  [ "$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED" = 1 ] ||
+    die "profile boot-default recovery gate is closed; use the current-boot session"
   mkdir -p "$STATE"
   require_payload || die "release boot payload is incomplete"
   [ -x "$SUPERVISOR" ] || die "supervisor is not executable"
-  load_recovery_profile || die "cannot load generated recovery profile"
   load_slot_topology || die "device recovery topology is not exact"
 
   HAVE_EXISTING_CONTRACT=0
@@ -750,6 +756,15 @@ do_uninstall() {
     rollback_uninstall_to_pluto \
       "stock is durable but the Pluto supervisor could not be stopped cleanly"
 
+  if [ "$PLUTO_PROFILE_DISPLAY_DRIVER" = lcdif_tcon ]; then
+    [ -x "$CPU_FREQUENCY_RESTORE" ] ||
+      rollback_uninstall_to_pluto \
+        "CPU-frequency restorer is missing before stock handoff"
+    "$CPU_FREQUENCY_RESTORE" ||
+      rollback_uninstall_to_pluto \
+        "CPU-frequency state could not be restored before stock handoff"
+  fi
+
   if [ "$HAD_CONTRACT" -eq 1 ] &&
      [ "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY" = uboot_env ]; then
     run_recovery_action arm >/dev/null ||
@@ -805,6 +820,7 @@ case "${1:-status}" in
     ;;
   status) do_status ;;
   validate)
+    load_recovery_profile || die "cannot load generated recovery profile"
     require_payload || die "release boot payload is incomplete"
     log "release AOT launcher payload validated"
     ;;

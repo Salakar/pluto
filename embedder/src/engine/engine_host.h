@@ -236,6 +236,7 @@ private:
                                         DirectPointerResult *result,
                                         DirectControlFailure *failure);
   bool send_direct_ink_stroke(const std::string &requested_app_id,
+                              std::int64_t expected_pid,
                               DirectPointerResult *result,
                               DirectControlFailure *failure);
   bool send_direct_prepare_ink_canvas(const std::string &requested_app_id,

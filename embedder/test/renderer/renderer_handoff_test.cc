@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -319,11 +320,14 @@ TEST(RendererHandoffTest, WireChecksumsMatchBitwiseCrc64EcmaReference) {
   ASSERT_TRUE(make_state(&source));
   std::vector<uint8_t> encoded;
   ASSERT_TRUE(pluto::renderer_handoff_encode(source, &encoded));
-  ASSERT_GE(encoded.size(), 72u);
-  EXPECT_EQ(read_u64_le(encoded, 56),
-            crc64_reference(std::span<const uint8_t>(encoded).subspan(72)));
-  EXPECT_EQ(read_u64_le(encoded, 64),
-            crc64_reference(std::span<const uint8_t>(encoded).first(64)));
+  ASSERT_GE(encoded.size(), 68u);
+  EXPECT_TRUE(std::equal(
+      encoded.begin(), encoded.begin() + 8,
+      std::array<uint8_t, 8>{'P', 'L', 'R', 'S', 'T', 'A', 'T', 'E'}.begin()));
+  EXPECT_EQ(read_u64_le(encoded, 52),
+            crc64_reference(std::span<const uint8_t>(encoded).subspan(68)));
+  EXPECT_EQ(read_u64_le(encoded, 60),
+            crc64_reference(std::span<const uint8_t>(encoded).first(60)));
 }
 
 TEST(RendererHandoffTest, CorruptionPartialAndConfigurationMismatchFailClosed) {

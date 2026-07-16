@@ -11,9 +11,6 @@ import 'touch_point.dart';
 abstract interface class TouchEvents {
   /// Typed touch event stream.
   Stream<TouchEvent> get events;
-
-  /// Compatibility stream of point views.
-  Stream<TouchPoint> get points;
 }
 
 /// Raw touch, palm rejection, and system gestures.
@@ -38,9 +35,6 @@ final class PlutoTouch implements TouchEvents {
               _touchEventFromMap(_stringMap(event, 'touch event')),
         );
   }
-
-  @override
-  Stream<TouchPoint> get points => events.map(TouchPoint.fromEvent);
 
   /// System-level gestures recognized by the embedder.
   Stream<SystemGesture> get gestures {

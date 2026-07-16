@@ -32,56 +32,7 @@ final class BatteryTelemetry {
     }
     return MarkerBatteryStatus.fromMap(stringMap(payload, 'battery.marker'));
   }
-
-  /// Periodic device-battery updates.
-  Stream<BatteryStatus> deviceBatteryUpdates({
-    Duration interval = const Duration(seconds: 30),
-  }) {
-    return _transport
-        .events(
-          channel: plutoSettingsEventsChannel,
-          arguments: <String, Object?>{
-            'topic': 'battery.device',
-            'intervalMs': interval.inMilliseconds,
-          },
-        )
-        .map(
-          (Object? event) =>
-              BatteryStatus.fromMap(stringMap(event, 'battery device event')),
-        );
-  }
-
-  /// Periodic marker-battery updates.
-  Stream<MarkerBatteryStatus?> markerBatteryUpdates({
-    Duration interval = const Duration(seconds: 60),
-  }) {
-    return _transport
-        .events(
-          channel: plutoSettingsEventsChannel,
-          arguments: <String, Object?>{
-            'topic': 'battery.marker',
-            'intervalMs': interval.inMilliseconds,
-          },
-        )
-        .map((Object? event) {
-          if (event == null) {
-            return null;
-          }
-          return MarkerBatteryStatus.fromMap(
-            stringMap(event, 'battery marker event'),
-          );
-        });
-  }
-
-  /// Compatibility percentage getter for earlier scaffold consumers.
-  Future<int> get levelPercent async {
-    final BatteryStatus status = await deviceBattery();
-    return (status.level * 100).round();
-  }
 }
-
-/// Compatibility alias for older docs that used `Battery`.
-typedef Battery = BatteryTelemetry;
 
 /// Charging state from kernel power-supply status.
 enum BatteryChargingState {
@@ -122,6 +73,11 @@ final class BatteryStatus {
 
   /// Creates a battery snapshot from a protocol map.
   factory BatteryStatus.fromMap(Map<String, Object?> map) {
+    requireExactKeys(
+      map,
+      'battery.device',
+      required: const <String>{'level', 'state', 'isUsbPowerPresent'},
+    );
     return BatteryStatus(
       level: doubleAt(map, 'level'),
       state: BatteryChargingState.parse(stringAt(map, 'state')),
@@ -146,6 +102,12 @@ final class MarkerBatteryStatus {
 
   /// Creates a marker battery snapshot from a protocol map.
   factory MarkerBatteryStatus.fromMap(Map<String, Object?> map) {
+    requireExactKeys(
+      map,
+      'battery.marker',
+      required: const <String>{'level'},
+      optional: const <String>{'nfcCellLevel'},
+    );
     return MarkerBatteryStatus(
       level: doubleAt(map, 'level'),
       nfcCellLevel: optionalDoubleAt(map, 'nfcCellLevel'),

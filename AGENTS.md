@@ -401,7 +401,9 @@ Run `pluto help <command>` for full flags.
   comments and typed signatures.
 - Release-only invariant: nothing outside explicit `--debug` flows may put a
   JIT kernel, debug engine, or VM service on the device.
-- C ABI changes must bump `PLUTO_ABI_VERSION`.
+- Pluto-owned presenter structs and operation tables are an unpublished,
+  single-release contract: update both sides together and require exact
+  current layouts.
 - Keep device payloads under their managed `/home/root/` roots; always go
   through `pluto provision` and the backend's transactional safety paths.
 - Keep mutable build output out of the repo; the pin-keyed `third_party/engine/`

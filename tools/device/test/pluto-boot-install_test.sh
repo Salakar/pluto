@@ -3,7 +3,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 INSTALLER="$HERE/../pluto-boot-install.sh"
-PROFILE_FILE="$HERE/../generated/device-profiles.sh"
+PROFILE_SOURCE="$HERE/../generated/device-profiles.sh"
 DROPIN_FIXTURE="$HERE/fixtures/zz-pluto.conf.expected"
 TMP=${TMPDIR:-/tmp}/pluto-boot-install-test.$$
 BIN="$TMP/bin"
@@ -63,6 +63,20 @@ assert_before() { # first pattern second pattern file message
 }
 
 mkdir -p "$BIN"
+
+# RM1/RM2 remain current-boot-only until physical recovery acceptance. Exercise
+# the persistent U-Boot transaction against an isolated copy with that single
+# gate opened; the production generated fragment remains untouched.
+PROFILE_FILE="$TMP/device-profiles.sh"
+awk '
+  /^    rm1\)/ { profile = "rm1" }
+  /^    rm2\)/ { profile = "rm2" }
+  /^    move\)/ { profile = "move" }
+  profile != "move" && /PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED=.0./ {
+    sub("=.0.", "=\0471\047")
+  }
+  { print }
+' "$PROFILE_SOURCE" > "$PROFILE_FILE"
 
 # macOS has no /proc. Shadow only Linux process-stat reads with a fixture that
 # first proves that the pid is live, then emits a Linux-shaped field 22.
@@ -146,8 +160,14 @@ seed_payload() {
     "$ROOT/launcher/bundle/lib" "$ROOT/launcher/bundle/flutter_assets"
   printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-embedder"
   printf '#!/bin/sh\nexit 0\n' > "$ROOT/bin/pluto-session.sh"
+  cat > "$ROOT/bin/pluto-rm2-cpufreq-restore.sh" <<'RESTORE'
+#!/bin/sh
+printf 'cpufreq restore\n' >> "$PLUTO_TEST_EVENT_LOG"
+[ "${PLUTO_TEST_CPUFREQ_RESTORE_FAIL:-0}" != 1 ]
+RESTORE
   cp "$HERE/../pluto-boot-confirm.sh" "$ROOT/bin/pluto-boot-confirm.sh"
   chmod 0755 "$ROOT/bin/pluto-embedder" "$ROOT/bin/pluto-session.sh" \
+    "$ROOT/bin/pluto-rm2-cpufreq-restore.sh" \
     "$ROOT/bin/pluto-boot-confirm.sh"
   : > "$ROOT/engine/release/libflutter_engine.so"
   : > "$ROOT/launcher/bundle/lib/app.so"
@@ -275,6 +295,7 @@ run_installer() {
     PLUTO_TEST_SYSTEMCTL_FAIL_MARKER="$CASE/systemctl-failed-once" \
     PLUTO_TEST_FW_READ_FAIL="${PLUTO_TEST_FW_READ_FAIL:-}" \
     PLUTO_TEST_POWER_LOSS_AT="${PLUTO_TEST_POWER_LOSS_AT:-}" \
+    PLUTO_TEST_CPUFREQ_RESTORE_FAIL="${PLUTO_TEST_CPUFREQ_RESTORE_FAIL:-0}" \
     "$@"
 }
 
@@ -472,6 +493,34 @@ for topology in 'rm1 2 3' 'rm1 3 2' 'rm2 2 3' 'rm2 3 2'; do
   run_installer sh "$INSTALLER" uninstall >/dev/null ||
     fail "$1 p$2/p$3 uninstall failed"
 done
+
+# RM2 must retire a stale CPU-frequency burst after stopping the native panel
+# owner and before starting stock. A failed restore republishes the Pluto
+# override, preserves the owned recovery transaction, and cannot start stock.
+reset_case rm2 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "RM2 install before cpufreq uninstall ordering failed"
+: > "$EVENT_LOG"
+run_installer sh "$INSTALLER" uninstall >/dev/null ||
+  fail "RM2 uninstall with cpufreq restoration failed"
+assert_before '^systemctl stop xochitl.service$' '^cpufreq restore$' \
+  "$EVENT_LOG" "RM2 cpufreq restore preceded native panel-owner stop"
+assert_before '^cpufreq restore$' '^systemctl start xochitl.service$' \
+  "$EVENT_LOG" "RM2 stock started before cpufreq restoration"
+
+reset_case rm2 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "RM2 install before cpufreq failure proof failed"
+: > "$EVENT_LOG"
+PLUTO_TEST_CPUFREQ_RESTORE_FAIL=1 expect_uninstall_failure \
+  "RM2 cpufreq restore failure"
+[ -f "$DROPIN" ] && [ -f "$CONFIG" ] && [ -f "$OWNER" ] ||
+  fail "RM2 cpufreq failure did not preserve the Pluto boot transaction"
+assert_eq 1 "$(cat "$ENV_DIR/upgrade_available")" \
+  "RM2 cpufreq failure lost the owned peer fallback"
+unset PLUTO_TEST_CPUFREQ_RESTORE_FAIL
+run_installer sh "$INSTALLER" uninstall >/dev/null ||
+  fail "RM2 cpufreq restore failure was not retryable"
 
 # A root outside the generated pair and a cmdline/root mismatch fail before
 # any live override is published.
@@ -809,43 +858,16 @@ do
     fail "$post_stop_fault was not safely retryable"
 done
 
-# Move uses the same install/uninstall and drop-in flow, but performs no U-Boot
-# writes. Its bounded stock-rescue unit remains the failure mechanism until the
-# profile's LPGPR contract is verified on hardware.
+# A profile whose recovery gate is closed cannot bypass the public
+# current-boot flow by invoking the on-device boot installer directly.
 reset_case move 0 0
 : > "$EVENT_LOG"
-if ! run_installer sh "$INSTALLER" install > "$CASE/move-install.out" 2>&1; then
-  sed -n '1,120p' "$CASE/move-install.out" >&2
-  fail "Move common boot-default install failed"
-fi
-assert_contract
-assert_dropin_fixture
-assert_eq move "$(assignment_value "$CONFIG" PLUTO_RECOVERY_PROFILE_ID)" \
-  "Move install wrote the wrong profile"
-assert_eq lpgpr_counter \
-  "$(assignment_value "$CONFIG" PLUTO_RECOVERY_CONFIRMATION_STRATEGY)" \
-  "Move install wrote the wrong recovery strategy"
-assert_eq 0 \
-  "$(assignment_value "$CONFIG" PLUTO_RECOVERY_BOOT_DEFAULT_ENABLED)" \
-  "Move install changed the generated recovery gate"
-grep -q '^ExecStart=/usr/bin/xochitl --system$' "$RESCUE_UNIT" ||
-  fail "Move bounded rescue does not launch exact stock xochitl"
-grep -q '^Restart=on-failure$' "$RESCUE_UNIT" ||
-  fail "Move bounded rescue is not restart-bounded"
-grep -q '^StartLimitBurst=3$' "$RESCUE_UNIT" ||
-  fail "Move bounded rescue has no start limit"
-if grep -q '^fw ' "$EVENT_LOG"; then
-  fail "Move install mutated U-Boot state"
-fi
-: > "$EVENT_LOG"
-run_installer sh "$INSTALLER" uninstall >/dev/null ||
-  fail "Move common uninstall failed"
+rm -f "$ROOT/bin/pluto-rm2-cpufreq-restore.sh"
+run_installer sh "$INSTALLER" validate >/dev/null ||
+  fail "Move release validation still required the RM2-only helper"
+expect_install_failure "closed-gate boot-default install"
 assert_no_live_recovery
-if grep -q '^fw ' "$EVENT_LOG"; then
-  fail "Move uninstall mutated U-Boot state"
-fi
-grep -q '^systemctl start xochitl.service$' "$EVENT_LOG" ||
-  fail "Move uninstall did not start stock xochitl"
+[ ! -s "$EVENT_LOG" ] || fail "closed-gate install mutated device state"
 
 # A stale mkdir lock is reclaimed only after its recorded pid/start identity is
 # proven dead. Successful completion removes the lock again.

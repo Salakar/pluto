@@ -36,18 +36,23 @@ pluto_profile_probe() {
   if [ "$mode" = move ]; then
     PLUTO_PROFILE_ID=move
     PLUTO_PROFILE_TARGET=linux-arm64
-    PLUTO_PROFILE_DISPLAY_DRIVER=swtcon
+    PLUTO_PROFILE_DISPLAY_DRIVER=gallery3_drm
     PLUTO_PROFILE_FIRMWARE_BUILD=20260612085811
     PLUTO_PROFILE_KERNEL_RELEASE=6.1.55-move
+    PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED=0
   else
     PLUTO_PROFILE_ID=rm1
     PLUTO_PROFILE_TARGET=linux-arm
     PLUTO_PROFILE_DISPLAY_DRIVER=mxcfb_epdc
     PLUTO_PROFILE_FIRMWARE_BUILD=20260612085811
     PLUTO_PROFILE_KERNEL_RELEASE=5.4.70-v1.6.3-rm10x
+    PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED=1
   fi
+  driver_override=$(cat "$PLUTO_METRICS_TEST_ROOT/driver-mode" 2>/dev/null || true)
+  [ -z "$driver_override" ] || PLUTO_PROFILE_DISPLAY_DRIVER=$driver_override
   export PLUTO_PROFILE_ID PLUTO_PROFILE_TARGET PLUTO_PROFILE_DISPLAY_DRIVER
   export PLUTO_PROFILE_FIRMWARE_BUILD PLUTO_PROFILE_KERNEL_RELEASE
+  export PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED
 }
 EOF
 printf '%s\n' "$REVISION" > "$FIXTURE/home/root/pluto/share/release-revision"
@@ -67,6 +72,7 @@ printf '0.01 0.02 0.03 1/100 300\n' > "$FIXTURE/proc/loadavg"
 printf 'MemTotal: 1000000 kB\nMemAvailable: 700000 kB\n' > "$FIXTURE/proc/meminfo"
 
 for file in pluto-embedder pluto-controlctl pluto-session.sh pluto-session-once.sh \
+  pluto-rm2-cpufreq-restore.sh \
   pluto-boot-confirm.sh pluto-boot-install.sh pluto-power-key-watch.sh \
   pluto-app-control.sh pluto-install-transaction.sh pluto-uninstall.sh; do
   printf 'fixture %s\n' "$file" > "$FIXTURE/home/root/pluto/bin/$file"
@@ -118,9 +124,9 @@ write_proc() {
 
 write_proc 100 S none "/bin/sh /home/root/pluto/bin/pluto-session.sh start"
 write_proc 200 S dev.pluto.launcher \
-  "/home/root/pluto/bin/pluto-embedder --release --bundle=/home/root/pluto/launcher/bundle --engine=/home/root/pluto/engine/release/libflutter_engine.so --presenter=native --ready-file=/run/pluto/boot-ready.accept.launch --health-file=/run/pluto/health.accept.launch --aot-elf=/home/root/pluto/launcher/bundle/lib/app.so"
+  "/home/root/pluto/bin/pluto-embedder --release --bundle=/home/root/pluto/launcher/bundle --engine=/home/root/pluto/engine/release/libflutter_engine.so --icu-data=/home/root/pluto/launcher/bundle/icudtl.dat --presenter=native --ready-file=/run/pluto/boot-ready.accept.launch --health-file=/run/pluto/health.accept.launch --aot-elf=/home/root/pluto/launcher/bundle/lib/app.so"
 write_proc 201 T dev.pluto.ink \
-  "/home/root/pluto/bin/pluto-embedder --release --bundle=/home/root/pluto/apps/dev.pluto.ink/bundle --engine=/home/root/pluto/engine/release/libflutter_engine.so --presenter=native --ready-file=/run/pluto/boot-ready.accept.ink --health-file=/run/pluto/health.accept.ink --aot-elf=/home/root/pluto/apps/dev.pluto.ink/bundle/lib/app.so"
+  "/home/root/pluto/bin/pluto-embedder --release --bundle=/home/root/pluto/apps/dev.pluto.ink/bundle --engine=/home/root/pluto/engine/release/libflutter_engine.so --icu-data=/home/root/pluto/apps/dev.pluto.ink/bundle/icudtl.dat --presenter=native --ready-file=/run/pluto/boot-ready.accept.ink --health-file=/run/pluto/health.accept.ink --aot-elf=/home/root/pluto/apps/dev.pluto.ink/bundle/lib/app.so"
 
 printf '200\n' > "$FIXTURE/run/pluto/embedder.pid"
 printf '200\n' > "$FIXTURE/run/pluto/warm-apps/dev.pluto.launcher.pid"
@@ -253,7 +259,7 @@ grep -q '^health.seq_delta=2$' "$OUT/device-evidence.txt" || fail 'health progre
 
 printf 'one-shot\n' > "$FIXTURE/service-mode"
 if run_collect "$TMP/rm1-one-shot" >/dev/null 2>&1; then
-  fail 'RM1 was accepted under the Move-only one-shot supervisor'
+  fail 'one-shot ownership was accepted while the boot-default recovery gate was enabled'
 fi
 [[ ! -e "$TMP/rm1-one-shot" ]] || fail 'rejected RM1 one-shot run published a partial bundle'
 printf 'move\n' > "$FIXTURE/profile-mode"
@@ -262,10 +268,18 @@ run_collect "$OUT_ONCE" >/dev/null
 grep -q '^service.supervisor.unit=pluto-session-once.service$' \
   "$OUT_ONCE/device-evidence.txt" || fail 'one-shot supervisor was not accepted by exact process identity'
 grep -q '^identity.profile_id=move$' \
-  "$OUT_ONCE/device-evidence.txt" || fail 'one-shot supervisor was accepted outside the Move profile'
+  "$OUT_ONCE/device-evidence.txt" || fail 'one-shot fixture did not use the closed-gate profile'
 grep -q '^service.xochitl.active_state=inactive$' \
   "$OUT_ONCE/device-evidence.txt" || fail 'one-shot evidence did not prove stock xochitl inactive'
 rm -f "$FIXTURE/service-mode" "$FIXTURE/profile-mode"
+
+printf 'gallery3_drm\n' > "$FIXTURE/driver-mode"
+if run_collect "$TMP/contradictory-driver" >/dev/null 2>&1; then
+  fail 'RM1 was accepted with a contradictory generated display driver'
+fi
+[[ ! -e "$TMP/contradictory-driver" ]] ||
+  fail 'contradictory driver rejection published a partial bundle'
+rm -f "$FIXTURE/driver-mode"
 
 printf 'pid=200 seq=broken mono_ms=10000\n' > "$FIXTURE/run/pluto/health.accept.launch"
 chmod 600 "$FIXTURE/run/pluto/health.accept.launch"

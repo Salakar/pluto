@@ -17,9 +17,7 @@ const PlutoPresenterOps *pluto_presenter_by_name(const char *name) {
   if (std::strcmp(name, "native") == 0) {
     return pluto_native_presenter_ops();
   }
-  if (std::strcmp(name, "host-headless") == 0 ||
-      std::strcmp(name, "host-png") == 0 ||
-      std::strcmp(name, "host-preview") == 0) {
+  if (std::strcmp(name, "host-headless") == 0) {
     return pluto_host_preview_presenter_ops();
   }
   if (std::strcmp(name, "null") == 0) {

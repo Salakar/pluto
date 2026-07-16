@@ -102,13 +102,12 @@ The command chooses the safe implementation for the connected hardware.
 ## 4. Install and run a release app
 
 Every Pluto app is a normal Flutter app plus a `pluto.yaml` manifest containing
-its id, name, icon, entrypoint, and display preferences. Start from
+its id, name, version, icon, and display preferences. Start from
 `apps/examples/counter` when creating one.
 
 Keep `display.scale: auto` (also the default when the field is absent). Pluto
 then supplies Flutter with the presenter's native surface dimensions and device
-pixel ratio on each supported tablet. Numeric scale values are explicit
-compatibility overrides, not a way to select a device layout.
+pixel ratio on each supported tablet. Numeric scale values are rejected.
 
 Use the same device endpoint for the whole workflow. The build command probes
 immutable hardware identity and selects the matching native target:

@@ -60,6 +60,13 @@ using DirectPointerHandler = std::function<bool(
     const std::string &requested_app_id, DirectPointerResult *result,
     DirectControlFailure *failure)>;
 
+// The Ink stroke is an acceptance mutation, so the request must name the exact
+// foreground process which is allowed to receive it. The handler independently
+// checks that expected_pid identifies its own process before delivering input.
+using DirectInkStrokeHandler = std::function<bool(
+    const std::string &requested_app_id, std::int64_t expected_pid,
+    DirectPointerResult *result, DirectControlFailure *failure)>;
+
 // Result of the acceptance-only Ink canvas preparation flow. The caller binds
 // the request to the foreground receipt it just read; the embedder must return
 // that exact process and may invoke only Ink's bounded semantic actions.
@@ -80,7 +87,7 @@ struct DirectControlServerConfig {
   DirectScreenshotHandler screenshot;
   DirectPointerHandler tap_switcher_preview;
   DirectInkCanvasHandler prepare_ink_canvas;
-  DirectPointerHandler draw_stroke;
+  DirectInkStrokeHandler draw_stroke;
 };
 
 // Root-local control endpoint for the direct embedder. On Linux it publishes

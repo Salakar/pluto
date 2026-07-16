@@ -214,6 +214,12 @@ final class ProvisionCommand extends PlutoCommand {
             remoteRelative: 'bin/$s',
             executable: true,
           ),
+        if (armPayload)
+          PayloadFile(
+            localPath: '$payloadDir/pluto-rm2-cpufreq-restore.sh',
+            remoteRelative: 'bin/pluto-rm2-cpufreq-restore.sh',
+            executable: true,
+          ),
         PayloadFile(
           localPath: '$payloadDir/pluto-embedder',
           remoteRelative: 'bin/pluto-embedder',

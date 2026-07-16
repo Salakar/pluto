@@ -148,24 +148,24 @@ PlutoDisplayInfo default_info(PlutoPixelFormat format) {
 PlutoStatus open_common(const PlutoPresenterConfig *config,
                         PlutoPresenter **out_presenter, bool write_png,
                         const char *name) {
-  if (out_presenter == nullptr) {
+  if (config == nullptr ||
+      config->struct_size != sizeof(PlutoPresenterConfig) ||
+      out_presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   auto *presenter = new PlutoPresenter();
   presenter->name = name;
   presenter->write_png = write_png;
   presenter->info = default_info(kPlutoPixelFormatRgb565);
-  presenter->on_complete = config == nullptr ? nullptr : config->on_complete;
-  presenter->user_data = config == nullptr ? nullptr : config->user_data;
-  if (config != nullptr) {
-    const std::string dir = option_value(config->options, "dir");
-    const std::string prefix = option_value(config->options, "prefix");
-    if (!dir.empty()) {
-      presenter->output_dir = dir;
-    }
-    if (!prefix.empty()) {
-      presenter->prefix = prefix;
-    }
+  presenter->on_complete = config->on_complete;
+  presenter->user_data = config->user_data;
+  const std::string dir = option_value(config->options, "dir");
+  const std::string prefix = option_value(config->options, "prefix");
+  if (!dir.empty()) {
+    presenter->output_dir = dir;
+  }
+  if (!prefix.empty()) {
+    presenter->prefix = prefix;
   }
   if (write_png) {
     std::error_code ec;
@@ -210,7 +210,7 @@ void close_presenter(PlutoPresenter *presenter) {
 PlutoStatus presenter_info(PlutoPresenter *presenter,
                            PlutoDisplayInfo *out_info) {
   if (presenter == nullptr || out_info == nullptr ||
-      out_info->struct_size < sizeof(PlutoDisplayInfo)) {
+      out_info->struct_size != sizeof(PlutoDisplayInfo)) {
     return kPlutoStatusInvalidArgument;
   }
   std::lock_guard<std::mutex> lock(presenter->mutex);
@@ -271,7 +271,7 @@ PlutoStatus copy_damage(PlutoPresenter *presenter,
 PlutoStatus presenter_present(PlutoPresenter *presenter,
                               const PlutoPresentRequest *request) {
   if (presenter == nullptr || request == nullptr ||
-      request->struct_size < sizeof(PlutoPresentRequest)) {
+      request->struct_size != sizeof(PlutoPresentRequest)) {
     return kPlutoStatusInvalidArgument;
   }
   if ((request->flags & kPlutoPresentFlagSparkle) != 0) {
@@ -349,6 +349,40 @@ PlutoStatus presenter_snapshot(PlutoPresenter *presenter,
   return kPlutoStatusOk;
 }
 
+PlutoStatus presenter_set_pen_focus_unsupported(PlutoPresenter *presenter,
+                                                const PlutoPenFocus *focus) {
+  if (presenter == nullptr || focus == nullptr ||
+      focus->struct_size != sizeof(PlutoPenFocus)) {
+    return kPlutoStatusInvalidArgument;
+  }
+  return kPlutoStatusUnsupported;
+}
+
+PlutoStatus presenter_stage_handoff_unsupported(
+    PlutoPresenter *presenter, const PlutoHandoffPayload *payload, uint32_t) {
+  if (presenter == nullptr || payload == nullptr ||
+      payload->struct_size != sizeof(PlutoHandoffPayload)) {
+    return kPlutoStatusInvalidArgument;
+  }
+  return kPlutoStatusUnsupported;
+}
+
+PlutoStatus
+presenter_get_handoff_unsupported(PlutoPresenter *presenter,
+                                  PlutoHandoffPayload *out_payload) {
+  if (presenter == nullptr || out_payload == nullptr ||
+      out_payload->struct_size != sizeof(PlutoHandoffPayload)) {
+    return kPlutoStatusInvalidArgument;
+  }
+  return kPlutoStatusUnsupported;
+}
+
+PlutoStatus presenter_confirm_handoff_unsupported(PlutoPresenter *presenter,
+                                                  bool) {
+  return presenter == nullptr ? kPlutoStatusInvalidArgument
+                              : kPlutoStatusUnsupported;
+}
+
 const PlutoPresenterOps k_host_ops{
     sizeof(PlutoPresenterOps),
     "host-headless",
@@ -359,10 +393,10 @@ const PlutoPresenterOps k_host_ops{
     presenter_ready,
     presenter_wait_idle,
     presenter_snapshot,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
+    presenter_set_pen_focus_unsupported,
+    presenter_stage_handoff_unsupported,
+    presenter_get_handoff_unsupported,
+    presenter_confirm_handoff_unsupported,
 };
 
 const PlutoPresenterOps k_null_ops{
@@ -375,10 +409,10 @@ const PlutoPresenterOps k_null_ops{
     presenter_ready,
     presenter_wait_idle,
     presenter_snapshot,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
+    presenter_set_pen_focus_unsupported,
+    presenter_stage_handoff_unsupported,
+    presenter_get_handoff_unsupported,
+    presenter_confirm_handoff_unsupported,
 };
 
 } // namespace
@@ -392,9 +426,7 @@ const PlutoPresenterOps *pluto_host_preview_presenter_ops(void) {
 const PlutoPresenterOps *pluto_null_presenter_ops(void) { return &k_null_ops; }
 
 const PlutoPresenterOps *pluto_presenter_by_name(const char *name) {
-  if (name == nullptr || std::strcmp(name, "host-headless") == 0 ||
-      std::strcmp(name, "host-png") == 0 ||
-      std::strcmp(name, "host-preview") == 0) {
+  if (name == nullptr || std::strcmp(name, "host-headless") == 0) {
     return &k_host_ops;
   }
   if (std::strcmp(name, "null") == 0) {

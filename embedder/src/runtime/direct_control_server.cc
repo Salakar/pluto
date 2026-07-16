@@ -165,13 +165,11 @@ public:
       return fail(failure, "bad-request", "request must be a JSON object");
     }
 
-    bool have_schema = false;
     bool have_request_id = false;
     bool have_action = false;
     bool have_app_id = false;
     bool have_expected_pid = false;
     bool have_surface = false;
-    std::string schema;
     std::string action;
     std::string surface;
     std::unordered_set<std::string> keys;
@@ -184,12 +182,7 @@ public:
           return fail(failure, "bad-request",
                       "request has malformed or duplicate fields");
         }
-        if (key == "schema") {
-          have_schema = parse_number(&schema);
-          if (!have_schema) {
-            return fail(failure, "bad-schema", "schema must be 1");
-          }
-        } else if (key == "requestId") {
+        if (key == "requestId") {
           have_request_id = parse_string(&request->request_id);
           if (!have_request_id) {
             return fail(failure, "bad-request-id",
@@ -237,8 +230,9 @@ public:
             return fail(failure, "bad-args",
                         "expectedPid must be a positive integer");
           }
-        } else if (!skip_value(0)) {
-          return fail(failure, "bad-request", "request contains invalid JSON");
+        } else {
+          return fail(failure, "bad-request",
+                      "request contains an unknown field");
         }
 
         skip_whitespace();
@@ -255,9 +249,6 @@ public:
     skip_whitespace();
     if (offset_ != input_.size()) {
       return fail(failure, "bad-request", "request has trailing data");
-    }
-    if (!have_schema || schema != "1") {
-      return fail(failure, "bad-schema", "unsupported control schema");
     }
     if (!have_request_id ||
         !printable_ascii(request->request_id, true, kMaximumTokenBytes)) {
@@ -308,28 +299,33 @@ public:
         return fail(failure, "bad-args",
                     "prepare-ink-canvas does not accept a screenshot surface");
       }
-    } else {
-      request->action = action == "tap-switcher-preview"
-                            ? DirectAction::kTapSwitcherPreview
-                            : DirectAction::kDrawStroke;
+    } else if (action == "draw-stroke") {
+      request->action = DirectAction::kDrawStroke;
       if (!request->app_id.has_value()) {
         return fail(failure, "bad-args",
-                    action == "tap-switcher-preview"
-                        ? "tap-switcher-preview requires a concrete appId"
-                        : "draw-stroke requires a concrete appId");
+                    "draw-stroke requires a concrete appId");
+      }
+      if (!have_expected_pid) {
+        return fail(failure, "bad-args", "draw-stroke requires expectedPid");
+      }
+      if (have_surface) {
+        return fail(failure, "bad-args",
+                    "draw-stroke does not accept a screenshot surface");
+      }
+    } else {
+      request->action = DirectAction::kTapSwitcherPreview;
+      if (!request->app_id.has_value()) {
+        return fail(failure, "bad-args",
+                    "tap-switcher-preview requires a concrete appId");
       }
       if (have_surface) {
         return fail(
             failure, "bad-args",
-            action == "tap-switcher-preview"
-                ? "tap-switcher-preview does not accept a screenshot surface"
-                : "draw-stroke does not accept a screenshot surface");
+            "tap-switcher-preview does not accept a screenshot surface");
       }
       if (have_expected_pid) {
         return fail(failure, "bad-args",
-                    action == "tap-switcher-preview"
-                        ? "tap-switcher-preview does not accept expectedPid"
-                        : "draw-stroke does not accept expectedPid");
+                    "tap-switcher-preview does not accept expectedPid");
       }
     }
     return true;
@@ -538,75 +534,6 @@ private:
     return true;
   }
 
-  bool skip_value(std::size_t depth) {
-    if (depth > 32) {
-      return false;
-    }
-    skip_whitespace();
-    if (offset_ >= input_.size()) {
-      return false;
-    }
-    if (input_[offset_] == '"') {
-      std::string ignored;
-      return parse_string(&ignored);
-    }
-    if (input_[offset_] == '{') {
-      return skip_object(depth + 1);
-    }
-    if (input_[offset_] == '[') {
-      return skip_array(depth + 1);
-    }
-    if (consume_literal("true") || consume_literal("false") ||
-        consume_literal("null")) {
-      return true;
-    }
-    std::string ignored;
-    return parse_number(&ignored);
-  }
-
-  bool skip_object(std::size_t depth) {
-    if (!consume('{')) {
-      return false;
-    }
-    std::unordered_set<std::string> keys;
-    if (peek('}')) {
-      return consume('}');
-    }
-    for (;;) {
-      std::string key;
-      if (!parse_string(&key) || !keys.insert(key).second || !consume(':') ||
-          !skip_value(depth)) {
-        return false;
-      }
-      if (consume('}')) {
-        return true;
-      }
-      if (!consume(',')) {
-        return false;
-      }
-    }
-  }
-
-  bool skip_array(std::size_t depth) {
-    if (!consume('[')) {
-      return false;
-    }
-    if (peek(']')) {
-      return consume(']');
-    }
-    for (;;) {
-      if (!skip_value(depth)) {
-        return false;
-      }
-      if (consume(']')) {
-        return true;
-      }
-      if (!consume(',')) {
-        return false;
-      }
-    }
-  }
-
   std::string_view input_;
   std::size_t offset_ = 0;
 };
@@ -664,7 +591,7 @@ std::string failure_response(std::string_view request_id,
   } else if (failure.message.size() > kMaximumErrorMessageBytes) {
     failure.message.resize(kMaximumErrorMessageBytes);
   }
-  return "{\"schema\":1,\"requestId\":" + json_string(request_id) +
+  return "{\"requestId\":" + json_string(request_id) +
          ",\"ok\":false,\"error\":{\"code\":" + json_string(failure.code) +
          ",\"message\":" + json_string(failure.message) + "}}";
 }
@@ -1077,8 +1004,7 @@ private:
       return dispatch_prepare_ink_canvas(request, &failure);
     }
     if (request.action == DirectAction::kDrawStroke) {
-      return dispatch_pointer_action(request, config_.draw_stroke,
-                                     "draw-stroke", 4, 256, &failure);
+      return dispatch_ink_stroke(request, &failure);
     }
 
     DirectScreenshotCapture capture;
@@ -1116,7 +1042,7 @@ private:
     }
     const char *format = pixel_format_name(capture.format);
     std::string response =
-        "{\"schema\":1,\"requestId\":" + json_string(request.request_id) +
+        "{\"requestId\":" + json_string(request.request_id) +
         ",\"ok\":true,\"result\":{\"path\":" + json_string(path) +
         ",\"bytes\":" + std::to_string(capture.png.size()) +
         ",\"sha256\":" + json_string(digest) +
@@ -1180,7 +1106,7 @@ private:
     }
 
     std::string response =
-        "{\"schema\":1,\"requestId\":" + json_string(request.request_id) +
+        "{\"requestId\":" + json_string(request.request_id) +
         ",\"ok\":true,\"result\":{\"appId\":" + json_string(result.app_id) +
         ",\"pid\":" + std::to_string(result.pid) +
         ",\"canvasReady\":true,\"actionCount\":" +
@@ -1190,6 +1116,69 @@ private:
                   request.request_id,
                   {"internal", "prepare-ink-canvas response is too large"}),
               {}};
+    }
+    return {std::move(response), {}};
+  }
+
+  DispatchResult dispatch_ink_stroke(const ParsedRequest &request,
+                                     DirectControlFailure *failure) {
+    if (request.expected_pid != static_cast<std::int64_t>(::getpid())) {
+      return {failure_response(
+                  request.request_id,
+                  {"wrong-pid",
+                   "expected PID is not the receiving control process"}),
+              {}};
+    }
+    if (!config_.draw_stroke || !request.app_id.has_value() ||
+        request.expected_pid <= 0) {
+      return {failure_response(
+                  request.request_id,
+                  {"unavailable", "programmatic stroke is not available"}),
+              {}};
+    }
+
+    DirectPointerResult result;
+    bool delivered = false;
+    try {
+      delivered = config_.draw_stroke(*request.app_id, request.expected_pid,
+                                      &result, failure);
+    } catch (const std::exception &exception) {
+      failure->code = "internal";
+      failure->message =
+          std::string("draw-stroke callback failed: ") + exception.what();
+    } catch (...) {
+      failure->code = "internal";
+      failure->message = "draw-stroke callback failed";
+    }
+    if (!delivered) {
+      if (failure->code.empty()) {
+        failure->code = "unavailable";
+      }
+      if (failure->message.empty()) {
+        failure->message = "programmatic stroke is not available";
+      }
+      return {failure_response(request.request_id, std::move(*failure)), {}};
+    }
+    if (result.app_id != *request.app_id ||
+        result.pid != request.expected_pid || result.event_count < 4 ||
+        result.event_count > 256) {
+      return {
+          failure_response(
+              request.request_id,
+              {"internal", "draw-stroke callback returned invalid metadata"}),
+          {}};
+    }
+
+    std::string response =
+        "{\"requestId\":" + json_string(request.request_id) +
+        ",\"ok\":true,\"result\":{\"appId\":" + json_string(result.app_id) +
+        ",\"pid\":" + std::to_string(result.pid) +
+        ",\"eventCount\":" + std::to_string(result.event_count) + "}}";
+    if (response.size() > config_.max_packet_bytes) {
+      return {
+          failure_response(request.request_id,
+                           {"internal", "draw-stroke response is too large"}),
+          {}};
     }
     return {std::move(response), {}};
   }
@@ -1242,7 +1231,7 @@ private:
     }
 
     std::string response =
-        "{\"schema\":1,\"requestId\":" + json_string(request.request_id) +
+        "{\"requestId\":" + json_string(request.request_id) +
         ",\"ok\":true,\"result\":{\"appId\":" + json_string(result.app_id) +
         ",\"pid\":" + std::to_string(result.pid) +
         ",\"eventCount\":" + std::to_string(result.event_count) + "}}";

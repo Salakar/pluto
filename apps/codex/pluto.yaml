@@ -1,10 +1,8 @@
-schema: 1
 id: dev.pluto.codex
 name: Paper Codex
 version: 0.1.0
 description: An intelligent paper notebook that thinks with the OpenAI Codex CLI.
 icon: assets/pluto/icon.png
-entrypoint: lib/main.dart
 permissions:
   - system.shell
   - network

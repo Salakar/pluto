@@ -13,40 +13,13 @@ enum TouchToolType {
 
   /// Parses a protocol tool-type name.
   static TouchToolType parse(Object? value) {
-    if (value is String) {
-      for (final TouchToolType type in TouchToolType.values) {
-        if (type.name == value) {
-          return type;
-        }
-      }
-    }
-    if (value is int) {
-      return switch (value) {
-        0 => TouchToolType.finger,
-        1 => TouchToolType.palm,
-        _ => TouchToolType.unknown,
-      };
-    }
-    return TouchToolType.unknown;
+    return switch (value) {
+      'finger' => TouchToolType.finger,
+      'palm' => TouchToolType.palm,
+      'unknown' => TouchToolType.unknown,
+      _ => throw FormatException('Unknown touch tool type: $value'),
+    };
   }
-}
-
-/// Phase of a touch point in its contact lifecycle.
-enum TouchPhase {
-  /// A touch contact began.
-  down,
-
-  /// A touch contact moved.
-  move,
-
-  /// A touch contact ended.
-  up,
-
-  /// A touch contact was cancelled.
-  cancel,
-
-  /// A touch contact was rejected by palm filtering.
-  rejected,
 }
 
 /// One tracked contact.
@@ -100,39 +73,6 @@ final class TouchContact {
   final TouchToolType toolType;
 }
 
-/// Compatibility point view for earlier stream consumers.
-final class TouchPoint {
-  /// Creates a touch point.
-  const TouchPoint({
-    required this.timestamp,
-    required this.id,
-    required this.position,
-    required this.phase,
-  });
-
-  /// Creates a point view from a typed [TouchEvent].
-  factory TouchPoint.fromEvent(TouchEvent event) {
-    return TouchPoint(
-      timestamp: event.timestamp,
-      id: event.contact.trackingId,
-      position: event.contact.position,
-      phase: event.phase,
-    );
-  }
-
-  /// Monotonic timestamp.
-  final Duration timestamp;
-
-  /// Stable tracking id.
-  final int id;
-
-  /// Logical panel position.
-  final Offset position;
-
-  /// Contact lifecycle phase.
-  final TouchPhase phase;
-}
-
 /// Typed touch event.
 sealed class TouchEvent {
   /// Creates a touch event.
@@ -143,45 +83,30 @@ sealed class TouchEvent {
 
   /// Contact that changed.
   final TouchContact contact;
-
-  /// Contact lifecycle phase.
-  TouchPhase get phase;
 }
 
 /// Touch down event.
 final class TouchDownEvent extends TouchEvent {
   /// Creates a down event.
   const TouchDownEvent({required super.timestamp, required super.contact});
-
-  @override
-  TouchPhase get phase => TouchPhase.down;
 }
 
 /// Touch move event.
 final class TouchMoveEvent extends TouchEvent {
   /// Creates a move event.
   const TouchMoveEvent({required super.timestamp, required super.contact});
-
-  @override
-  TouchPhase get phase => TouchPhase.move;
 }
 
 /// Touch up event.
 final class TouchUpEvent extends TouchEvent {
   /// Creates an up event.
   const TouchUpEvent({required super.timestamp, required super.contact});
-
-  @override
-  TouchPhase get phase => TouchPhase.up;
 }
 
 /// Touch cancel event.
 final class TouchCancelEvent extends TouchEvent {
   /// Creates a cancel event.
   const TouchCancelEvent({required super.timestamp, required super.contact});
-
-  @override
-  TouchPhase get phase => TouchPhase.cancel;
 }
 
 /// A contact suppressed by palm rejection.
@@ -195,9 +120,6 @@ final class TouchRejectedEvent extends TouchEvent {
 
   /// Rejection reason.
   final PalmRejectionReason reason;
-
-  @override
-  TouchPhase get phase => TouchPhase.rejected;
 }
 
 /// Why a contact was rejected.

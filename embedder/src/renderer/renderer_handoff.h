@@ -21,9 +21,6 @@ namespace pluto {
 // representation is defined by renderer_handoff.cc and is always explicit
 // little-endian; these in-memory state objects are never memcpy-serialized.
 struct RendererHandoffState {
-  static constexpr uint32_t kVersion = 1;
-
-  uint32_t version = kVersion;
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t rotation = 0;
@@ -72,7 +69,6 @@ enum class RendererHandoffReject : uint8_t {
   kTooLarge,
   kTruncated,
   kMagic,
-  kVersion,
   kHeader,
   kChecksum,
   kConfiguration,

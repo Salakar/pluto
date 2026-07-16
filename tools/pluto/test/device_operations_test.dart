@@ -15,6 +15,7 @@ import 'package:test/test.dart';
 import 'support/aot_fixture.dart';
 
 const String root = LiveDeviceOperations.defaultDeviceRoot;
+const String _engineCommit = 'a10d8ac38de835021c8d2f920dbf50a920ccc030';
 const List<int> _armIconBytes = <int>[0x41, 0x52, 0x4d];
 const List<int> _arm64IconBytes = <int>[0x41, 0x52, 0x4d, 0x36, 0x34];
 
@@ -114,6 +115,7 @@ FakeTransport _screenshotTransport({
   String format = 'rgb565',
   String path = '/run/pluto/screenshots/direct-4242-1.png',
   Map<String, Object?> metadataOverrides = const <String, Object?>{},
+  Map<String, Object?> responseOverrides = const <String, Object?>{},
   String? responseRequestId,
   CommandResult? postflightResult,
   Uint8List? downloadedPng,
@@ -143,7 +145,6 @@ FakeTransport _screenshotTransport({
         return CommandResult(
           exitCode: 0,
           stdout: jsonEncode(<String, Object?>{
-            'schema': 1,
             'requestId': responseRequestId ?? request['requestId'],
             'ok': true,
             'result': <String, Object?>{
@@ -159,6 +160,7 @@ FakeTransport _screenshotTransport({
               'format': format,
               ...metadataOverrides,
             },
+            ...responseOverrides,
           }),
         );
       }
@@ -208,11 +210,33 @@ Future<File> _writePlap(
           path: 'manifest.json',
           bytes: Uint8List.fromList(
             utf8.encode(
-              '{"id":"$appId","name":"Notes",'
-              '"icon":"assets/pluto/icon.png","runtime":'
-              '{"type":"$runtimeType",'
-              '${isDebug ? '' : '"appElf":"lib/app.so",'}'
-              '"assets":"flutter_assets"}}',
+              jsonEncode(<String, Object?>{
+                'id': appId,
+                'name': 'Notes',
+                'version': '1.0.0',
+                'icon': 'assets/pluto/icon.png',
+                'runtime': <String, Object?>{
+                  'type': runtimeType,
+                  if (!isDebug) 'appElf': 'lib/app.so',
+                  'assets': 'flutter_assets',
+                },
+                'engine': <String, Object?>{
+                  'flutterVersion': '3.44.4',
+                  'engineCommit': _engineCommit,
+                },
+                'permissions': <Object?>[],
+                'display': <String, Object?>{
+                  'orientations': <Object?>['portrait'],
+                  'defaultOrientation': 'portrait',
+                  'scale': 'auto',
+                  'color': 'auto',
+                  'refreshProfile': 'ui',
+                },
+                'launch': <String, Object?>{
+                  'singleInstance': true,
+                  'args': <Object?>[],
+                },
+              }),
             ),
           ),
         ),
@@ -252,7 +276,7 @@ Future<File> _writePlap(
               source: sourceFor(sliceTarget),
               metadata: PackageMetadata(
                 flutterVersion: '3.44.4',
-                engineCommit: 'abc',
+                engineCommit: _engineCommit,
                 plutoVersion: '0.1.0',
                 buildMode: buildMode,
                 engineFlavor: buildMode,
@@ -272,15 +296,47 @@ Uint8List _buildMetadataBytes({
 }) => Uint8List.fromList(
   utf8.encode(
     jsonEncode(<String, Object?>{
-      'schema': 1,
       'buildMode': buildMode,
       'engineFlavor': buildMode,
       'flutterVersion': '3.44.4',
-      'engineCommit': 'abc',
+      'engineCommit': _engineCommit,
       'target': target,
     }),
   ),
 );
+
+String _manifestJson({
+  required String appId,
+  bool debug = false,
+  String icon = 'assets/pluto/icon.png',
+  String? iconMono,
+}) => jsonEncode(<String, Object?>{
+  'id': appId,
+  'name': 'Test app',
+  'version': '1.0.0',
+  'icon': icon,
+  'iconMono': ?iconMono,
+  'runtime': debug
+      ? <String, Object?>{'type': 'flutter-kernel', 'assets': 'flutter_assets'}
+      : <String, Object?>{
+          'type': 'flutter-aot',
+          'appElf': 'lib/app.so',
+          'assets': 'flutter_assets',
+        },
+  'engine': <String, Object?>{
+    'flutterVersion': '3.44.4',
+    'engineCommit': _engineCommit,
+  },
+  'permissions': <Object?>[],
+  'display': <String, Object?>{
+    'orientations': <Object?>['portrait'],
+    'defaultOrientation': 'portrait',
+    'scale': 'auto',
+    'color': 'auto',
+    'refreshProfile': 'ui',
+  },
+  'launch': <String, Object?>{'singleInstance': true, 'args': <Object?>[]},
+});
 
 PayloadFile _releaseActivator() => PayloadFile(
   localPath: '${Directory.current.path}/../device/pluto-release-activate.sh',
@@ -307,16 +363,13 @@ void main() {
       final Directory appBundle = Directory('${temp.path}/app/bundle')
         ..createSync(recursive: true);
       File('${launcherBundle.parent.path}/manifest.json').writeAsStringSync(
-        '{"id":"dev.pluto.launcher",'
-        '"icon":"assets/pluto/icon.png",'
-        '"iconMono":"assets/pluto/icon-mono.png","runtime":'
-        '{"type":"flutter-aot","appElf":"lib/app.so",'
-        '"assets":"flutter_assets"}}',
+        _manifestJson(
+          appId: 'dev.pluto.launcher',
+          iconMono: 'assets/pluto/icon-mono.png',
+        ),
       );
       File('${appBundle.parent.path}/manifest.json').writeAsStringSync(
-        '{"id":"dev.example.counter",'
-        '"icon":"assets/pluto/icon.png","runtime":'
-        '{"type":"flutter-kernel","assets":"flutter_assets"}}',
+        _manifestJson(appId: 'dev.example.counter', debug: true),
       );
       final Uint8List launcherMetadata = _buildMetadataBytes();
       final Uint8List appMetadata = _buildMetadataBytes(buildMode: 'debug');
@@ -498,16 +551,52 @@ void main() {
     },
   );
 
+  test('provision refuses an unmanaged runtime-root collision', () async {
+    final FakeTransport transport = _moveTransport(
+      'h',
+      execHandler: (String command) async {
+        if (command.contains('conflicts with the managed release symlink')) {
+          return const CommandResult(
+            exitCode: 78,
+            stderr: '$root conflicts with the managed release symlink',
+          );
+        }
+        return const CommandResult(exitCode: 0);
+      },
+    );
+
+    await expectLater(
+      LiveDeviceOperations(transport).provision(
+        runtime: _runtimeWithActivator(),
+        apps: const <PayloadApp>[],
+        payloadTarget: 'linux-arm64',
+        bootDefault: false,
+      ),
+      throwsA(
+        isA<DeviceOperationException>().having(
+          (DeviceOperationException error) => error.message,
+          'message',
+          'runtime root ownership is unsafe; remove or relocate the '
+              'conflicting path',
+        ),
+      ),
+    );
+    expect(
+      transport.commands,
+      contains(contains('conflicts with the managed release symlink')),
+    );
+    expect(transport.uploads, isEmpty);
+    expect(transport.directoryUploads, isEmpty);
+  });
+
   test('provision rejects AppleDouble metadata before device I/O', () async {
     final Directory temp = Directory.systemTemp.createTempSync('pluto_meta');
     addTearDown(() => temp.deleteSync(recursive: true));
     final Directory bundle = Directory('${temp.path}/launcher/bundle')
       ..createSync(recursive: true);
-    File('${bundle.parent.path}/manifest.json').writeAsStringSync(
-      '{"id":"dev.pluto.launcher","runtime":'
-      '{"type":"flutter-aot","appElf":"lib/app.so",'
-      '"assets":"flutter_assets"}}',
-    );
+    File(
+      '${bundle.parent.path}/manifest.json',
+    ).writeAsStringSync(_manifestJson(appId: 'dev.pluto.launcher'));
     File('${bundle.path}/flutter_assets/._AssetManifest.bin')
       ..createSync(recursive: true)
       ..writeAsBytesSync(<int>[1]);
@@ -660,9 +749,9 @@ void main() {
       addTearDown(() => temp.deleteSync(recursive: true));
       final Directory bundle = Directory('${temp.path}/layout/bundle')
         ..createSync(recursive: true);
-      File(
-        '${bundle.parent.path}/manifest.json',
-      ).writeAsStringSync('{"id":"dev.example.icon","icon":"${fixture.icon}"}');
+      File('${bundle.parent.path}/manifest.json').writeAsStringSync(
+        _manifestJson(appId: 'dev.example.icon', icon: fixture.icon),
+      );
       File(
         '${bundle.parent.path}/build-metadata.json',
       ).writeAsBytesSync(_buildMetadataBytes());
@@ -715,11 +804,9 @@ void main() {
       addTearDown(() => temp.deleteSync(recursive: true));
       final Directory bundle = Directory('${temp.path}/layout/bundle')
         ..createSync(recursive: true);
-      File('${bundle.parent.path}/manifest.json').writeAsStringSync(
-        '{"id":"dev.example.notes","runtime":'
-        '{"type":"flutter-aot","appElf":"lib/app.so",'
-        '"assets":"flutter_assets"}}',
-      );
+      File(
+        '${bundle.parent.path}/manifest.json',
+      ).writeAsStringSync(_manifestJson(appId: 'dev.example.notes'));
       final String metadataPath = '${bundle.parent.path}/build-metadata.json';
       if (fixture == 'directory') {
         Directory(metadataPath).createSync();
@@ -1164,6 +1251,16 @@ void main() {
     );
     final Map<String, Object?> install =
         jsonDecode(utf8.decode(installUpload.bytes)) as Map<String, Object?>;
+    expect(install.keys.toSet(), const <String>{
+      'appId',
+      'installedAt',
+      'installedBy',
+      'source',
+      'buildMode',
+      'engineFlavor',
+      'sizeBytes',
+      'payload',
+    });
     expect(install['sizeBytes'], selected.installTarBytes.length);
     expect(install['payload'], selected.payloadHashes);
     expect(
@@ -1330,13 +1427,6 @@ void main() {
       ).installPackage(plap.path);
 
       expect(result.ok, isTrue);
-      expect(
-        transport.uploads.any(
-          (FakeUpload upload) =>
-              upload.remotePath.endsWith('/external.manifest.json'),
-        ),
-        isFalse,
-      );
       expect(transport.uploads, isNotEmpty);
       expect(transport.directoryUploads, isEmpty);
       final FakeUpload uploadedTar = transport.uploads.singleWhere(
@@ -1691,7 +1781,12 @@ void main() {
       orderedEquals(png),
     );
 
-    expect(request['schema'], 1);
+    expect(request.keys.toSet(), const <String>{
+      'requestId',
+      'action',
+      'appId',
+      'surface',
+    });
     expect(request['action'], 'screenshot');
     expect(request['appId'], 'dev.example.notes');
     expect(request['surface'], 'logical');
@@ -1809,6 +1904,35 @@ void main() {
 
     expect(transport.downloads, isEmpty);
   });
+
+  test(
+    'native screenshot rejects unknown envelope and result fields',
+    () async {
+      final Uint8List png = _pngHeaderFixture(37, 29);
+      for (final FakeTransport transport in <FakeTransport>[
+        _screenshotTransport(
+          png: png,
+          responseOverrides: const <String, Object?>{'extra': true},
+        ),
+        _screenshotTransport(
+          png: png,
+          metadataOverrides: const <String, Object?>{'extra': true},
+        ),
+      ]) {
+        await expectLater(
+          LiveDeviceOperations(transport).screenshot(),
+          throwsA(
+            isA<DeviceOperationException>().having(
+              (DeviceOperationException error) => error.message,
+              'message',
+              contains('invalid Pluto'),
+            ),
+          ),
+        );
+        expect(transport.downloads, isEmpty);
+      }
+    },
+  );
 
   test('native screenshot never removes an unsafe artifact path', () async {
     final Uint8List png = _pngHeaderFixture(37, 29);

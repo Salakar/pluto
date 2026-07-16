@@ -12,6 +12,7 @@
 #include <mutex>
 #include <new>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -20,6 +21,8 @@
 
 #include <sys/stat.h>
 #if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
 #include <sys/vfs.h>
 #endif
 #include <unistd.h>
@@ -37,8 +40,7 @@ constexpr std::uint32_t kHandoffTilePixels = 32;
 constexpr std::uint32_t kHandoffEngineStride =
     (kRm2PanelWidth + 7u) & ~std::uint32_t{7};
 constexpr std::size_t kMaximumRendererHandoffBytes = 32u << 20;
-constexpr std::string_view kHandoffPipelineTag =
-    "pluto-rm2-lcdif-warm-handoff-v1";
+constexpr std::string_view kHandoffPipelineTag = "pluto-rm2-lcdif-warm-handoff";
 constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagInkPriority | kPlutoPresentFlagPreDithered |
     kPlutoPresentFlagSettle | kPlutoPresentFlagSparkle |
@@ -46,8 +48,58 @@ constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagPixelResetWhite | kPlutoPresentFlagPixelResetRestore |
     kPlutoPresentFlagRequiredSettle | kPlutoPresentFlagPenTruth |
     kPlutoPresentSparklePhaseMask;
+constexpr std::size_t kEncodeHistogramBuckets = 20'000;
+constexpr int kMaximumBurstTemperatureMillidegrees = 45'000;
 
 static_assert(kHandoffEngineStride == 1408u);
+
+bool configure_present_worker() noexcept {
+#if defined(__linux__) && defined(__arm__)
+  (void)pthread_setname_np(pthread_self(), "rm2-present");
+  sched_param policy{};
+  policy.sched_priority = 60;
+  const int policy_error =
+      pthread_setschedparam(pthread_self(), SCHED_FIFO, &policy);
+  cpu_set_t affinity;
+  CPU_ZERO(&affinity);
+  CPU_SET(0, &affinity);
+  const int affinity_error = sched_setaffinity(0, sizeof(affinity), &affinity);
+  return policy_error == 0 && affinity_error == 0;
+#elif defined(__linux__)
+  (void)pthread_setname_np(pthread_self(), "rm2-present");
+  return true;
+#else
+  return true;
+#endif
+}
+
+Rm2CpuFrequencyLeasePaths
+cpu_frequency_paths(const GeneratedDeviceProfile &profile,
+                    const Rm2HandoffOptions &options) {
+  if (options.allow_insecure_path_for_testing &&
+      options.cpu_frequency_paths_for_testing.has_value()) {
+    return *options.cpu_frequency_paths_for_testing;
+  }
+#if defined(__linux__) && defined(__arm__)
+  if (profile.id == "rm2" &&
+      profile.display_driver == NativeDisplayDriverKind::kLcdifTcon &&
+      profile.target_slice == DeviceTargetSlice::kLinuxArm &&
+      profile.panel.width == static_cast<int>(kRm2PanelWidth) &&
+      profile.panel.height == static_cast<int>(kRm2PanelHeight) &&
+      !profile.panel.color) {
+    return {
+        .policy_path = kRm2CpuPolicyPath,
+        .receipt_path = kRm2CpuReceiptPath,
+        .lock_path = kRm2CpuLockPath,
+        .cpu_thermal_type_path = kRm2CpuThermalTypePath,
+        .cpu_temperature_path = kRm2CpuTemperaturePath,
+    };
+  }
+#else
+  (void)profile;
+#endif
+  return {};
+}
 
 enum class HandoffDecision : std::uint8_t {
   kNone,
@@ -160,7 +212,7 @@ bool build_handoff_identity(const GeneratedDeviceProfile &profile,
   }
 
   HandoffFingerprint waveform;
-  waveform.add_string("rm2-wbf-exact-profile-v1");
+  waveform.add_string("rm2-wbf-exact-profile");
   for (const GeneratedWaveformSourceProfile &source :
        profile.runtime.waveform.accepted_sources) {
     waveform.add_string(source.path);
@@ -170,9 +222,9 @@ bool build_handoff_identity(const GeneratedDeviceProfile &profile,
 
   HandoffFingerprint pipeline;
   pipeline.add_string(kHandoffPipelineTag);
-  pipeline.add_string("physical-panel-row-major-u4-padded-v1");
-  pipeline.add_string("logical-tight-rgb565le-v1");
-  pipeline.add_string("canonical-idle-hold-v1");
+  pipeline.add_string("physical-panel-row-major-u4-padded");
+  pipeline.add_string("logical-tight-rgb565le");
+  pipeline.add_string("canonical-idle-hold");
   pipeline.add_string(profile.id);
   pipeline.add_string(profile.wire_model);
   pipeline.add_string(profile.codename);
@@ -258,23 +310,62 @@ bool rect_valid(const PlutoRect &rect) {
          width <= kRm2PanelWidth - x && height <= kRm2PanelHeight - y;
 }
 
-PlutoRect bounding_rect(const PlutoRect *damage, std::size_t damage_count) {
-  std::int32_t left = damage[0].x;
-  std::int32_t top = damage[0].y;
-  std::int32_t right = damage[0].x + damage[0].width;
-  std::int32_t bottom = damage[0].y + damage[0].height;
-  for (std::size_t index = 1; index < damage_count; ++index) {
-    left = std::min(left, damage[index].x);
-    top = std::min(top, damage[index].y);
-    right = std::max(right, damage[index].x + damage[index].width);
-    bottom = std::max(bottom, damage[index].y + damage[index].height);
-  }
-  return {
-      .x = left,
-      .y = top,
-      .width = right - left,
-      .height = bottom - top,
+std::uint64_t rect_union_area(std::span<const PlutoRect> rectangles) {
+  struct Interval {
+    std::int32_t begin = 0;
+    std::int32_t end = 0;
   };
+  std::array<std::int32_t, kMaximumDamageRects * 2U> x_edges{};
+  std::size_t x_count = 0;
+  for (const PlutoRect &rect : rectangles) {
+    x_edges[x_count++] = rect.x;
+    x_edges[x_count++] = rect.x + rect.width;
+  }
+  std::sort(x_edges.begin(),
+            x_edges.begin() + static_cast<std::ptrdiff_t>(x_count));
+  const auto unique_end = std::unique(
+      x_edges.begin(), x_edges.begin() + static_cast<std::ptrdiff_t>(x_count));
+  x_count = static_cast<std::size_t>(unique_end - x_edges.begin());
+
+  std::uint64_t area = 0;
+  std::array<Interval, kMaximumDamageRects> intervals{};
+  for (std::size_t edge = 1; edge < x_count; ++edge) {
+    const std::int32_t x_begin = x_edges[edge - 1U];
+    const std::int32_t x_end = x_edges[edge];
+    std::size_t interval_count = 0;
+    for (const PlutoRect &rect : rectangles) {
+      if (rect.x <= x_begin && rect.x + rect.width >= x_end) {
+        intervals[interval_count++] = {
+            .begin = rect.y,
+            .end = rect.y + rect.height,
+        };
+      }
+    }
+    std::sort(intervals.begin(),
+              intervals.begin() + static_cast<std::ptrdiff_t>(interval_count),
+              [](const Interval &left, const Interval &right) {
+                return left.begin < right.begin ||
+                       (left.begin == right.begin && left.end < right.end);
+              });
+    std::int32_t covered_y = 0;
+    if (interval_count != 0) {
+      std::int32_t merged_begin = intervals[0].begin;
+      std::int32_t merged_end = intervals[0].end;
+      for (std::size_t index = 1; index < interval_count; ++index) {
+        if (intervals[index].begin > merged_end) {
+          covered_y += merged_end - merged_begin;
+          merged_begin = intervals[index].begin;
+          merged_end = intervals[index].end;
+        } else {
+          merged_end = std::max(merged_end, intervals[index].end);
+        }
+      }
+      covered_y += merged_end - merged_begin;
+    }
+    area += static_cast<std::uint64_t>(x_end - x_begin) *
+            static_cast<std::uint64_t>(covered_y);
+  }
+  return area;
 }
 
 bool parse_waveform_option(const char *options, std::string_view key,
@@ -294,11 +385,21 @@ bool parse_waveform_option(const char *options, std::string_view key,
 
 } // namespace
 
+std::uint64_t rm2_damage_union_area(std::span<const PlutoRect> rectangles) {
+  return rect_union_area(rectangles);
+}
+
 class LcdifTconDisplayBackend::Impl final {
 public:
+  struct JobRegion {
+    Rm2PanelRect panel_rect;
+    std::size_t pixel_offset = 0;
+  };
+
   struct Job {
     std::uint64_t frame_id = 0;
-    Rm2PanelRect panel_rect;
+    std::array<JobRegion, kMaximumDamageRects> regions{};
+    std::size_t region_count = 0;
     std::vector<std::uint8_t> transition_keys;
     std::vector<std::uint16_t> target_pixels;
     Rm2WaveformSelection waveform;
@@ -320,6 +421,13 @@ public:
                 ? std::move(power_ready_reader)
                 : [](std::string
                          *error) { return read_rm2_panel_power_ready(error); }),
+        pan_worker_(
+            [this](std::uint32_t slot, std::chrono::nanoseconds *out_duration) {
+              return device_->pan(slot, out_duration) == kPlutoStatusOk;
+            }),
+        cpu_frequency_lease_(cpu_frequency_paths(profile, handoff)),
+        cpu_frequency_debounce_(handoff.cpu_frequency_debounce_for_testing),
+        phase_encode_delay_for_testing_(handoff.phase_encode_delay_for_testing),
         handoff_path_(std::move(handoff.path)),
         handoff_now_(handoff.now_for_testing == nullptr
                          ? glass_handoff_now
@@ -372,7 +480,7 @@ public:
   }
 
   PlutoStatus start(const PlutoPresenterConfig &config) {
-    if (config.struct_size < sizeof(PlutoPresenterConfig) ||
+    if (config.struct_size != sizeof(PlutoPresenterConfig) ||
         (config.backend_name != nullptr &&
          std::string_view(config.backend_name) != "native") ||
         !profile_.runtime.waveform_option_key.has_value()) {
@@ -397,9 +505,39 @@ public:
     if (!waveforms_.open(profile_, waveform_path, &error)) {
       return kPlutoStatusUnsupported;
     }
+    if (!phase_encoder_.ready() || !pan_worker_.ready()) {
+      waveforms_.clear();
+      return kPlutoStatusInternal;
+    }
+    try {
+      reusable_job_.transition_keys.reserve(kRm2PanelWidth * kRm2PanelHeight);
+      reusable_job_.target_pixels.reserve(kRm2PanelWidth * kRm2PanelHeight);
+    } catch (const std::bad_alloc &) {
+      waveforms_.clear();
+      return kPlutoStatusInternal;
+    }
+
+    std::string frequency_error;
+    if (!acquire_cpu_frequency_floor(&frequency_error)) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 frequency guard acquire failed: "
+                   "%s\n",
+                   frequency_error.c_str());
+      waveforms_.clear();
+      device_->close();
+      mark_lost();
+      return kPlutoStatusDeviceLost;
+    }
 
     PlutoStatus status = device_->initialize();
     if (status != kPlutoStatusOk) {
+      if (!release_cpu_frequency_floor(&frequency_error)) {
+        std::fprintf(stderr,
+                     "lcdif_tcon: RM2 frequency guard restore failed after "
+                     "initialize: %s\n",
+                     frequency_error.c_str());
+        status = kPlutoStatusDeviceLost;
+      }
       waveforms_.clear();
       observe_fault(status);
       return status;
@@ -428,6 +566,10 @@ public:
       accepting_ = !handoff_pending;
       started_ = true;
       stopping_ = false;
+      worker_started_ = false;
+      worker_configured_ = false;
+      telemetry_emitted_ = false;
+      telemetry_active_ = false;
     }
     try {
       worker_ = std::thread([this] { worker_main(); });
@@ -437,16 +579,55 @@ public:
       }
       clear_incoming_handoff_locked(HandoffDecision::kRejected);
       handoff_lease_ = GlassHandoffLease{};
+      if (!release_cpu_frequency_floor(&frequency_error)) {
+        std::fprintf(stderr,
+                     "lcdif_tcon: RM2 frequency guard restore failed after "
+                     "worker creation: %s\n",
+                     frequency_error.c_str());
+      }
       mark_lost();
       device_->close();
       waveforms_.clear();
       return kPlutoStatusInternal;
     }
+    {
+      std::unique_lock<std::mutex> lock(state_mutex_);
+      worker_start_cv_.wait(lock, [this] { return worker_started_; });
+      if (!worker_configured_) {
+        lock.unlock();
+        if (worker_.joinable()) {
+          worker_.join();
+        }
+        if (handoff_route_enabled_ && handoff_lease_.valid()) {
+          (void)discard_handoff_locked();
+        }
+        clear_incoming_handoff_locked(HandoffDecision::kRejected);
+        handoff_lease_ = GlassHandoffLease{};
+        if (!release_cpu_frequency_floor(&frequency_error)) {
+          std::fprintf(stderr,
+                       "lcdif_tcon: RM2 frequency guard restore failed after "
+                       "worker setup: %s\n",
+                       frequency_error.c_str());
+        }
+        (void)device_->blank_powerdown();
+        device_->close();
+        waveforms_.clear();
+        std::lock_guard<std::mutex> failed_lock(state_mutex_);
+        accepting_ = false;
+        started_ = false;
+        lost_ = true;
+        ++hardware_faults_;
+        return kPlutoStatusInternal;
+      }
+      telemetry_active_ = true;
+      arm_cpu_frequency_release_locked();
+    }
+    work_cv_.notify_one();
     return kPlutoStatusOk;
   }
 
   PlutoStatus info(PlutoDisplayInfo *out_info) const {
-    if (out_info == nullptr || out_info->struct_size < sizeof(*out_info)) {
+    if (out_info == nullptr || out_info->struct_size != sizeof(*out_info)) {
       return kPlutoStatusInvalidArgument;
     }
     PlutoDisplayInfo result{};
@@ -472,7 +653,7 @@ public:
   }
 
   PlutoStatus submit(const PlutoPresentRequest *request) {
-    if (request == nullptr || request->struct_size < sizeof(*request)) {
+    if (request == nullptr || request->struct_size != sizeof(*request)) {
       return kPlutoStatusInvalidArgument;
     }
     const PlutoStatus validation = validate_request(*request);
@@ -527,26 +708,49 @@ public:
     if (consume_handoff_before_admission_locked() != kPlutoStatusOk) {
       return kPlutoStatusDeviceLost;
     }
+    Job job;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (lost_ || !started_ || !accepting_ || outstanding_) {
         return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
       }
       outstanding_ = true;
+      cpu_frequency_release_armed_ = false;
+      job = std::move(reusable_job_);
     }
-
-    std::optional<Job> job;
+    work_cv_.notify_one();
+    std::string frequency_error;
+    if (!acquire_cpu_frequency_floor(&frequency_error)) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 frequency guard acquire failed "
+                   "before admission: %s\n",
+                   frequency_error.c_str());
+      (void)device_->blank_powerdown();
+      finish_failed_admission(kPlutoStatusDeviceLost, std::move(job));
+      return kPlutoStatusDeviceLost;
+    }
     try {
-      job = build_job(*request);
+      if (!build_job(*request, &job)) {
+        (void)device_->blank_powerdown();
+        if (!release_cpu_frequency_floor(&frequency_error)) {
+          std::fprintf(stderr,
+                       "lcdif_tcon: RM2 frequency guard restore failed after "
+                       "admission: %s\n",
+                       frequency_error.c_str());
+        }
+        finish_failed_admission(kPlutoStatusDeviceLost, std::move(job));
+        return kPlutoStatusDeviceLost;
+      }
     } catch (const std::bad_alloc &) {
       (void)device_->blank_powerdown();
-      finish_failed_admission(kPlutoStatusInternal);
+      if (!release_cpu_frequency_floor(&frequency_error)) {
+        std::fprintf(stderr,
+                     "lcdif_tcon: RM2 frequency guard restore failed after "
+                     "allocation failure: %s\n",
+                     frequency_error.c_str());
+      }
+      finish_failed_admission(kPlutoStatusInternal, std::move(job));
       return kPlutoStatusInternal;
-    }
-    if (!job.has_value()) {
-      (void)device_->blank_powerdown();
-      finish_failed_admission(kPlutoStatusDeviceLost);
-      return kPlutoStatusDeviceLost;
     }
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -607,7 +811,7 @@ public:
   }
 
   PlutoStatus set_pen_focus(const PlutoPenFocus *focus) const {
-    if (focus == nullptr || focus->struct_size < sizeof(*focus) ||
+    if (focus == nullptr || focus->struct_size != sizeof(*focus) ||
         (focus->flags & ~(kPlutoPenFocusInRange | kPlutoPenFocusContact)) !=
             0 ||
         ((focus->flags & kPlutoPenFocusContact) != 0 &&
@@ -625,7 +829,7 @@ public:
       return kPlutoStatusUnsupported;
     }
     if (payload == nullptr ||
-        payload->struct_size < sizeof(PlutoHandoffPayload) ||
+        payload->struct_size != sizeof(PlutoHandoffPayload) ||
         payload->bytes == nullptr || payload->byte_count == 0 ||
         payload->byte_count > kMaximumRendererHandoffBytes ||
         payload->width != profile_.panel.width ||
@@ -722,7 +926,7 @@ public:
       return kPlutoStatusUnsupported;
     }
     if (out_payload == nullptr ||
-        out_payload->struct_size < sizeof(PlutoHandoffPayload)) {
+        out_payload->struct_size != sizeof(PlutoHandoffPayload)) {
       return kPlutoStatusInvalidArgument;
     }
     std::lock_guard<std::mutex> admission_lock(admission_mutex_);
@@ -860,6 +1064,15 @@ public:
     if (worker_.joinable()) {
       worker_.join();
     }
+    std::string frequency_error;
+    if (!release_cpu_frequency_floor(&frequency_error)) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 frequency guard restore failed during "
+                   "stop: %s\n",
+                   frequency_error.c_str());
+      (void)device_->blank_powerdown();
+      mark_lost();
+    }
     device_->close();
     waveforms_.clear();
     {
@@ -881,10 +1094,39 @@ public:
       probed_ = false;
       stopping_ = false;
     }
+    if (telemetry_active_) {
+      emit_telemetry();
+      telemetry_active_ = false;
+    }
     idle_cv_.notify_all();
   }
 
 private:
+  bool acquire_cpu_frequency_floor(std::string *error) {
+    std::lock_guard<std::mutex> lock(cpu_frequency_mutex_);
+    return cpu_frequency_lease_.acquire(error);
+  }
+
+  bool release_cpu_frequency_floor(std::string *error) noexcept {
+    std::lock_guard<std::mutex> lock(cpu_frequency_mutex_);
+    return cpu_frequency_lease_.release(error);
+  }
+
+  bool cpu_frequency_floor_active() const noexcept {
+    std::lock_guard<std::mutex> lock(cpu_frequency_mutex_);
+    return !cpu_frequency_lease_.enabled() || cpu_frequency_lease_.active();
+  }
+
+  void arm_cpu_frequency_release_locked() {
+    if (!cpu_frequency_lease_.enabled()) {
+      cpu_frequency_release_armed_ = false;
+      return;
+    }
+    cpu_frequency_release_deadline_ =
+        std::chrono::steady_clock::now() + cpu_frequency_debounce_;
+    cpu_frequency_release_armed_ = true;
+  }
+
   std::optional<int> read_powered_temperature(std::string *error) {
     if (device_->is_blanked()) {
       if (device_->unblank(kRm2IdleSlot) != kPlutoStatusOk ||
@@ -925,6 +1167,7 @@ private:
     std::vector<std::uint8_t> init_codes;
     Rm2WaveformSelection selection;
     if (!temperature.has_value() ||
+        *temperature >= kMaximumBurstTemperatureMillidegrees ||
         !waveforms_.select(kPlutoRefreshFast, *temperature, &selection) ||
         !waveforms_.select(kPlutoRefreshUi, *temperature, &selection) ||
         !waveforms_.select(kPlutoRefreshText, *temperature, &selection) ||
@@ -1179,6 +1422,14 @@ private:
 
   PlutoStatus fail_powered_start(PlutoStatus status) {
     (void)device_->blank_powerdown();
+    std::string frequency_error;
+    if (!release_cpu_frequency_floor(&frequency_error)) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 frequency guard restore failed during "
+                   "start rollback: %s\n",
+                   frequency_error.c_str());
+      status = kPlutoStatusDeviceLost;
+    }
     mark_lost();
     device_->close();
     waveforms_.clear();
@@ -1209,18 +1460,90 @@ private:
            fill_rm2_scan_slot(device_->slot(2), 0);
   }
 
-  bool pan_with_deadline(std::uint32_t slot) {
-    std::chrono::nanoseconds duration;
-    if (device_->pan(slot, &duration) != kPlutoStatusOk) {
+  void record_encode_duration(std::chrono::steady_clock::duration duration) {
+    const auto nanoseconds =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+    const std::uint64_t microseconds =
+        nanoseconds <= 0
+            ? 0U
+            : (static_cast<std::uint64_t>(nanoseconds) + 999U) / 1000U;
+    const std::size_t bucket = static_cast<std::size_t>(
+        std::min<std::uint64_t>(microseconds, kEncodeHistogramBuckets - 1U));
+    ++encode_histogram_[bucket];
+    encode_max_us_ = std::max(encode_max_us_, microseconds);
+  }
+
+  std::uint64_t encode_percentile(std::uint64_t percentile) const {
+    if (presented_phases_ == 0) {
+      return 0;
+    }
+    const std::uint64_t target = (presented_phases_ * percentile + 99U) / 100U;
+    std::uint64_t observed = 0;
+    for (std::size_t bucket = 0; bucket < encode_histogram_.size(); ++bucket) {
+      observed += encode_histogram_[bucket];
+      if (observed >= target) {
+        return bucket;
+      }
+    }
+    return encode_histogram_.size() - 1U;
+  }
+
+  void emit_telemetry() {
+    if (telemetry_emitted_) {
+      return;
+    }
+    telemetry_emitted_ = true;
+    std::fprintf(
+        stderr,
+        "lcdif_tcon: telemetry jobs=%llu phases=%llu encode_p50_us=%llu "
+        "encode_p95_us=%llu encode_p99_us=%llu encode_max_us=%llu "
+        "missed_deadlines=%llu underflows=%llu safe_holds=%llu "
+        "hardware_faults=%llu\n",
+        static_cast<unsigned long long>(completed_jobs_),
+        static_cast<unsigned long long>(presented_phases_),
+        static_cast<unsigned long long>(encode_percentile(50)),
+        static_cast<unsigned long long>(encode_percentile(95)),
+        static_cast<unsigned long long>(encode_percentile(99)),
+        static_cast<unsigned long long>(encode_max_us_),
+        static_cast<unsigned long long>(missed_deadlines_),
+        static_cast<unsigned long long>(underflows_),
+        static_cast<unsigned long long>(safe_holds_),
+        static_cast<unsigned long long>(hardware_faults_));
+    std::fprintf(
+        stderr,
+        "lcdif_tcon: damage jobs=%llu requested_pixels=%llu "
+        "encoded_pixels=%llu amplification_max_milli=%llu "
+        "buffer_growths=%llu\n",
+        static_cast<unsigned long long>(damage_jobs_),
+        static_cast<unsigned long long>(damage_requested_pixels_),
+        static_cast<unsigned long long>(damage_encoded_pixels_),
+        static_cast<unsigned long long>(damage_amplification_max_milli_),
+        static_cast<unsigned long long>(job_buffer_growths_));
+  }
+
+  bool accept_pan_result(std::uint32_t slot, const Rm2PanResult &result) {
+    if (!result.operation_ok) {
       return false;
     }
     const std::chrono::nanoseconds interval(
         *profile_.runtime.display.phase_interval_nanoseconds);
-    const auto limit =
-        std::max(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                     std::chrono::milliseconds(50)),
-                 interval * 4);
-    return duration <= limit;
+    const std::chrono::nanoseconds limit = interval + interval / 20;
+    if (result.duration > limit) {
+      ++underflows_;
+      ++missed_deadlines_;
+      return false;
+    }
+    if (slot == kRm2IdleSlot) {
+      ++safe_holds_;
+    }
+    return true;
+  }
+
+  bool pan_with_deadline(std::uint32_t slot) {
+    Rm2PanResult result;
+    result.operation_ok =
+        device_->pan(slot, &result.duration) == kPlutoStatusOk;
+    return accept_pan_result(slot, result);
   }
 
   PlutoStatus validate_request(const PlutoPresentRequest &request) const {
@@ -1252,26 +1575,14 @@ private:
     return kPlutoStatusOk;
   }
 
-  std::optional<Job> build_job(const PlutoPresentRequest &request) {
-    PlutoRect damage = bounding_rect(request.damage, request.damage_count);
-    const bool regional_full = request.refresh_class == kPlutoRefreshFull &&
-                               (request.flags & kPlutoPresentFlagPenTruth) != 0;
-    if (request.refresh_class == kPlutoRefreshFull && !regional_full) {
-      damage = {
-          .x = 0,
-          .y = 0,
-          .width = static_cast<std::int32_t>(kRm2PanelWidth),
-          .height = static_cast<std::int32_t>(kRm2PanelHeight),
-      };
-    }
-
+  static Rm2PanelRect panel_rect_for_damage(const PlutoRect &damage) {
     constexpr std::int32_t kMaximumColumn =
         static_cast<std::int32_t>(kRm2PanelWidth - 1);
     constexpr std::int32_t kMaximumRow =
         static_cast<std::int32_t>(kRm2PanelHeight - 1);
     const std::int32_t user_right = damage.x + damage.width - 1;
     const std::int32_t user_bottom = damage.y + damage.height - 1;
-    Rm2PanelRect panel_rect{
+    return {
         .row_min = static_cast<std::uint16_t>((kMaximumRow - user_bottom) &
                                               ~std::int32_t{7}),
         .row_max = static_cast<std::uint16_t>(
@@ -1279,70 +1590,209 @@ private:
         .column_min = static_cast<std::uint16_t>(kMaximumColumn - user_right),
         .column_max = static_cast<std::uint16_t>(kMaximumColumn - damage.x),
     };
+  }
 
-    Job job;
-    job.frame_id = request.frame_id;
-    job.panel_rect = panel_rect;
-    job.suppress_unchanged =
-        request.refresh_class != kPlutoRefreshFull || regional_full;
-    const std::optional<int> temperature = read_powered_temperature(nullptr);
-    if (!temperature || !waveforms_.select(request.refresh_class, *temperature,
-                                           &job.waveform)) {
-      return std::nullopt;
+  static bool panel_rects_overlap(const Rm2PanelRect &left,
+                                  const Rm2PanelRect &right) {
+    return left.row_min <= right.row_max && right.row_min <= left.row_max &&
+           left.column_min <= right.column_max &&
+           right.column_min <= left.column_max;
+  }
+
+  static Rm2PanelRect union_panel_rects(const Rm2PanelRect &left,
+                                        const Rm2PanelRect &right) {
+    return {
+        .row_min = std::min(left.row_min, right.row_min),
+        .row_max = std::max(left.row_max, right.row_max),
+        .column_min = std::min(left.column_min, right.column_min),
+        .column_max = std::max(left.column_max, right.column_max),
+    };
+  }
+
+  bool build_job(const PlutoPresentRequest &request, Job *job) {
+    if (job == nullptr) {
+      return false;
     }
-    const std::size_t pixels =
-        panel_rect.row_count() * panel_rect.column_count();
-    job.transition_keys.resize(pixels);
-    job.target_pixels.resize(pixels);
-    for (std::uint32_t column = panel_rect.column_min;
-         column <= panel_rect.column_max; ++column) {
-      const std::size_t column_offset =
-          static_cast<std::size_t>(column - panel_rect.column_min) *
-          panel_rect.row_count();
-      for (std::uint32_t row = panel_rect.row_min; row <= panel_rect.row_max;
-           ++row) {
-        const std::size_t user_x = kRm2PanelWidth - 1U - column;
-        const std::size_t user_y = kRm2PanelHeight - 1U - row;
-        const std::size_t source_offset =
-            user_y * request.surface.stride_bytes + user_x * kBytesPerPixel;
-        const std::uint16_t pixel =
-            static_cast<std::uint16_t>(request.surface.pixels[source_offset]) |
-            static_cast<std::uint16_t>(
-                request.surface.pixels[source_offset + 1])
-                << 8U;
-        const std::size_t offset =
-            column_offset + static_cast<std::size_t>(row - panel_rect.row_min);
-        const std::size_t state_offset =
-            (kRm2PanelWidth - 1U - column) * kRm2PanelHeight + row;
-        const std::uint8_t old_level = settled_levels_[state_offset] & 0x0fU;
-        const std::uint8_t quantized_level = rgb565_to_rm2_level(pixel);
-        const std::uint8_t new_level =
-            request.refresh_class == kPlutoRefreshFast
-                ? rm2_fast_level(quantized_level)
-                : quantized_level;
-        job.target_pixels[offset] = pixel;
-        job.transition_keys[offset] =
-            static_cast<std::uint8_t>((new_level << 4U) | old_level);
+    job->frame_id = request.frame_id;
+    job->region_count = 0;
+    job->suppress_unchanged = request.refresh_class != kPlutoRefreshFull;
+    const std::uint64_t requested_pixels = rm2_damage_union_area(
+        std::span<const PlutoRect>(request.damage, request.damage_count));
+    for (std::size_t index = 0; index < request.damage_count; ++index) {
+      const PlutoRect &damage = request.damage[index];
+      Rm2PanelRect candidate = panel_rect_for_damage(damage);
+      for (std::size_t region = 0; region < job->region_count;) {
+        if (!panel_rects_overlap(candidate, job->regions[region].panel_rect)) {
+          ++region;
+          continue;
+        }
+        candidate =
+            union_panel_rects(candidate, job->regions[region].panel_rect);
+        job->regions[region] = job->regions[job->region_count - 1U];
+        --job->region_count;
+        region = 0;
+      }
+      job->regions[job->region_count++].panel_rect = candidate;
+    }
+    std::sort(
+        job->regions.begin(),
+        job->regions.begin() + static_cast<std::ptrdiff_t>(job->region_count),
+        [](const JobRegion &left, const JobRegion &right) {
+          return left.panel_rect.column_min < right.panel_rect.column_min ||
+                 (left.panel_rect.column_min == right.panel_rect.column_min &&
+                  left.panel_rect.row_min < right.panel_rect.row_min);
+        });
+
+    const std::optional<int> temperature = read_powered_temperature(nullptr);
+    if (!temperature || *temperature >= kMaximumBurstTemperatureMillidegrees ||
+        !waveforms_.select(request.refresh_class, *temperature,
+                           &job->waveform)) {
+      return false;
+    }
+    std::size_t pixels = 0;
+    for (std::size_t index = 0; index < job->region_count; ++index) {
+      JobRegion &region = job->regions[index];
+      region.pixel_offset = pixels;
+      pixels +=
+          region.panel_rect.row_count() * region.panel_rect.column_count();
+    }
+    ++damage_jobs_;
+    damage_requested_pixels_ += requested_pixels;
+    damage_encoded_pixels_ += pixels;
+    damage_amplification_max_milli_ = std::max(
+        damage_amplification_max_milli_,
+        requested_pixels == 0 ? std::uint64_t{0}
+                              : (static_cast<std::uint64_t>(pixels) * 1000U +
+                                 requested_pixels - 1U) /
+                                    requested_pixels);
+    if (job->transition_keys.capacity() < pixels ||
+        job->target_pixels.capacity() < pixels) {
+      ++job_buffer_growths_;
+    }
+    job->transition_keys.resize(pixels);
+    job->target_pixels.resize(pixels);
+    for (std::size_t region_index = 0; region_index < job->region_count;
+         ++region_index) {
+      const JobRegion &region = job->regions[region_index];
+      const Rm2PanelRect &panel_rect = region.panel_rect;
+      for (std::uint32_t column = panel_rect.column_min;
+           column <= panel_rect.column_max; ++column) {
+        const std::size_t column_offset =
+            region.pixel_offset +
+            static_cast<std::size_t>(column - panel_rect.column_min) *
+                panel_rect.row_count();
+        for (std::uint32_t row = panel_rect.row_min; row <= panel_rect.row_max;
+             ++row) {
+          const std::size_t user_x = kRm2PanelWidth - 1U - column;
+          const std::size_t user_y = kRm2PanelHeight - 1U - row;
+          const std::size_t source_offset =
+              user_y * request.surface.stride_bytes + user_x * kBytesPerPixel;
+          const std::uint16_t pixel =
+              static_cast<std::uint16_t>(
+                  request.surface.pixels[source_offset]) |
+              static_cast<std::uint16_t>(
+                  request.surface.pixels[source_offset + 1])
+                  << 8U;
+          const std::size_t offset =
+              column_offset +
+              static_cast<std::size_t>(row - panel_rect.row_min);
+          const std::size_t state_offset =
+              (kRm2PanelWidth - 1U - column) * kRm2PanelHeight + row;
+          const std::uint8_t old_level = settled_levels_[state_offset] & 0x0fU;
+          const std::uint8_t quantized_level = rgb565_to_rm2_level(pixel);
+          const std::uint8_t new_level =
+              request.refresh_class == kPlutoRefreshFast
+                  ? rm2_fast_level(quantized_level)
+                  : quantized_level;
+          job->target_pixels[offset] = pixel;
+          job->transition_keys[offset] =
+              static_cast<std::uint8_t>((new_level << 4U) | old_level);
+        }
       }
     }
-    return job;
+    return true;
   }
 
   void worker_main() {
+    const bool configured = configure_present_worker();
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      worker_configured_ = configured;
+      worker_started_ = true;
+    }
+    worker_start_cv_.notify_one();
+    if (!configured) {
+      return;
+    }
     for (;;) {
       Job job;
+      bool release_frequency_floor = false;
       {
         std::unique_lock<std::mutex> lock(state_mutex_);
-        work_cv_.wait(lock,
-                      [this] { return stopping_ || pending_job_.has_value(); });
-        if (stopping_ && !pending_job_.has_value()) {
-          return;
+        for (;;) {
+          if (stopping_ && !pending_job_.has_value()) {
+            lock.unlock();
+            std::string error;
+            if (!release_cpu_frequency_floor(&error)) {
+              std::fprintf(stderr,
+                           "lcdif_tcon: RM2 frequency guard restore failed "
+                           "at worker exit: %s\n",
+                           error.c_str());
+              (void)device_->blank_powerdown();
+              mark_lost();
+            }
+            return;
+          }
+          if (pending_job_.has_value()) {
+            job = std::move(*pending_job_);
+            pending_job_.reset();
+            break;
+          }
+          if (cpu_frequency_release_armed_) {
+            const bool interrupted = work_cv_.wait_until(
+                lock, cpu_frequency_release_deadline_, [this] {
+                  return stopping_ || pending_job_.has_value() ||
+                         !cpu_frequency_release_armed_;
+                });
+            if (!interrupted && !outstanding_ && cpu_frequency_release_armed_) {
+              cpu_frequency_release_armed_ = false;
+              release_frequency_floor = true;
+              break;
+            }
+            continue;
+          }
+          work_cv_.wait(lock, [this] {
+            return stopping_ || pending_job_.has_value() ||
+                   cpu_frequency_release_armed_;
+          });
         }
-        job = std::move(*pending_job_);
-        pending_job_.reset();
       }
 
-      const PlutoStatus status = execute(job);
+      if (release_frequency_floor) {
+        std::string error;
+        if (!release_cpu_frequency_floor(&error)) {
+          std::fprintf(stderr,
+                       "lcdif_tcon: RM2 frequency guard debounced restore "
+                       "failed: %s\n",
+                       error.c_str());
+          (void)device_->blank_powerdown();
+          mark_lost();
+          idle_cv_.notify_all();
+        }
+        continue;
+      }
+
+      PlutoStatus status = execute(job);
+      if (status != kPlutoStatusOk) {
+        std::string error;
+        if (!release_cpu_frequency_floor(&error)) {
+          std::fprintf(stderr,
+                       "lcdif_tcon: RM2 frequency guard restore failed after "
+                       "presentation fault: %s\n",
+                       error.c_str());
+        }
+        status = kPlutoStatusDeviceLost;
+      }
       PlutoPresentCompleteCallback callback = nullptr;
       void *callback_data = nullptr;
       {
@@ -1366,15 +1816,35 @@ private:
           // callback violation so the scan worker and ownership state live.
         }
       }
-      if (status == kPlutoStatusOk) {
+      {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        outstanding_ = false;
+        reusable_job_ = std::move(job);
+        if (status == kPlutoStatusOk) {
+          outstanding_ = false;
+          arm_cpu_frequency_release_locked();
+        }
       }
+      work_cv_.notify_one();
       idle_cv_.notify_all();
     }
   }
 
+  bool clear_job_phase_cells(std::span<std::byte> slot, const Job &job) const {
+    for (std::size_t index = 0; index < job.region_count; ++index) {
+      if (!clear_rm2_phase_cells(slot, job.regions[index].panel_rect)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   PlutoStatus execute(const Job &job) {
+    if (!cpu_frequency_floor_active()) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 frequency guard inactive before phase 0\n");
+      (void)device_->blank_powerdown();
+      return kPlutoStatusDeviceLost;
+    }
     const std::span<const std::uint8_t> drive_lut =
         job.suppress_unchanged ? job.waveform.partial_drive_lut
                                : job.waveform.drive_lut;
@@ -1383,51 +1853,114 @@ private:
       (void)device_->blank_powerdown();
       return kPlutoStatusInternal;
     }
-    std::optional<std::uint32_t> previous_slot;
-    for (std::uint32_t phase = 0; phase < job.waveform.phase_count; ++phase) {
-      const std::uint32_t slot_index = phase % kRm2ActiveSlots;
-      std::span<std::byte> slot = device_->slot(slot_index);
+    const std::chrono::nanoseconds phase_interval(
+        *profile_.runtime.display.phase_interval_nanoseconds);
+    const std::chrono::nanoseconds cadence_deadline =
+        phase_interval + phase_interval / 20;
+
+    std::array<Rm2PhaseRegion, kMaximumDamageRects> phase_regions{};
+    for (std::size_t index = 0; index < job.region_count; ++index) {
+      phase_regions[index] = {
+          .rect = job.regions[index].panel_rect,
+          .transition_offset = job.regions[index].pixel_offset,
+      };
+    }
+    const auto encode_phase = [&](std::uint32_t phase,
+                                  std::uint32_t slot_index) {
+      const auto encode_begin = std::chrono::steady_clock::now();
       const std::span<const std::uint8_t> phase_lut = drive_lut.subspan(
           static_cast<std::size_t>(phase) * 16U * 16U, 16U * 16U);
-      if (!encode_rm2_phase(slot, job.panel_rect, job.transition_keys,
-                            phase_lut)) {
-        (void)device_->blank_powerdown();
+      const bool encoded = phase_encoder_.encode_regions(
+          device_->slot(slot_index),
+          std::span<const Rm2PhaseRegion>(phase_regions.data(),
+                                          job.region_count),
+          job.transition_keys, phase_lut);
+      if (phase_encode_delay_for_testing_ > std::chrono::nanoseconds::zero()) {
+        std::this_thread::sleep_for(phase_encode_delay_for_testing_);
+      }
+      const auto encode_duration =
+          std::chrono::steady_clock::now() - encode_begin;
+      record_encode_duration(encode_duration);
+      if (!encoded) {
         return kPlutoStatusInternal;
       }
+      if (encode_duration > phase_interval) {
+        ++missed_deadlines_;
+        ++underflows_;
+        return kPlutoStatusDeviceLost;
+      }
+      return kPlutoStatusOk;
+    };
 
-      if (device_->is_blanked()) {
-        if (device_->unblank(slot_index) != kPlutoStatusOk ||
-            !pan_with_deadline(kRm2IdleSlot)) {
-          (void)device_->blank_powerdown();
-          return kPlutoStatusDeviceLost;
-        }
-        if (!clear_rm2_phase_cells(slot, job.panel_rect)) {
-          (void)device_->blank_powerdown();
-          return kPlutoStatusInternal;
-        }
-      } else if (!pan_with_deadline(slot_index)) {
+    if (device_->is_blanked()) {
+      (void)device_->blank_powerdown();
+      return kPlutoStatusDeviceLost;
+    }
+    PlutoStatus encode_status = encode_phase(0, 0);
+    if (encode_status != kPlutoStatusOk) {
+      (void)device_->blank_powerdown();
+      return encode_status;
+    }
+
+    // Job construction and RGB quantization leave the continuously scanning
+    // idle slot at an arbitrary point in its frame. Wait for one explicit
+    // idle boundary before phase zero, then issue every subsequent pan at the
+    // completion boundary of its predecessor.
+    if (!pan_with_deadline(kRm2IdleSlot)) {
+      (void)device_->blank_powerdown();
+      return kPlutoStatusDeviceLost;
+    }
+
+    auto pan_begin = std::chrono::steady_clock::now();
+    if (!pan_worker_.begin(0)) {
+      (void)device_->blank_powerdown();
+      return kPlutoStatusDeviceLost;
+    }
+    for (std::uint32_t phase = 0; phase < job.waveform.phase_count; ++phase) {
+      PlutoStatus next_encode_status = kPlutoStatusOk;
+      if (phase + 1U < job.waveform.phase_count) {
+        next_encode_status =
+            encode_phase(phase + 1U, (phase + 1U) % kRm2ActiveSlots);
+      }
+
+      Rm2PanResult pan_result;
+      if (!pan_worker_.finish(&pan_result) ||
+          !accept_pan_result(phase % kRm2ActiveSlots, pan_result)) {
         (void)device_->blank_powerdown();
         return kPlutoStatusDeviceLost;
       }
-
-      if (previous_slot.has_value() &&
-          !clear_rm2_phase_cells(device_->slot(*previous_slot),
-                                 job.panel_rect)) {
+      ++presented_phases_;
+      const auto boundary = std::chrono::steady_clock::now();
+      const auto cadence = boundary - pan_begin;
+      if (cadence > cadence_deadline) {
+        ++missed_deadlines_;
+        if (cadence > phase_interval * 2) {
+          ++underflows_;
+        }
         (void)device_->blank_powerdown();
-        return kPlutoStatusInternal;
+        return kPlutoStatusDeviceLost;
       }
-      previous_slot = device_->is_blanked()
-                          ? std::optional<std::uint32_t>{}
-                          : std::optional<std::uint32_t>{slot_index};
+      if (next_encode_status != kPlutoStatusOk) {
+        (void)device_->blank_powerdown();
+        return next_encode_status;
+      }
+      if (phase + 1U < job.waveform.phase_count) {
+        pan_begin = std::chrono::steady_clock::now();
+        if (!pan_worker_.begin((phase + 1U) % kRm2ActiveSlots)) {
+          (void)device_->blank_powerdown();
+          return kPlutoStatusDeviceLost;
+        }
+      }
     }
     if (!pan_with_deadline(kRm2IdleSlot)) {
       (void)device_->blank_powerdown();
       return kPlutoStatusDeviceLost;
     }
-    if (previous_slot.has_value() &&
-        !clear_rm2_phase_cells(device_->slot(*previous_slot), job.panel_rect)) {
-      (void)device_->blank_powerdown();
-      return kPlutoStatusInternal;
+    for (std::uint32_t slot = 0; slot < kRm2ActiveSlots; ++slot) {
+      if (!clear_job_phase_cells(device_->slot(slot), job)) {
+        (void)device_->blank_powerdown();
+        return kPlutoStatusInternal;
+      }
     }
     commit(job);
     return kPlutoStatusOk;
@@ -1435,30 +1968,36 @@ private:
 
   void commit(const Job &job) {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    const std::size_t rows = job.panel_rect.row_count();
-    for (std::uint32_t column = job.panel_rect.column_min;
-         column <= job.panel_rect.column_max; ++column) {
-      const std::size_t target_base =
-          static_cast<std::size_t>(column - job.panel_rect.column_min) * rows;
-      const std::size_t state_base =
-          (kRm2PanelWidth - 1U - column) * kRm2PanelHeight;
-      for (std::uint32_t row = job.panel_rect.row_min;
-           row <= job.panel_rect.row_max; ++row) {
-        const std::size_t target_offset =
-            target_base +
-            static_cast<std::size_t>(row - job.panel_rect.row_min);
-        settled_levels_[state_base + row] =
-            static_cast<std::uint8_t>(job.transition_keys[target_offset] >> 4U);
-        const std::size_t user_x = kRm2PanelWidth - 1U - column;
-        const std::size_t user_y = kRm2PanelHeight - 1U - row;
-        mirror_[user_y * kRm2PanelWidth + user_x] =
-            job.target_pixels[target_offset];
+    for (std::size_t region_index = 0; region_index < job.region_count;
+         ++region_index) {
+      const JobRegion &region = job.regions[region_index];
+      const Rm2PanelRect &panel_rect = region.panel_rect;
+      const std::size_t rows = panel_rect.row_count();
+      for (std::uint32_t column = panel_rect.column_min;
+           column <= panel_rect.column_max; ++column) {
+        const std::size_t target_base =
+            region.pixel_offset +
+            static_cast<std::size_t>(column - panel_rect.column_min) * rows;
+        const std::size_t state_base =
+            (kRm2PanelWidth - 1U - column) * kRm2PanelHeight;
+        for (std::uint32_t row = panel_rect.row_min; row <= panel_rect.row_max;
+             ++row) {
+          const std::size_t target_offset =
+              target_base + static_cast<std::size_t>(row - panel_rect.row_min);
+          settled_levels_[state_base + row] = static_cast<std::uint8_t>(
+              job.transition_keys[target_offset] >> 4U);
+          const std::size_t user_x = kRm2PanelWidth - 1U - column;
+          const std::size_t user_y = kRm2PanelHeight - 1U - row;
+          mirror_[user_y * kRm2PanelWidth + user_x] =
+              job.target_pixels[target_offset];
+        }
       }
     }
   }
 
-  void finish_failed_admission(PlutoStatus status) {
+  void finish_failed_admission(PlutoStatus status, Job &&job) {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    reusable_job_ = std::move(job);
     outstanding_ = false;
     if (status == kPlutoStatusDeviceLost || status == kPlutoStatusInternal) {
       lost_ = true;
@@ -1486,6 +2025,11 @@ private:
   Rm2TemperatureReader temperature_reader_;
   Rm2PowerReadyReader power_ready_reader_;
   Rm2WaveformProgram waveforms_;
+  Rm2PhaseEncoder phase_encoder_;
+  Rm2PanWorker pan_worker_;
+  Rm2CpuFrequencyBurstLease cpu_frequency_lease_;
+  std::chrono::milliseconds cpu_frequency_debounce_{50};
+  std::chrono::nanoseconds phase_encode_delay_for_testing_{};
   std::string handoff_path_;
   GlassHandoffClock (*handoff_now_)() = glass_handoff_now;
   GlassHandoffIdentity handoff_identity_{};
@@ -1495,16 +2039,20 @@ private:
 
   mutable std::mutex state_mutex_;
   mutable std::mutex frame_mutex_;
+  mutable std::mutex cpu_frequency_mutex_;
   std::mutex admission_mutex_;
   std::condition_variable work_cv_;
   std::condition_variable idle_cv_;
+  std::condition_variable worker_start_cv_;
   std::thread worker_;
   std::optional<Job> pending_job_;
+  Job reusable_job_;
   std::vector<std::uint8_t> settled_levels_;
   std::vector<std::uint16_t> mirror_;
   std::vector<std::uint8_t> incoming_renderer_payload_;
   std::vector<std::uint8_t> incoming_settled_levels_;
   std::vector<std::uint16_t> incoming_mirror_;
+  std::array<std::uint64_t, kEncodeHistogramBuckets> encode_histogram_{};
   PlutoPresentCompleteCallback callback_ = nullptr;
   void *callback_user_data_ = nullptr;
   std::uint32_t handoff_chain_next_ = 0;
@@ -1520,8 +2068,24 @@ private:
   bool stopping_ = false;
   bool suspended_ = false;
   bool lost_ = false;
+  bool worker_started_ = false;
+  bool worker_configured_ = false;
+  bool telemetry_active_ = false;
+  bool telemetry_emitted_ = false;
+  bool cpu_frequency_release_armed_ = false;
+  std::chrono::steady_clock::time_point cpu_frequency_release_deadline_{};
   std::uint64_t completed_jobs_ = 0;
   std::uint64_t hardware_faults_ = 0;
+  std::uint64_t presented_phases_ = 0;
+  std::uint64_t missed_deadlines_ = 0;
+  std::uint64_t underflows_ = 0;
+  std::uint64_t safe_holds_ = 0;
+  std::uint64_t encode_max_us_ = 0;
+  std::uint64_t job_buffer_growths_ = 0;
+  std::uint64_t damage_jobs_ = 0;
+  std::uint64_t damage_requested_pixels_ = 0;
+  std::uint64_t damage_encoded_pixels_ = 0;
+  std::uint64_t damage_amplification_max_milli_ = 0;
 };
 
 LcdifTconDisplayBackend::LcdifTconDisplayBackend(

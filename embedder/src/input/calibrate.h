@@ -2,7 +2,6 @@
 #define PLUTO_SRC_INPUT_CALIBRATE_H_
 
 #include <optional>
-#include <string>
 #include <vector>
 
 #include "input/transform.h"
@@ -20,27 +19,21 @@ struct CalibrationResidual {
 };
 
 struct CalibrationModel {
-  int version = 1;
   AffineTransform affine;
   CalibrationResidual residual;
 };
 
-std::vector<Point> l_shape_corner_targets(float panel_width,
-                                          float panel_height,
+std::vector<Point> l_shape_corner_targets(float panel_width, float panel_height,
                                           float inset_px);
 
-std::optional<CalibrationModel> solve_affine_calibration(
-    const std::vector<CalibrationPoint>& points);
+std::optional<CalibrationModel>
+solve_affine_calibration(const std::vector<CalibrationPoint> &points);
 
-std::optional<CalibrationModel> solve_l_shape_corner_calibration(
-    const std::vector<Point>& raw_medians,
-    float panel_width,
-    float panel_height,
-    float inset_px);
+std::optional<CalibrationModel>
+solve_l_shape_corner_calibration(const std::vector<Point> &raw_medians,
+                                 float panel_width, float panel_height,
+                                 float inset_px);
 
-std::string serialize_calibration(const CalibrationModel& model);
-std::optional<CalibrationModel> deserialize_calibration(const std::string& json);
+} // namespace pluto
 
-}  // namespace pluto
-
-#endif  // PLUTO_SRC_INPUT_CALIBRATE_H_
+#endif // PLUTO_SRC_INPUT_CALIBRATE_H_

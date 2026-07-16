@@ -51,12 +51,3 @@ final class ArtifactVerificationException extends PlutoException {
     super.remediation,
   });
 }
-
-/// A requested device operation is unavailable in the current backend.
-final class DeviceOperationNotImplementedException extends PlutoException {
-  /// Creates a device-backend capability failure.
-  const DeviceOperationNotImplementedException({
-    required super.message,
-    super.remediation,
-  }) : super(exitCode: ExitCodes.toolBug);
-}

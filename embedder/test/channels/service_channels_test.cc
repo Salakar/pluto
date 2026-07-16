@@ -19,57 +19,59 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "channels/standard_codec.h"
 #include "channels/wpa_supplicant_client.h"
+#include "generated/device_profiles.h"
 #include "gtest/gtest.h"
 
 namespace {
 
 namespace fs = std::filesystem;
 
-std::string read_file_or_empty(const fs::path& path) {
+std::string read_file_or_empty(const fs::path &path) {
   std::ifstream in(path, std::ios::binary);
   std::ostringstream buffer;
   buffer << in.rdbuf();
   return buffer.str();
 }
 
-void write_file(const fs::path& path, const std::string& content) {
+void write_file(const fs::path &path, const std::string &content) {
   fs::create_directories(path.parent_path());
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   out << content;
 }
 
-FlutterPlatformMessage message_for(const char* channel,
-                                   const std::vector<uint8_t>& payload) {
+FlutterPlatformMessage message_for(const char *channel,
+                                   const std::vector<uint8_t> &payload) {
   FlutterPlatformMessage message{};
   message.struct_size = sizeof(message);
   message.channel = channel;
   message.message = payload.empty() ? nullptr : payload.data();
   message.message_size = payload.size();
   message.response_handle =
-      reinterpret_cast<const FlutterPlatformMessageResponseHandle*>(1);
+      reinterpret_cast<const FlutterPlatformMessageResponseHandle *>(1);
   return message;
 }
 
 pluto::StandardValue args_map(
-    std::initializer_list<std::pair<pluto::StandardValue,
-                                    pluto::StandardValue>> entries) {
+    std::initializer_list<std::pair<pluto::StandardValue, pluto::StandardValue>>
+        entries) {
   return pluto::make_map(entries);
 }
 
-const pluto::StandardValue* map_value(const pluto::StandardValue& value,
-                                        const char* key) {
-  const pluto::StandardValue::Map* map = value.map();
+const pluto::StandardValue *map_value(const pluto::StandardValue &value,
+                                      const char *key) {
+  const pluto::StandardValue::Map *map = value.map();
   if (map == nullptr) {
     return nullptr;
   }
-  for (const auto& [k, v] : *map) {
-    const std::string* name = k.string();
+  for (const auto &[k, v] : *map) {
+    const std::string *name = k.string();
     if (name != nullptr && *name == key) {
       return &v;
     }
@@ -78,8 +80,8 @@ const pluto::StandardValue* map_value(const pluto::StandardValue& value,
 }
 
 class FakeWpaSupplicant {
- public:
-  explicit FakeWpaSupplicant(const fs::path& control_directory) {
+public:
+  explicit FakeWpaSupplicant(const fs::path &control_directory) {
     fs::create_directories(control_directory);
     socket_path_ = control_directory / "wlan0";
     fd_ = ::socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -99,7 +101,7 @@ class FakeWpaSupplicant {
         offsetof(sockaddr_un, sun_path) + path.size() + 1);
 #endif
     ::unlink(path.c_str());
-    if (::bind(fd_, reinterpret_cast<const sockaddr*>(&address),
+    if (::bind(fd_, reinterpret_cast<const sockaddr *>(&address),
                static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) +
                                       path.size() + 1)) != 0) {
       const std::string reason = std::strerror(errno);
@@ -123,8 +125,8 @@ class FakeWpaSupplicant {
     fs::remove(socket_path_.parent_path(), ec);
   }
 
-  FakeWpaSupplicant(const FakeWpaSupplicant&) = delete;
-  FakeWpaSupplicant& operator=(const FakeWpaSupplicant&) = delete;
+  FakeWpaSupplicant(const FakeWpaSupplicant &) = delete;
+  FakeWpaSupplicant &operator=(const FakeWpaSupplicant &) = delete;
 
   std::vector<std::string> commands() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -136,8 +138,8 @@ class FakeWpaSupplicant {
     failed_command_ = std::move(command);
   }
 
- private:
-  std::string response_for(const std::string& command) {
+private:
+  std::string response_for(const std::string &command) {
     std::lock_guard<std::mutex> lock(mutex_);
     commands_.push_back(command);
     if (!failed_command_.empty() && command.rfind(failed_command_, 0) == 0) {
@@ -203,14 +205,14 @@ class FakeWpaSupplicant {
       socklen_t peer_length = sizeof(peer);
       const ssize_t received =
           ::recvfrom(fd_, buffer, sizeof(buffer), 0,
-                     reinterpret_cast<sockaddr*>(&peer), &peer_length);
+                     reinterpret_cast<sockaddr *>(&peer), &peer_length);
       if (received < 0) {
         continue;
       }
       const std::string response =
           response_for(std::string(buffer, static_cast<size_t>(received)));
       ::sendto(fd_, response.data(), response.size(), 0,
-               reinterpret_cast<const sockaddr*>(&peer), peer_length);
+               reinterpret_cast<const sockaddr *>(&peer), peer_length);
     }
   }
 
@@ -227,7 +229,7 @@ class FakeWpaSupplicant {
 // down on destruction. Plain struct: the gtest compatibility shim used on
 // hosts without GoogleTest only supports TEST, not TEST_F.
 struct ServiceHarness {
-  ServiceHarness() {
+  explicit ServiceHarness(std::string_view profile_id = "move") {
     static std::atomic<int> counter{0};
     root = fs::temp_directory_path() /
            ("pluto_service_channels_" + std::to_string(::getpid()) + "_" +
@@ -237,43 +239,67 @@ struct ServiceHarness {
     paths.apps_dir = (root / "apps").string();
     paths.data_dir = (root / "data").string();
     paths.config_dir = (root / "config").string();
-    paths.backlight_dir = (root / "backlight").string();
-    paths.vpdd_length_file = (root / "vpdd_length").string();
+    frontlight_brightness_path = root / "backlight" / "brightness";
+    vpdd_length_path = root / "vpdd_length";
     paths.power_supply_dir = (root / "power_supply").string();
     paths.wpa_control_dir = (root / "missing-wpa-control").string();
     paths.wifi_settings_file = (root / "csl.conf").string();
     paths.systemctl = (root / "missing-systemctl").string();
     paths.network_class_dir = (root / "network").string();
-    write_file(paths.vpdd_length_file, "30000\n");
     write_file(paths.wifi_settings_file, "wifi = on\n");
 
+    const pluto::GeneratedDeviceProfile *profile =
+        pluto::generated_device_profile_by_id(profile_id);
+    if (profile == nullptr) {
+      throw std::invalid_argument("Unknown generated device profile");
+    }
+    device_model = std::string(profile->wire_model);
+    device_codename = std::string(profile->codename);
+    has_frontlight = !profile->runtime.frontlight_brightness_path.empty();
+    has_vpdd = !profile->runtime.vpdd_timeout_path.empty();
+    if (has_vpdd) {
+      write_file(vpdd_length_path, "30000\n");
+    }
+
+    registry.set_context(make_context(false));
+    pluto::register_service_channels(&registry, paths);
+  }
+
+  pluto::ChannelContext make_context(bool enable_hibernation) {
     pluto::ChannelContext context;
-    context.presenter_name = "native";
+    context.device_model = device_model;
+    context.device_codename = device_codename;
+    if (has_frontlight) {
+      context.frontlight_brightness_path = frontlight_brightness_path.string();
+    }
+    if (has_vpdd) {
+      context.vpdd_length_path = vpdd_length_path.string();
+    }
     context.request_shutdown = [this] { ++shutdown_requests; };
+    if (enable_hibernation) {
+      context.request_hibernate = [this] { ++hibernate_requests; };
+    }
     context.system_ui_ready = [this] {
       ++system_ui_ready_requests;
       return true;
     };
-    registry.set_context(std::move(context));
-    pluto::register_service_channels(&registry, paths);
+    return context;
   }
 
   void install_fake_wpa_supplicant() {
     static std::atomic<int> counter{0};
     paths.wpa_control_dir =
-        (fs::path("/tmp") /
-         ("pluto_test_wpa_" + std::to_string(::getpid()) + "_" +
-          std::to_string(counter.fetch_add(1))))
+        (fs::path("/tmp") / ("pluto_test_wpa_" + std::to_string(::getpid()) +
+                             "_" + std::to_string(counter.fetch_add(1))))
             .string();
     paths.systemctl = (root / "systemctl").string();
     write_file(paths.wifi_settings_file,
                "telemetry = off\n# preserve this comment\nwifi = on\n");
-    write_file(paths.systemctl,
-               "#!/bin/sh\n"
-               "printf '%s\\n' \"$*\" >> '" +
-                   (root / "systemctl.log").string() +
-                   "'\n"
-                   "exit 0\n");
+    write_file(paths.systemctl, "#!/bin/sh\n"
+                                "printf '%s\\n' \"$*\" >> '" +
+                                    (root / "systemctl.log").string() +
+                                    "'\n"
+                                    "exit 0\n");
     ::chmod(paths.systemctl.c_str(), 0755);
     fake_wpa = std::make_unique<FakeWpaSupplicant>(paths.wpa_control_dir);
 
@@ -281,13 +307,7 @@ struct ServiceHarness {
     pluto::register_service_channels(&registry, paths);
   }
 
-  void enable_hibernation() {
-    pluto::ChannelContext context;
-    context.presenter_name = "native";
-    context.request_shutdown = [this] { ++shutdown_requests; };
-    context.request_hibernate = [this] { ++hibernate_requests; };
-    registry.set_context(std::move(context));
-  }
+  void enable_hibernation() { registry.set_context(make_context(true)); }
 
   ~ServiceHarness() {
     fake_wpa.reset();
@@ -298,9 +318,9 @@ struct ServiceHarness {
   // Sends a standard method call and returns the envelope status byte
   // (0 success, 1 error) plus the decoded success value (null for errors:
   // error envelopes hold three concatenated values, not one).
-  std::pair<uint8_t, pluto::StandardValue> invoke(
-      const char* channel, const std::string& method,
-      pluto::StandardValue arguments = {}) {
+  std::pair<uint8_t, pluto::StandardValue>
+  invoke(const char *channel, const std::string &method,
+         pluto::StandardValue arguments = {}) {
     const std::vector<uint8_t> payload =
         pluto::StandardMethodCodec::encode_method_call(
             pluto::MethodCall{method, std::move(arguments)});
@@ -308,7 +328,7 @@ struct ServiceHarness {
     std::vector<uint8_t> response;
     registry.handle_message(
         message,
-        [&response](const pluto::PlatformResponse& data) { response = data; });
+        [&response](const pluto::PlatformResponse &data) { response = data; });
     if (response.empty()) {
       return {255, {}};
     }
@@ -316,15 +336,21 @@ struct ServiceHarness {
       return {response[0], {}};
     }
     std::optional<pluto::StandardValue> value =
-        pluto::StandardMethodCodec::decode_success_envelope(
-            response.data(), response.size());
+        pluto::StandardMethodCodec::decode_success_envelope(response.data(),
+                                                            response.size());
     return {response[0], value.value_or(pluto::StandardValue())};
   }
 
   fs::path root;
+  fs::path frontlight_brightness_path;
+  fs::path vpdd_length_path;
   pluto::ServicePaths paths;
   pluto::ChannelRegistry registry;
   std::unique_ptr<FakeWpaSupplicant> fake_wpa;
+  std::string device_model;
+  std::string device_codename;
+  bool has_frontlight = false;
+  bool has_vpdd = false;
   int shutdown_requests = 0;
   int hibernate_requests = 0;
   int system_ui_ready_requests = 0;
@@ -332,12 +358,11 @@ struct ServiceHarness {
 
 TEST(ServiceChannels, LaunchWritesControlFileAndRequestsShutdown) {
   ServiceHarness harness;
-  const auto [status, value] =
-      harness.invoke("pluto/session", "launch",
-                     args_map({{"appId", "dev.example.counter"}}));
+  const auto [status, value] = harness.invoke(
+      "pluto/session", "launch", args_map({{"appId", "dev.example.counter"}}));
 
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* ok = map_value(value, "ok");
+  const pluto::StandardValue *ok = map_value(value, "ok");
   ASSERT_NE(ok, nullptr);
   EXPECT_TRUE(ok->boolean() != nullptr && *ok->boolean());
   EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.run_dir) / "launch"),
@@ -362,7 +387,7 @@ TEST(ServiceChannels, ForceStopPublishesBackgroundRequestWithoutHandoff) {
                      args_map({{"appId", "dev.example.counter"}}));
 
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* ok = map_value(value, "ok");
+  const pluto::StandardValue *ok = map_value(value, "ok");
   ASSERT_NE(ok, nullptr);
   EXPECT_TRUE(ok->boolean() != nullptr && *ok->boolean());
   EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.run_dir) / "force-stop"),
@@ -378,18 +403,18 @@ TEST(ServiceChannels, ForceStopRejectsLauncherAndUnsafeIds) {
                         args_map({{"appId", "dev.pluto.launcher"}}))
                 .first,
             1);
-  EXPECT_EQ(harness
-                .invoke("pluto/session", "forceStop",
-                        args_map({{"appId", "../bad"}}))
-                .first,
-            1);
+  EXPECT_EQ(
+      harness
+          .invoke("pluto/session", "forceStop", args_map({{"appId", "../bad"}}))
+          .first,
+      1);
   EXPECT_FALSE(fs::exists(fs::path(harness.paths.run_dir) / "force-stop"));
 }
 
 TEST(ServiceChannels, WarmHandoffsHibernateButStockStillShutsDown) {
   ServiceHarness harness;
   harness.enable_hibernation();
-  write_file(fs::path(harness.paths.backlight_dir) / "brightness", "913\n");
+  write_file(harness.frontlight_brightness_path, "913\n");
 
   EXPECT_EQ(harness
                 .invoke("pluto/session", "launch",
@@ -413,12 +438,11 @@ TEST(ServiceChannels, SwitcherInfoPreservesSupervisorRecencyOrder) {
              "dev.pluto.launcher\n"
              "dev.pluto.validation_lab\n");
 
-  const auto [status, value] =
-      harness.invoke("pluto/session", "switcherInfo");
+  const auto [status, value] = harness.invoke("pluto/session", "switcherInfo");
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* active = map_value(value, "active");
-  const pluto::StandardValue* origin = map_value(value, "originAppId");
-  const pluto::StandardValue* apps = map_value(value, "apps");
+  const pluto::StandardValue *active = map_value(value, "active");
+  const pluto::StandardValue *origin = map_value(value, "originAppId");
+  const pluto::StandardValue *apps = map_value(value, "apps");
   ASSERT_NE(active, nullptr);
   ASSERT_NE(origin, nullptr);
   ASSERT_NE(apps, nullptr);
@@ -427,8 +451,7 @@ TEST(ServiceChannels, SwitcherInfoPreservesSupervisorRecencyOrder) {
   EXPECT_EQ(*origin->string(), "dev.pluto.codex");
   ASSERT_NE(apps->list(), nullptr);
   ASSERT_EQ(apps->list()->size(), 1u);
-  const pluto::StandardValue* first_id =
-      map_value((*apps->list())[0], "appId");
+  const pluto::StandardValue *first_id = map_value((*apps->list())[0], "appId");
   ASSERT_NE(first_id, nullptr);
   EXPECT_EQ(*first_id->string(), "dev.pluto.validation_lab");
 }
@@ -444,11 +467,10 @@ TEST(ServiceChannels, PowerMenuInfoReturnsSupervisorOrigin) {
   write_file(fs::path(harness.paths.run_dir) / "power-menu-active",
              "dev.example.paper\n");
 
-  const auto [status, value] =
-      harness.invoke("pluto/session", "powerMenuInfo");
+  const auto [status, value] = harness.invoke("pluto/session", "powerMenuInfo");
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* active = map_value(value, "active");
-  const pluto::StandardValue* origin = map_value(value, "originAppId");
+  const pluto::StandardValue *active = map_value(value, "active");
+  const pluto::StandardValue *origin = map_value(value, "originAppId");
   ASSERT_NE(active, nullptr);
   ASSERT_NE(origin, nullptr);
   EXPECT_TRUE(active->boolean() != nullptr && *active->boolean());
@@ -461,21 +483,19 @@ TEST(ServiceChannels, StatusInfoReturnsOriginAndPreview) {
   write_file(fs::path(harness.paths.run_dir) / "status-active",
              "dev.example.paper\n");
 
-  const auto [status, value] =
-      harness.invoke("pluto/session", "statusInfo");
+  const auto [status, value] = harness.invoke("pluto/session", "statusInfo");
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* active = map_value(value, "active");
-  const pluto::StandardValue* origin = map_value(value, "originAppId");
-  const pluto::StandardValue* preview = map_value(value, "previewPath");
+  const pluto::StandardValue *active = map_value(value, "active");
+  const pluto::StandardValue *origin = map_value(value, "originAppId");
+  const pluto::StandardValue *preview = map_value(value, "previewPath");
   ASSERT_NE(active, nullptr);
   ASSERT_NE(origin, nullptr);
   ASSERT_NE(preview, nullptr);
   EXPECT_TRUE(active->boolean() != nullptr && *active->boolean());
   EXPECT_EQ(*origin->string(), "dev.example.paper");
-  EXPECT_EQ(*preview->string(),
-            (fs::path(harness.paths.run_dir) / "previews" /
-             "dev.example.paper.bmp")
-                .string());
+  EXPECT_EQ(*preview->string(), (fs::path(harness.paths.run_dir) / "previews" /
+                                 "dev.example.paper.bmp")
+                                    .string());
 }
 
 TEST(ServiceChannels, HomeAndExitToStockTouchControlFiles) {
@@ -498,7 +518,7 @@ TEST(ServiceChannels, PowerOffPublishesSupervisorRequestAndHibernates) {
 
   const auto [status, value] = harness.invoke("pluto/session", "powerOff");
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* ok = map_value(value, "ok");
+  const pluto::StandardValue *ok = map_value(value, "ok");
   ASSERT_NE(ok, nullptr);
   EXPECT_TRUE(ok->boolean() != nullptr && *ok->boolean());
   EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.run_dir) / "poweroff"),
@@ -517,27 +537,13 @@ TEST(ServiceChannels, PowerOffRejectsCallsOutsideActivePowerMenu) {
   EXPECT_EQ(harness.shutdown_requests, 0);
 }
 
-TEST(ServiceChannels, CancelLaunchRemovesControlFile) {
-  ServiceHarness harness;
-  harness.invoke("pluto/session", "launch",
-                 args_map({{"appId", "dev.example.counter"}}));
-  ASSERT_TRUE(fs::exists(fs::path(harness.paths.run_dir) / "launch"));
-
-  EXPECT_EQ(harness
-                .invoke("pluto/session", "cancelLaunch",
-                        args_map({{"appId", "dev.example.counter"}}))
-                .first,
-            0);
-  EXPECT_FALSE(fs::exists(fs::path(harness.paths.run_dir) / "launch"));
-}
-
 TEST(ServiceChannels, SleepNowRequestsStandbyAndShutdown) {
   ServiceHarness harness;
-  write_file(fs::path(harness.paths.backlight_dir) / "brightness", "913\n");
+  write_file(harness.frontlight_brightness_path, "913\n");
   const auto [status, value] = harness.invoke("pluto/session", "sleepNow");
 
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* ok = map_value(value, "ok");
+  const pluto::StandardValue *ok = map_value(value, "ok");
   ASSERT_NE(ok, nullptr);
   EXPECT_TRUE(ok->boolean() != nullptr && *ok->boolean());
   EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.run_dir) / "standby"),
@@ -565,12 +571,12 @@ TEST(ServiceChannels, SuspendNowWritesControlFileAndRequestsShutdown) {
   const auto [status, value] = harness.invoke("pluto/session", "suspendNow");
 
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* ok = map_value(value, "ok");
+  const pluto::StandardValue *ok = map_value(value, "ok");
   ASSERT_NE(ok, nullptr);
   EXPECT_TRUE(ok->boolean() != nullptr && *ok->boolean());
   EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.run_dir) / "suspend"),
             "system\n");
-  EXPECT_EQ(read_file_or_empty(harness.paths.vpdd_length_file), "0\n");
+  EXPECT_EQ(read_file_or_empty(harness.vpdd_length_path), "0\n");
   EXPECT_EQ(harness.shutdown_requests, 1);
 }
 
@@ -579,117 +585,152 @@ TEST(ServiceChannels, SuspendNowWriteFailureDoesNotRequestShutdown) {
   write_file(harness.paths.run_dir, "not a directory");
 
   EXPECT_EQ(harness.invoke("pluto/session", "suspendNow").first, 1);
-  EXPECT_EQ(read_file_or_empty(harness.paths.vpdd_length_file), "30000\n");
+  EXPECT_EQ(read_file_or_empty(harness.vpdd_length_path), "30000\n");
   EXPECT_EQ(harness.shutdown_requests, 0);
 }
 
 TEST(ServiceChannels, SuspendNowRequiresReadableVpddLength) {
   ServiceHarness harness;
-  fs::remove(harness.paths.vpdd_length_file);
+  fs::remove(harness.vpdd_length_path);
 
   EXPECT_EQ(harness.invoke("pluto/session", "suspendNow").first, 1);
   EXPECT_FALSE(fs::exists(fs::path(harness.paths.run_dir) / "suspend"));
   EXPECT_EQ(harness.shutdown_requests, 0);
 }
 
-TEST(ServiceChannels, InfoReportsPresenterWithoutProductBackendMode) {
+TEST(ServiceChannels, FrontlightReadMatchesPackageContract) {
   ServiceHarness harness;
-  const auto [status, value] = harness.invoke("pluto/session", "info");
-
-  EXPECT_EQ(status, 0);
-  const pluto::StandardValue* presenter = map_value(value, "presenter");
-  ASSERT_NE(presenter, nullptr);
-  ASSERT_NE(presenter->string(), nullptr);
-  EXPECT_EQ(*presenter->string(), "native");
-}
-
-TEST(ServiceChannels, FrontlightGetReadsSysfs) {
-  ServiceHarness harness;
-  write_file(fs::path(harness.paths.backlight_dir) / "brightness", "1600\n");
-  write_file(fs::path(harness.paths.backlight_dir) / "max_brightness",
+  write_file(harness.frontlight_brightness_path, "1600\n");
+  write_file(harness.frontlight_brightness_path.parent_path() /
+                 "max_brightness",
              "2047\n");
 
   const auto [status, value] =
-      harness.invoke("pluto/settings", "frontlightGet");
+      harness.invoke("pluto/settings", "frontlight.read");
 
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue* raw = map_value(value, "raw");
-  const pluto::StandardValue* max = map_value(value, "max");
+  const pluto::StandardValue *raw = map_value(value, "raw");
+  const pluto::StandardValue *max = map_value(value, "maxRaw");
   ASSERT_NE(raw, nullptr);
   ASSERT_NE(max, nullptr);
   EXPECT_EQ(*raw->integer(), 1600);
   EXPECT_EQ(*max->integer(), 2047);
 }
 
-TEST(ServiceChannels, FrontlightSetClampsToRange) {
+TEST(ServiceChannels, FrontlightWriteClampsToRange) {
   ServiceHarness harness;
-  write_file(fs::path(harness.paths.backlight_dir) / "brightness", "0\n");
-  write_file(fs::path(harness.paths.backlight_dir) / "max_brightness",
+  write_file(harness.frontlight_brightness_path, "0\n");
+  write_file(harness.frontlight_brightness_path.parent_path() /
+                 "max_brightness",
              "2047\n");
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "frontlightSet",
+                .invoke("pluto/settings", "frontlight.write",
                         args_map({{"raw", static_cast<int64_t>(99999)}}))
                 .first,
             0);
-  EXPECT_EQ(
-      read_file_or_empty(fs::path(harness.paths.backlight_dir) / "brightness"),
-      "2047");
+  EXPECT_EQ(read_file_or_empty(harness.frontlight_brightness_path), "2047");
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "frontlightSet",
+                .invoke("pluto/settings", "frontlight.write",
                         args_map({{"raw", static_cast<int64_t>(-5)}}))
                 .first,
             0);
-  EXPECT_EQ(
-      read_file_or_empty(fs::path(harness.paths.backlight_dir) / "brightness"),
-      "0");
+  EXPECT_EQ(read_file_or_empty(harness.frontlight_brightness_path), "0");
 }
 
-TEST(ServiceChannels, FrontlightGetIsUnavailableWithoutSysfs) {
+TEST(ServiceChannels, FrontlightReadIsUnavailableWithoutSysfs) {
   ServiceHarness harness;
-  EXPECT_EQ(harness.invoke("pluto/settings", "frontlightGet").first, 1);
+  EXPECT_EQ(harness.invoke("pluto/settings", "frontlight.read").first, 1);
+}
+
+TEST(ServiceChannels, Rm1AndRm2OmitFrontlightAndSkipStandbyHardwareOperations) {
+  for (const char *profile_id : {"rm1", "rm2"}) {
+    ServiceHarness harness(profile_id);
+    write_file(harness.frontlight_brightness_path, "777\n");
+    write_file(harness.vpdd_length_path, "30000\n");
+    write_file(fs::path(harness.paths.run_dir) / "standby-frontlight",
+               "stale\n");
+
+    const auto [capability_status, capability_value] =
+        harness.invoke("pluto/device", "capabilities");
+    ASSERT_EQ(capability_status, 0) << profile_id;
+    const pluto::StandardValue::List *capabilities = capability_value.list();
+    ASSERT_NE(capabilities, nullptr) << profile_id;
+    bool has_frontlight = false;
+    for (const pluto::StandardValue &capability : *capabilities) {
+      has_frontlight = has_frontlight || (capability.string() != nullptr &&
+                                          *capability.string() == "frontlight");
+    }
+    EXPECT_FALSE(has_frontlight) << profile_id;
+
+    EXPECT_EQ(harness.invoke("pluto/settings", "frontlight.read").first, 1)
+        << profile_id;
+    EXPECT_EQ(harness
+                  .invoke("pluto/settings", "frontlight.write",
+                          args_map({{"raw", static_cast<int64_t>(0)}}))
+                  .first,
+              1)
+        << profile_id;
+    EXPECT_EQ(harness.invoke("pluto/session", "sleepNow").first, 0)
+        << profile_id;
+    EXPECT_FALSE(
+        fs::exists(fs::path(harness.paths.run_dir) / "standby-frontlight"))
+        << profile_id;
+    EXPECT_EQ(read_file_or_empty(harness.frontlight_brightness_path), "777\n")
+        << profile_id;
+
+    EXPECT_EQ(harness.invoke("pluto/session", "suspendNow").first, 0)
+        << profile_id;
+    EXPECT_EQ(read_file_or_empty(harness.vpdd_length_path), "30000\n")
+        << profile_id;
+    EXPECT_EQ(harness.shutdown_requests, 2) << profile_id;
+  }
 }
 
 TEST(ServiceChannels, WifiFailsGracefullyWithoutSupplicant) {
   ServiceHarness harness;
-  EXPECT_EQ(harness.invoke("pluto/settings", "wifiStatus").first, 1);
-  EXPECT_EQ(harness.invoke("pluto/settings", "wifiScan").first, 1);
-  EXPECT_EQ(harness.invoke("pluto/settings", "wifiScanResults").first, 1);
+  EXPECT_EQ(harness.invoke("pluto/settings", "wifi.isEnabled").first, 1);
+  EXPECT_EQ(harness.invoke("pluto/settings", "wifi.active").first, 1);
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "wifiConnect",
-                        args_map({{"ssid", "HomeNet"}, {"psk", "hunter22"}}))
+                .invoke("pluto/settings", "wifi.scan",
+                        args_map({{"timeoutMs", static_cast<int64_t>(0)}}))
+                .first,
+            1);
+  EXPECT_EQ(harness
+                .invoke("pluto/settings", "wifi.connect",
+                        args_map({{"ssid", "HomeNet"},
+                                  {"passphrase", "hunter22"},
+                                  {"timeoutMs", static_cast<int64_t>(0)}}))
                 .first,
             1);
 }
 
 TEST(ServiceChannels, WifiReportsFirmwareDisabledStateWithoutSupplicant) {
   ServiceHarness harness;
-  write_file(harness.paths.wifi_settings_file,
-             "telemetry = on\nwifi = off\n");
+  write_file(harness.paths.wifi_settings_file, "telemetry = on\nwifi = off\n");
 
-  const auto [status_code, status] =
-      harness.invoke("pluto/settings", "wifiStatus");
-  ASSERT_EQ(status_code, 0);
-  EXPECT_EQ(*map_value(status, "status")->string(), "disabled");
+  const auto [enabled_code, enabled] =
+      harness.invoke("pluto/settings", "wifi.isEnabled");
+  ASSERT_EQ(enabled_code, 0);
+  EXPECT_FALSE(*enabled.boolean());
 }
 
-TEST(ServiceChannels, WifiUsesSupplicantForStatusScanAndControls) {
+TEST(ServiceChannels, WifiPackageProtocolUsesSupplicantForAllControls) {
   ServiceHarness harness;
   harness.install_fake_wpa_supplicant();
 
-  const auto [status_code, status] =
-      harness.invoke("pluto/settings", "wifiStatus");
-  ASSERT_EQ(status_code, 0);
-  EXPECT_EQ(*map_value(status, "status")->string(), "connected");
-  EXPECT_EQ(*map_value(status, "ssid")->string(), "HomeNet");
-  EXPECT_EQ(*map_value(status, "ipAddress")->string(), "192.168.1.44");
+  const auto [active_code, active] =
+      harness.invoke("pluto/settings", "wifi.active");
+  ASSERT_EQ(active_code, 0);
+  EXPECT_EQ(*map_value(active, "ssid")->string(), "HomeNet");
+  EXPECT_EQ(*map_value(active, "ipAddress")->string(), "192.168.1.44");
 
-  EXPECT_EQ(harness.invoke("pluto/settings", "wifiScan").first, 0);
   const auto [scan_code, scan] =
-      harness.invoke("pluto/settings", "wifiScanResults");
+      harness.invoke("pluto/settings", "wifi.scan",
+                     args_map({{"timeoutMs", static_cast<int64_t>(0)}}));
   ASSERT_EQ(scan_code, 0);
-  const pluto::StandardValue::List* networks = scan.list();
+  const pluto::StandardValue::List *networks = scan.list();
   ASSERT_NE(networks, nullptr);
   ASSERT_EQ(networks->size(), 2u);
   EXPECT_EQ(*map_value((*networks)[0], "ssid")->string(), "HomeNet");
@@ -699,37 +740,46 @@ TEST(ServiceChannels, WifiUsesSupplicantForStatusScanAndControls) {
   EXPECT_TRUE(*map_value((*networks)[0], "isActive")->boolean());
   EXPECT_EQ(*map_value((*networks)[1], "ssid")->string(), "Coffee:Guest");
 
+  const auto [connect_code, connection] =
+      harness.invoke("pluto/settings", "wifi.connect",
+                     args_map({{"ssid", "HomeNet"},
+                               {"passphrase", "correct \"horse\" staple"},
+                               {"timeoutMs", static_cast<int64_t>(0)}}));
+  ASSERT_EQ(connect_code, 0);
+  EXPECT_EQ(*map_value(connection, "ipAddress")->string(), "192.168.1.44");
+
+  const auto [known_code, known] =
+      harness.invoke("pluto/settings", "wifi.known");
+  ASSERT_EQ(known_code, 0);
+  ASSERT_NE(known.list(), nullptr);
+  ASSERT_EQ(known.list()->size(), 1u);
+  EXPECT_EQ(*map_value((*known.list())[0], "security")->string(), "wpaPsk");
+  EXPECT_EQ(harness.invoke("pluto/settings", "wifi.disconnect").first, 0);
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "wifiConnect",
-                        args_map({{"ssid", "HomeNet"},
-                                  {"psk", "correct \"horse\" staple"}}))
-                .first,
-            0);
-  EXPECT_EQ(harness
-                .invoke("pluto/settings", "wifiForget",
+                .invoke("pluto/settings", "wifi.forget",
                         args_map({{"ssid", "HomeNet"}}))
                 .first,
             0);
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "wifiSetEnabled",
+                .invoke("pluto/settings", "wifi.setEnabled",
                         args_map({{"enabled", false}}))
                 .first,
             0);
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "wifiSetEnabled",
+                .invoke("pluto/settings", "wifi.setEnabled",
                         args_map({{"enabled", true}}))
                 .first,
             0);
 
   std::ostringstream commands;
-  for (const std::string& command : harness.fake_wpa->commands()) {
+  for (const std::string &command : harness.fake_wpa->commands()) {
     commands << command << '\n';
   }
   EXPECT_NE(commands.str().find("SET_NETWORK 0 ssid 486f6d654e6574"),
             std::string::npos);
-  EXPECT_NE(commands.str().find(
-                "SET_NETWORK 0 psk \"correct \\\"horse\\\" staple\""),
-            std::string::npos);
+  EXPECT_NE(
+      commands.str().find("SET_NETWORK 0 psk \"correct \\\"horse\\\" staple\""),
+      std::string::npos);
   EXPECT_NE(commands.str().find("SELECT_NETWORK 0"), std::string::npos);
   EXPECT_NE(commands.str().find("ENABLE_NETWORK all"), std::string::npos);
   EXPECT_NE(commands.str().find("REMOVE_NETWORK 0"), std::string::npos);
@@ -746,49 +796,13 @@ TEST(ServiceChannels, WifiRejectsBadPassphraseBeforeChangingSupplicant) {
   const size_t before = harness.fake_wpa->commands().size();
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "wifiConnect",
-                        args_map({{"ssid", "HomeNet"}, {"psk", "short"}}))
+                .invoke("pluto/settings", "wifi.connect",
+                        args_map({{"ssid", "HomeNet"},
+                                  {"passphrase", "short"},
+                                  {"timeoutMs", static_cast<int64_t>(0)}}))
                 .first,
             1);
   EXPECT_EQ(harness.fake_wpa->commands().size(), before);
-}
-
-TEST(ServiceChannels, WifiSupportsCanonicalPackageProtocol) {
-  ServiceHarness harness;
-  harness.install_fake_wpa_supplicant();
-
-  const auto [enabled_code, enabled] =
-      harness.invoke("pluto/settings", "wifi.isEnabled");
-  ASSERT_EQ(enabled_code, 0);
-  EXPECT_TRUE(*enabled.boolean());
-
-  const auto [active_code, active] =
-      harness.invoke("pluto/settings", "wifi.active");
-  ASSERT_EQ(active_code, 0);
-  EXPECT_EQ(*map_value(active, "ssid")->string(), "HomeNet");
-
-  const auto [scan_code, scan] = harness.invoke(
-      "pluto/settings", "wifi.scan",
-      args_map({{"timeoutMs", static_cast<int64_t>(0)}}));
-  ASSERT_EQ(scan_code, 0);
-  ASSERT_NE(scan.list(), nullptr);
-  EXPECT_EQ(scan.list()->size(), 2u);
-
-  const auto [connect_code, connection] = harness.invoke(
-      "pluto/settings", "wifi.connect",
-      args_map({{"ssid", "HomeNet"},
-                {"passphrase", "canonical-password"},
-                {"timeoutMs", static_cast<int64_t>(0)}}));
-  ASSERT_EQ(connect_code, 0);
-  EXPECT_EQ(*map_value(connection, "ipAddress")->string(), "192.168.1.44");
-
-  const auto [known_code, known] =
-      harness.invoke("pluto/settings", "wifi.known");
-  ASSERT_EQ(known_code, 0);
-  ASSERT_NE(known.list(), nullptr);
-  ASSERT_EQ(known.list()->size(), 1u);
-  EXPECT_EQ(*map_value((*known.list())[0], "security")->string(), "wpaPsk");
-  EXPECT_EQ(harness.invoke("pluto/settings", "wifi.disconnect").first, 0);
 }
 
 TEST(ServiceChannels, WifiRollsBackExistingProfileWhenCredentialsFail) {
@@ -797,9 +811,10 @@ TEST(ServiceChannels, WifiRollsBackExistingProfileWhenCredentialsFail) {
   harness.fake_wpa->fail_command("SET_NETWORK 0 psk");
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "wifiConnect",
+                .invoke("pluto/settings", "wifi.connect",
                         args_map({{"ssid", "HomeNet"},
-                                  {"psk", "bad-password"}}))
+                                  {"passphrase", "bad-password"},
+                                  {"timeoutMs", static_cast<int64_t>(0)}}))
                 .first,
             1);
   const std::vector<std::string> commands = harness.fake_wpa->commands();
@@ -828,13 +843,11 @@ TEST(ServiceChannels, UsbStatusUsesNetworkCarrierNotChargerPower) {
              "1\n");
   write_file(fs::path(harness.paths.network_class_dir) / "usb1" / "operstate",
              "unknown\n");
-  const fs::path battery =
-      fs::path(harness.paths.power_supply_dir) / "battery";
+  const fs::path battery = fs::path(harness.paths.power_supply_dir) / "battery";
   write_file(battery / "type", "Battery\n");
   write_file(battery / "capacity", "73\n");
   write_file(battery / "status", "Discharging\n");
-  const fs::path charger =
-      fs::path(harness.paths.power_supply_dir) / "charger";
+  const fs::path charger = fs::path(harness.paths.power_supply_dir) / "charger";
   write_file(charger / "type", "USB\n");
   write_file(charger / "online", "0\n");
   const fs::path nfc_marker =
@@ -847,14 +860,21 @@ TEST(ServiceChannels, UsbStatusUsesNetworkCarrierNotChargerPower) {
   write_file(elants_marker / "capacity", "81\n");
 
   const auto [battery_code, battery_value] =
-      harness.invoke("pluto/settings", "batteryGet");
+      harness.invoke("pluto/settings", "battery.device");
   ASSERT_EQ(battery_code, 0);
   EXPECT_FALSE(*map_value(battery_value, "isUsbPowerPresent")->boolean());
-  EXPECT_TRUE(*map_value(battery_value, "isUsbNetworkConnected")->boolean());
-  EXPECT_EQ(*map_value(battery_value, "markerLevelPercent")->integer(), 81);
+  EXPECT_EQ(std::get<double>(map_value(battery_value, "level")->storage()),
+            0.73);
+  EXPECT_EQ(*map_value(battery_value, "state")->string(), "discharging");
+
+  const auto [marker_code, marker_value] =
+      harness.invoke("pluto/settings", "battery.marker");
+  ASSERT_EQ(marker_code, 0);
+  EXPECT_EQ(std::get<double>(map_value(marker_value, "level")->storage()),
+            0.81);
 
   const auto [network_code, network] =
-      harness.invoke("pluto/settings", "networkInfo");
+      harness.invoke("pluto/settings", "network.info");
   ASSERT_EQ(network_code, 0);
   EXPECT_TRUE(*map_value(network, "usbConnected")->boolean());
   EXPECT_EQ(*map_value(network, "usbInterface")->string(), "usb1");
@@ -867,18 +887,16 @@ TEST(ServiceChannels, UsbStatusUsesNetworkCarrierNotChargerPower) {
              "up\n");
   write_file(charger / "online", "1\n");
   const pluto::StandardValue power_only =
-      harness.invoke("pluto/settings", "batteryGet").second;
+      harness.invoke("pluto/settings", "battery.device").second;
   EXPECT_TRUE(*map_value(power_only, "isUsbPowerPresent")->boolean());
-  EXPECT_FALSE(*map_value(power_only, "isUsbNetworkConnected")->boolean());
   const pluto::StandardValue disconnected_network =
-      harness.invoke("pluto/settings", "networkInfo").second;
+      harness.invoke("pluto/settings", "network.info").second;
   EXPECT_FALSE(*map_value(disconnected_network, "usbConnected")->boolean());
 }
 
 TEST(ServiceChannels, ZeroPercentMarkerBatteryRemainsPresent) {
   ServiceHarness harness;
-  const fs::path battery =
-      fs::path(harness.paths.power_supply_dir) / "battery";
+  const fs::path battery = fs::path(harness.paths.power_supply_dir) / "battery";
   write_file(battery / "type", "Battery\n");
   write_file(battery / "capacity", "73\n");
   write_file(battery / "status", "Discharging\n");
@@ -888,78 +906,93 @@ TEST(ServiceChannels, ZeroPercentMarkerBatteryRemainsPresent) {
   write_file(marker / "capacity", "0\n");
 
   const auto [battery_code, battery_value] =
-      harness.invoke("pluto/settings", "batteryGet");
+      harness.invoke("pluto/settings", "battery.marker");
 
   ASSERT_EQ(battery_code, 0);
-  ASSERT_NE(map_value(battery_value, "markerLevelPercent"), nullptr);
-  EXPECT_EQ(*map_value(battery_value, "markerLevelPercent")->integer(), 0);
+  ASSERT_NE(map_value(battery_value, "level"), nullptr);
+  EXPECT_EQ(std::get<double>(map_value(battery_value, "level")->storage()),
+            0.0);
 }
 
 TEST(ServiceChannels, PinRoundTrips) {
   ServiceHarness harness;
   const pluto::StandardValue unset =
-      harness.invoke("pluto/settings", "pinIsSet").second;
+      harness.invoke("pluto/settings", "security.isPinSet").second;
   ASSERT_NE(unset.boolean(), nullptr);
   EXPECT_FALSE(*unset.boolean());
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "pinSet",
-                        args_map({{"digits", "1234"}}))
+                .invoke("pluto/settings", "security.setPin",
+                        args_map({{"pin", "1234"}}))
                 .first,
             0);
-  EXPECT_TRUE(*harness.invoke("pluto/settings", "pinIsSet").second.boolean());
+  EXPECT_TRUE(
+      *harness.invoke("pluto/settings", "security.isPinSet").second.boolean());
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "pinSet",
-                        args_map({{"digits", "12ab"}}))
+                .invoke("pluto/settings", "security.setPin",
+                        args_map({{"pin", "12ab"}}))
                 .first,
             1);
 
-  EXPECT_EQ(harness.invoke("pluto/settings", "pinRemove").first, 0);
+  EXPECT_EQ(harness.invoke("pluto/settings", "security.removePin").first, 0);
   EXPECT_FALSE(
-      *harness.invoke("pluto/settings", "pinIsSet").second.boolean());
+      *harness.invoke("pluto/settings", "security.isPinSet").second.boolean());
 }
 
-TEST(ServiceChannels, StandbySetPersistsMilliseconds) {
+TEST(ServiceChannels, PowerPolicyRoundTripsCanonicalDurations) {
   ServiceHarness harness;
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "standbySet",
+                .invoke("pluto/settings", "power.setIdleSuspendDelay",
                         args_map({{"ms", static_cast<int64_t>(600000)}}))
+                .first,
+            0);
+  EXPECT_EQ(harness
+                .invoke("pluto/settings", "power.setSuspendPowerOffDelay",
+                        args_map({{"ms", static_cast<int64_t>(3600000)}}))
                 .first,
             0);
   EXPECT_EQ(
       read_file_or_empty(fs::path(harness.paths.config_dir) / "standby_ms"),
-      "600000");
+      "600000\n");
+  EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.config_dir) /
+                               "suspend_poweroff_ms"),
+            "3600000\n");
+  const auto [policy_code, policy] =
+      harness.invoke("pluto/settings", "power.policy");
+  ASSERT_EQ(policy_code, 0);
+  EXPECT_EQ(*map_value(policy, "idleSuspendDelayMs")->integer(), 600000);
+  EXPECT_EQ(*map_value(policy, "suspendPowerOffDelayMs")->integer(), 3600000);
 }
 
 TEST(ServiceChannels, RotationDefaultsToAutoAndRoundTrips) {
   ServiceHarness harness;
   const auto [default_status, default_value] =
-      harness.invoke("pluto/settings", "rotationGet");
+      harness.invoke("pluto/settings", "rotation.read");
   ASSERT_EQ(default_status, 0);
   ASSERT_NE(default_value.string(), nullptr);
   EXPECT_EQ(*default_value.string(), "auto");
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "rotationSet",
+                .invoke("pluto/settings", "rotation.write",
                         args_map({{"value", "landscape"}}))
                 .first,
             0);
   EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.config_dir) / "rotation"),
             "landscape\n");
   const pluto::StandardValue stored =
-      harness.invoke("pluto/settings", "rotationGet").second;
+      harness.invoke("pluto/settings", "rotation.read").second;
   ASSERT_NE(stored.string(), nullptr);
   EXPECT_EQ(*stored.string(), "landscape");
 
   EXPECT_EQ(harness
-                .invoke("pluto/settings", "rotationSet",
+                .invoke("pluto/settings", "rotation.write",
                         args_map({{"value", "sideways"}}))
                 .first,
             1);
   write_file(fs::path(harness.paths.config_dir) / "rotation", "corrupt\n");
   const pluto::StandardValue recovered =
-      harness.invoke("pluto/settings", "rotationGet").second;
+      harness.invoke("pluto/settings", "rotation.read").second;
   ASSERT_NE(recovered.string(), nullptr);
   EXPECT_EQ(*recovered.string(), "auto");
 }
@@ -978,17 +1011,17 @@ TEST(ServiceChannels, AppsListReadsManifestsAndPinnedState) {
   const auto [status, value] = harness.invoke("pluto/apps", "list");
 
   EXPECT_EQ(status, 0);
-  const pluto::StandardValue::List* apps = value.list();
+  const pluto::StandardValue::List *apps = value.list();
   ASSERT_NE(apps, nullptr);
   ASSERT_EQ(apps->size(), 2u);
 
-  const pluto::StandardValue& broken = (*apps)[0];
+  const pluto::StandardValue &broken = (*apps)[0];
   EXPECT_EQ(*map_value(broken, "id")->string(), "dev.example.broken");
   EXPECT_TRUE(map_value(broken, "manifest")->is_null());
   EXPECT_FALSE(map_value(broken, "error")->is_null());
   EXPECT_FALSE(*map_value(broken, "isPinned")->boolean());
 
-  const pluto::StandardValue& counter = (*apps)[1];
+  const pluto::StandardValue &counter = (*apps)[1];
   EXPECT_EQ(*map_value(counter, "id")->string(), "dev.example.counter");
   EXPECT_EQ(*map_value(counter, "manifest")->string(),
             "{\"id\":\"dev.example.counter\"}");
@@ -1019,17 +1052,17 @@ TEST(ServiceChannels, UninstallRemovesAppAndPinnedEntry) {
       fs::exists(fs::path(harness.paths.apps_dir) / "dev.example.counter"));
   EXPECT_FALSE(
       fs::exists(fs::path(harness.paths.data_dir) / "dev.example.counter"));
-  EXPECT_EQ(
-      read_file_or_empty(fs::path(harness.paths.config_dir) / "pinned"), "");
+  EXPECT_EQ(read_file_or_empty(fs::path(harness.paths.config_dir) / "pinned"),
+            "");
 }
 
 TEST(ServiceChannels, UninstallRejectsPathTraversal) {
   ServiceHarness harness;
-  EXPECT_EQ(harness
-                .invoke("pluto/apps", "uninstall",
-                        args_map({{"appId", "../../etc"}}))
-                .first,
-            1);
+  EXPECT_EQ(
+      harness
+          .invoke("pluto/apps", "uninstall", args_map({{"appId", "../../etc"}}))
+          .first,
+      1);
 }
 
 TEST(ServiceChannels, SetPinnedPersistsAcrossList) {
@@ -1046,7 +1079,7 @@ TEST(ServiceChannels, SetPinnedPersistsAcrossList) {
             0);
   const auto [status, value] = harness.invoke("pluto/apps", "list");
   ASSERT_EQ(status, 0);
-  const pluto::StandardValue::List* apps = value.list();
+  const pluto::StandardValue::List *apps = value.list();
   ASSERT_NE(apps, nullptr);
   ASSERT_EQ(apps->size(), 1u);
   EXPECT_TRUE(*map_value((*apps)[0], "isPinned")->boolean());
@@ -1059,7 +1092,7 @@ TEST(ServiceChannels, SetPinnedPersistsAcrossList) {
             0);
   const auto [status2, value2] = harness.invoke("pluto/apps", "list");
   ASSERT_EQ(status2, 0);
-  const pluto::StandardValue::List* apps2 = value2.list();
+  const pluto::StandardValue::List *apps2 = value2.list();
   ASSERT_NE(apps2, nullptr);
   EXPECT_FALSE(*map_value((*apps2)[0], "isPinned")->boolean());
 }
@@ -1085,11 +1118,15 @@ TEST(ServiceChannels, ClearAppDataRemovesDataDirOnly) {
       fs::exists(fs::path(harness.paths.apps_dir) / "dev.example.counter"));
 }
 
-TEST(ServiceChannels, UnknownMethodsReturnTypedErrors) {
+TEST(ServiceChannels, SessionRejectsMethodsOutsideExactContract) {
   ServiceHarness harness;
-  EXPECT_EQ(harness.invoke("pluto/session", "nope").first, 1);
+  EXPECT_EQ(harness.invoke("pluto/session", "unsupportedMethod").first, 1);
+}
+
+TEST(ServiceChannels, SettingsAndAppsRejectUnknownMethods) {
+  ServiceHarness harness;
   EXPECT_EQ(harness.invoke("pluto/settings", "nope").first, 1);
   EXPECT_EQ(harness.invoke("pluto/apps", "nope").first, 1);
 }
 
-}  // namespace
+} // namespace

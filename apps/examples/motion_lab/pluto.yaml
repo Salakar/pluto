@@ -1,10 +1,8 @@
-schema: 1
 id: dev.pluto.examples.motion_lab
 name: Motion Lab
 version: 0.1.0
 description: E-ink-paced animation and renderer stress demo.
 icon: assets/pluto/icon.png
-entrypoint: lib/main.dart
 display:
   orientations: [portrait]
   defaultOrientation: portrait

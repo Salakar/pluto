@@ -58,7 +58,6 @@ static_assert(sizeof(TileStats) == 32, "TileStats must stay 32 bytes");
 // exposes logical vectors instead of object bytes so padding and allocator
 // state never become part of the cross-process contract.
 struct FrameLedgerState {
-  uint32_t version = 1;
   FrameLedgerConfig config{};
   uint64_t stride = 0;
   uint64_t chroma_stride = 0;
@@ -90,8 +89,6 @@ struct FrameLedgerState {
 class FrameLedger {
 public:
   static constexpr uint32_t kMaxTilePx = 64;
-  static constexpr uint32_t kStateVersion = 1;
-
   FrameLedger() = default;
   explicit FrameLedger(const FrameLedgerConfig &config) { configure(config); }
 

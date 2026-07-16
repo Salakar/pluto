@@ -185,7 +185,7 @@ if [ -L "$ROOT_LINK" ]; then
   case "$OLD_TARGET" in "$RELEASES_ROOT"/*) ;; *) die 'active release link is outside the release store' ;; esac
   require_release "$OLD_TARGET" || die 'active release ownership or payload is incomplete'
 elif [ -e "$ROOT_LINK" ]; then
-  die "$ROOT_LINK must be absent or an atomic release symlink; remove the unpublished legacy layout first"
+  die "$ROOT_LINK must be absent or an atomic release symlink; remove the conflicting path first"
 fi
 [ "$OLD_TARGET" != "$CANDIDATE" ] || die 'candidate release is already active'
 

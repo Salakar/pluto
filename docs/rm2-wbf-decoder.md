@@ -1,9 +1,10 @@
 # reMarkable 2 WBF decoder provenance and safety boundary
 
 This document records the clean-room inputs and fail-closed contract for
-Pluto's host-testable reMarkable 2 waveform decoder. The decoder is format
-plumbing only. It does not select a Pluto refresh class, touch `/dev/fb0`, stop
-Xochitl, or make the RM2 native presenter eligible for deployment.
+Pluto's host-testable reMarkable 2 waveform decoder. The decoder itself remains
+format plumbing: it never owns `/dev/fb0`, power rails, blanking, or scanout.
+The profile-gated `Rm2WaveformProgram` and `LcdifTconDisplayBackend` now join
+that validated output to Pluto refresh classes and the native LCDIF transport.
 
 ## Source and license ledger
 
@@ -17,7 +18,7 @@ repository.
 | [E Ink 800-1101 Rev01 AF waveform flash file product specification](https://files.waveshare.com/upload/c/c4/E-paper-mode-declaration.pdf) | File CRC32 with bytes 0-3 treated as zero, exact little-endian file length, FPL lot, mode version `0x19`, AF type `0x51`, CS1, temperature/mode meanings, and the fact that a waveform is display-lot-specific | E Ink-authored format specification, used as documentation only |
 | [Samuel Holland's DRM EPD helper RFC](https://lists.infradead.org/pipermail/linux-rockchip/2022-April/031024.html) | Three-byte little-endian offsets, additive pointer checksums, header/temperature table shape, 5-bit packed LUT dimensions, and the two-state RLE grammar | Explicit `GPL-2.0 OR MIT`; consulted under the MIT option, with an independent bounded C++ implementation |
 | [`yobert/swtcon`](https://github.com/yobert/swtcon) and its [WBF parser](https://raw.githubusercontent.com/yobert/swtcon/main/src/wbf.rs) | Independent RM2-oriented cross-check of the two-level `(mode, temperature)` tables, marker-controlled RLE, temperature intervals, and phase sizing | MIT; behavioral/API cross-check only, no source copied |
-| [reMarkable's public Linux `rm1xx_5.4.70_v1.6.x` branch](https://github.com/reMarkable/linux/tree/rm1xx_5.4.70_v1.6.x) | The future scanout boundary must use the public framebuffer ABI and must not depend on private Xochitl or QSG symbols | GPL kernel source used only to define the external kernel ABI. The public branch is v1.6.2-era while the observed device reports v1.6.3, so it is not claimed byte-exact |
+| [reMarkable's public Linux `rm1xx_5.4.70_v1.6.x` branch](https://github.com/reMarkable/linux/tree/rm1xx_5.4.70_v1.6.x) | The scanout boundary uses the public framebuffer ABI and does not depend on private stock-UI or QSG symbols | GPL kernel source used only to define the external kernel ABI. The public branch is v1.6.2-era while the observed device reports v1.6.3, so it is not claimed byte-exact |
 
 GPL-only `waved`, `rM2-stuff`, and stock Xochitl disassembly are not source
 inputs for this decoder. They may inform later black-box behavioral experiments
@@ -37,8 +38,8 @@ base slots.
 
 These are scanout observations, not WBF fields. The decoder therefore makes no
 framebuffer-size, orientation, slot-count, panning, blanking, or pixel-format
-assumption. Future native presentation must join the independently validated
-waveform program and scanout ABI at a higher, device-gated layer.
+assumption. The generated RM2 profile and native LCDIF device layer own those
+independently validated constraints.
 
 ## Vendor artifact boundary
 
@@ -91,16 +92,92 @@ open clears all prior state.
 
 The decoder stores deduplicated packed phase records. A transition lookup is
 constant-time with matrix index `new_state * 32 + old_state` and four 2-bit
-commands per byte. This is the stable seam for later profile-specific LUT
-codegen without placing file-format branches in the common scheduler.
+commands per byte. `Rm2WaveformProgram` expands only required accepted records
+into the measured hot representation, without placing file-format branches in
+the common scheduler or redistributing vendor waveform bytes.
 
-## Intentional policy gap
+## Refresh mapping and native execution
 
-The file's raw mode indices are exposed, but no `PlutoRefreshClass` mapping is
-implemented here. The E Ink mode-version table and community RM2 observations
-do not agree on every fast-mode label. Pluto must first compare raw mode/phase
-behavior with the controlled stock oracle, then put the minimum verified map
-behind `WaveformProgram`. Guessing here could under-drive the panel.
+The clean-room oracle work resolved the minimum accepted mode map behind
+`Rm2WaveformProgram`: `Text` and `Full` use raw mode 2, `Ui` uses mode 3, and
+`Fast` uses mode 6. Open fails unless all required modes exist for the selected
+temperature table. The choice remains outside `WbfDecoder`, so parsing cannot
+silently invent a display policy.
+
+`LcdifTconDisplayBackend` consumes the selected immutable record, advances
+settled optical state only after completion, writes only within the exact
+kernel-reported mapping and slots, enforces the generated phase cadence, and
+ends in safe hold. The exact profile binds firmware, kernel, panel, local WBF
+path, SHA-256, and geometry before start. There is no nearest-file or
+nearest-mode fallback.
+
+## Exact-device representation decisions
+
+All hot-representation choices were measured on the two-core ARMv7 RM2, not
+selected from host results alone:
+
+- A generated 65,536-entry RGB565-to-gray table lost to the integer arithmetic
+  conversion (about 52 ms versus 45 ms per full panel). A second 1 KiB
+  split-byte LUT also lost: arithmetic measured 44.847/44.904 ms p50/p95 while
+  the split LUT measured 61.380/61.426 ms. The production path therefore keeps
+  exhaustive-hash-pinned arithmetic and removes the generator and generated
+  artifact.
+- Expanding accepted WBF records once at open won decisively. Exact-device
+  transition lookup measured 190.447/190.478 ms p50/p95 through decoded packed
+  records versus 20.851/20.887 ms through the expanded tables, a 9.13x/9.12x
+  speedup. The immutable expanded representation is retained.
+- Opening the tablet's exact 285,735-byte WBF, validating its identity, decoding
+  1,161,728 packed bytes, and expanding 1,057,280 hot-table bytes took 78.986 ms
+  wall/79.016 ms CPU once at startup. A derived mmap cache was rejected: it
+  would not change steady-state lookup, would still need exact vendor
+  SHA/panel/lot validation and prefaulting, and would add mutable-cache
+  corruption, staleness, transaction, and vendor-byte redistribution risks.
+- The retained full-panel phase packer uses a persistent, profile-gated
+  two-core ARMv7 kernel. A production-cadence 10,000-phase soak measured
+  7.631 ms p50, 7.676 ms p95, 7.699 ms p99, and 7.933 ms maximum against an
+  8.234 ms p99 budget. Pan cadence measured 11.975 ms p99 and 12.031 ms
+  maximum against the 11.763 ms physical interval plus the 5% fail-closed
+  deadline. There were zero encode, full-slot reference, pan, deadline,
+  cadence, underflow, or latched-slot-mutation failures, and zero allocations
+  or current-RSS growth. The independent 1.46 MiB byte-for-byte slot oracle ran
+  for every phase after the preceding pan boundary and before submission of
+  the validated slot, so benchmark-only oracle work was not charged to the
+  production encode/pan overlap.
+
+## CPU-frequency and thermal safety
+
+The full-panel deadline is met only while both RM2 cores remain at the exact
+1.2 GHz policy ceiling. The native backend therefore owns a short,
+profile-gated frequency lease rather than changing the device's boot policy:
+
+- acquisition requires exact policy0 identity (`related_cpus` is `0 1`, the
+  ceiling is 1,200,000 kHz, the original minimum is within the accepted RM2
+  range, and the governor token is safe);
+- an exact six-line mode-0600 receipt is atomically published under
+  `/run/pluto` before the minimum changes, while a mode-0600 `flock` remains
+  exclusively held for the burst;
+- acquisition and every 128 soak phases read the exact
+  `imx_thermal_zone`; unavailable temperature or a value at/above 45 C fails
+  closed before further work;
+- release restores and verifies the original minimum, maximum, governor, and
+  CPU binding before retiring the receipt. Bounded readback retries cover the
+  RM2 sysfs attribute's observed settling edge without accepting a different
+  policy;
+- the supervisor runs the companion strict receipt restorer at startup, every
+  foreground boundary, stock handoff, and service stop. It refuses malformed,
+  mutable, live-owner, PID-reused, or externally changed state.
+
+On the exact tablet, 20 acquire/release cycles had 595.5/7025.5 microseconds
+acquire p50/p99 and 221.6/344.0 microseconds release p50/p99, with zero
+allocations or RSS growth. A deliberate `SIGKILL` left the matching owner
+receipt, exclusively held lock, and 1.2 GHz floor in place; the companion
+restorer then recovered the exact 792,000/1,200,000 kHz `ondemand` policy and
+retired the receipt. The final 10,000-phase soak peaked at 37 C, restored that
+same policy, left the stock UI active, and did not change the device boot ID.
+
+The ignored raw evidence is under `analysis/native-cutover/rm2/perf/`. It
+includes binary hashes, the complete-slot reference checksum, resource
+counters, thermal state, and the exact on-device commands.
 
 ## Offline inspection and metadata codegen
 

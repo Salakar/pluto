@@ -5,7 +5,6 @@ environment:
 workspace:
   - packages/pluto_core
   - packages/pluto_manifest
-  - packages/pluto_provision
   - packages/pluto_device
   - packages/pluto_settings
   - packages/pluto_pen

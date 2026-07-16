@@ -36,7 +36,7 @@ constexpr std::uint32_t kHandoffTilePixels = 32;
 constexpr std::size_t kMaximumRendererHandoffBytes = 32u << 20;
 constexpr std::uint8_t kPaperWhiteOpticalLevel = 30;
 constexpr std::string_view kHandoffPipelineTag =
-    "pluto-rm1-mxcfb-warm-handoff-v2-presenter-payload";
+    "pluto-rm1-mxcfb-warm-handoff-presenter-payload";
 constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagInkPriority | kPlutoPresentFlagPreDithered |
     kPlutoPresentFlagSettle | kPlutoPresentFlagSparkle |
@@ -159,7 +159,7 @@ bool build_handoff_identity(const GeneratedDeviceProfile &profile,
   }
 
   HandoffFingerprint waveform;
-  waveform.add_string("rm1-mxcfb-observed-update-policy-v1");
+  waveform.add_string("rm1-mxcfb-observed-update-policy");
   waveform.add_u32(uapi::kWaveformModeDirect);
   waveform.add_u32(uapi::kWaveformModeQuality);
   waveform.add_u32(uapi::kUpdateModePartial);
@@ -450,7 +450,7 @@ public:
   }
 
   PlutoStatus start(const PlutoPresenterConfig &config) {
-    if (config.struct_size < sizeof(PlutoPresenterConfig) ||
+    if (config.struct_size != sizeof(PlutoPresenterConfig) ||
         (config.backend_name != nullptr &&
          std::string_view(config.backend_name) != "native") ||
         (config.options != nullptr && config.options[0] != '\0')) {
@@ -532,7 +532,7 @@ public:
   }
 
   PlutoStatus info(PlutoDisplayInfo *out_info) const {
-    if (out_info == nullptr || out_info->struct_size < sizeof(*out_info)) {
+    if (out_info == nullptr || out_info->struct_size != sizeof(*out_info)) {
       return kPlutoStatusInvalidArgument;
     }
     PlutoDisplayInfo info{};
@@ -563,7 +563,7 @@ public:
 
   PlutoStatus submit(const PlutoPresentRequest *request) {
     if (request == nullptr ||
-        request->struct_size < sizeof(PlutoPresentRequest)) {
+        request->struct_size != sizeof(PlutoPresentRequest)) {
       return kPlutoStatusInvalidArgument;
     }
     const PlutoStatus validation = validate_request(*request);
@@ -730,7 +730,7 @@ public:
   }
 
   PlutoStatus set_pen_focus(const PlutoPenFocus *focus) const {
-    if (focus == nullptr || focus->struct_size < sizeof(PlutoPenFocus) ||
+    if (focus == nullptr || focus->struct_size != sizeof(PlutoPenFocus) ||
         (focus->flags & ~(kPlutoPenFocusInRange | kPlutoPenFocusContact)) !=
             0 ||
         ((focus->flags & kPlutoPenFocusContact) != 0 &&
@@ -750,7 +750,7 @@ public:
       return kPlutoStatusUnsupported;
     }
     if (payload == nullptr ||
-        payload->struct_size < sizeof(PlutoHandoffPayload) ||
+        payload->struct_size != sizeof(PlutoHandoffPayload) ||
         payload->bytes == nullptr || payload->byte_count == 0 ||
         payload->byte_count > kMaximumRendererHandoffBytes ||
         payload->width != profile_.panel.width ||
@@ -839,7 +839,7 @@ public:
       return kPlutoStatusUnsupported;
     }
     if (out_payload == nullptr ||
-        out_payload->struct_size < sizeof(PlutoHandoffPayload)) {
+        out_payload->struct_size != sizeof(PlutoHandoffPayload)) {
       return kPlutoStatusInvalidArgument;
     }
     std::lock_guard<std::mutex> admission_lock(admission_mutex_);

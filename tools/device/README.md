@@ -134,13 +134,12 @@ clears `OnFailure`, disables xochitl's inherited 60-second watchdog and service
 restart policy, and overrides the process. The supervisor owns recovery, so a
 missing `sd_notify` heartbeat cannot create a watchdog/start-limit loop.
 
-Both install and uninstall remove the exact obsolete Pluto-owned standalone
-`pluto.service` and `pluto-fallback.service` units and enablement links from
-the live and peer OTA A/B roots. Install applies the xochitl drop-in only to the
-currently selected root and removes any older Pluto override from the peer,
-leaving that peer as a known-stock U-Boot rescue path. Unrelated systemd units
-are untouched. `uninstall` removes the live drop-in too and restarts stock
-xochitl.
+Install applies the current xochitl drop-in only to the selected root. It
+removes the exact current Pluto boot and recovery assets from the peer root,
+then hash-pins that peer as the known-stock U-Boot rescue path. `uninstall`
+removes those same current assets from both roots and restarts stock xochitl.
+There is no stale-install migrator or legacy-unit cleanup path; unrelated
+systemd units are untouched.
 The supervisor detects the hijack (`hijacked()`) so "exit to stock" execs
 `/usr/bin/xochitl` directly instead of restarting the service it runs as.
 

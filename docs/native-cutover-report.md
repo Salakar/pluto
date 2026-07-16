@@ -37,7 +37,8 @@ The completed source cut has these boundaries:
 - target-native ARMv7 engine, embedder, control client, and real Codex CLI kept
   as first-class build inputs;
 - no compatibility reader, alias, migration, alternate provisioner, or second
-  runtime flow.
+  runtime flow for the device, package, presenter, handoff, or supervisor
+  contracts replaced by this cutover.
 
 The durable design is in
 [native-display-architecture.md](native-display-architecture.md).
@@ -134,17 +135,59 @@ from release deployment.
 
 The optimized encoder is accepted only at p99 no greater than 70% of one phase
 interval (`8.234 ms`) and after a 10,000-job soak with zero checksum failures,
-missed phases, underflows, or unsafe final state. Candidate results and the
-retained implementation will be filled from the exact-device evidence after
-that gate passes.
+missed phases, underflows, or unsafe final state. Correctness and production
+timing were run as separate exact-binary 10,000-phase soaks so the dual-core
+tablet could cool between loads. The correctness pass compared every complete
+1.46 MiB slot against the independent oracle: 10,000/10,000 matched, with zero
+encode, reference, wake, or thermal failures and encode p99 `7.705 ms`. The
+production pass completed 10,000/10,000 phases with encode p99 `7.682 ms` and
+cadence p99 `11.984 ms`, leaving `0.552 ms` and `0.368 ms` of their respective
+gates. It recorded zero pan, deadline, cadence, underflow,
+latched-slot-mutation, post-reference, allocation, page-fault, or display-FD
+failures.
+
+The benchmark deliberately made no framebuffer mapping, pan ioctl, display
+service stop, or panel write. It exercised the production encoder and scan
+cadence against an exact mock transport while stock Xochitl remained active.
+The first RM2 panel write remains reserved for the frozen same-revision release
+acceptance below.
+
+Meeting the phase deadline requires a bounded `1.2 GHz` RM2 frequency lease.
+Twenty acquire/release cycles measured `595.5 us` p50 and `7025.5 us` p99 to
+acquire, and `221.6 us` p50 and `344.0 us` p99 to release. A deliberate
+`SIGKILL` recovery restored the exact original
+`792000/1200000/ondemand` policy and retired the mode-0600 receipt. The soak
+peaked at `39 C`; the boot ID and stock service state did not change. An
+earlier combined oracle-plus-production attempt completed all 10,000 oracle
+comparisons but stopped the production half at its fail-closed thermal guard.
+It is preserved as diagnostic evidence, not counted as the accepted timing
+run.
 
 ### RM2 round 3: release runtime CPU and memory
 
-The final release run records encoder CPU, supervisor and foreground RSS,
-stopped-process CPU, total resident memory, phase timing and fault counters,
-switch latency, full/sparse damage behavior, and panel temperature. Any further
-allocation or copy reduction must repeat checksum, deadline, soak, and optical
-gates.
+The phase helper originally slept for a fixed 2 ms and then busy-spun for up to
+4 ms after every encode. Replacing that loop with the existing condition
+variable's direct wake retained deadline behavior while removing useless
+helper-core work:
+
+| Exact RM2 path | Process CPU / phase | Helper CPU / phase | Encode p99 | Cadence p99 | Memory/fault result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| fixed sleep + spin, 2k baseline | 17.627 ms | 9.796 ms | 7.757 ms | 11.902 ms | RSS flat; zero faults |
+| direct condition wake, 10k final | **15.381 ms** | **7.613 ms** | **7.682 ms** | 11.984 ms | RSS/PSS/VmSize/HWM flat; zero faults |
+
+Process CPU fell **12.74%** and helper CPU fell **22.28%**. Caller CPU also
+fell 1.09%; CPU/wall dropped from 1.485 to 1.288. The exact final ARMv7 binary
+hash was
+`26ec536c7b7f5971d22106b6ddf51b69f0d0b23802bb0772a68b7b4b0d336938`.
+The benchmark opened no display descriptor and made no panel write. Afterward
+the lease receipt and lock were absent, policy0 was exactly
+`792000/1200000/ondemand`, Xochitl retained the same PID and boot ID, and the
+device was at `35 C`.
+
+The final physical release run still records supervisor and foreground RSS,
+stopped-process CPU, total resident memory, switch latency, full/sparse damage,
+panel temperature, and optical behavior. Any further allocation or copy
+reduction must repeat checksum, deadline, soak, and optical gates.
 
 ## Final host and artifact gates
 
@@ -195,6 +238,17 @@ The final evidence bundle will live under
 `analysis/native-cutover/final-acceptance/` and include command transcripts,
 hash manifests, process and service records, health receipts, raw timing data,
 camera stills/video/contact sheets, and a per-device audit.
+
+### Development optical smoke is not final acceptance
+
+An intermediate RM1 candidate rendered Pluto Home, Counter, and the Ink gallery
+on the physical panel through the native EPDC path. That established the first
+camera-visible native RM1 render, but the original Ink control falsely reported
+success while its before/after post-dither images were identical. The candidate
+is therefore preserved only as development evidence and is not credited in the
+table above. Final acceptance uses semantic canvas preparation, exact PID-bound
+control receipts, decoded-pixel change checks, and paired camera/native evidence
+from the frozen release.
 
 ## Final conclusion
 

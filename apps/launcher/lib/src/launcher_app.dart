@@ -169,8 +169,6 @@ final class _PlutoLauncherAppState extends State<PlutoLauncherApp>
       builder = (_) => const WifiScreen();
     } else if (routeName == '/settings/security') {
       builder = (_) => const SecurityPinScreen();
-    } else if (routeName == '/settings/uninstall') {
-      builder = (_) => const UninstallPlutoScreen();
     } else if (routeName == '/settings/about') {
       builder = (_) => const AboutScreen();
     } else if (routeName == '/standby' || routeName == '/sleep') {

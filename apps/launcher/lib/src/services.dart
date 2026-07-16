@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/services.dart';
+import 'package:pluto_core/pluto_core.dart';
 import 'package:pluto_device/pluto_device.dart';
 import 'package:pluto_manifest/pluto_manifest.dart';
 import 'package:pluto_settings/pluto_settings.dart';
@@ -26,50 +27,8 @@ abstract interface class ManifestRepository {
   Future<void> setPinned(AppId id, {required bool isPinned});
 }
 
-/// Session event emitted by `plutod`.
-sealed class SessionEvent {
-  const SessionEvent();
-}
-
-/// Registry changed event.
-final class RegistryChanged extends SessionEvent {
-  /// Creates a registry changed event.
-  const RegistryChanged();
-}
-
-/// Running app exited event.
-final class AppExited extends SessionEvent {
-  /// Creates an app-exited event.
-  const AppExited({
-    required this.appId,
-    required this.exitCode,
-    required this.wasCrash,
-  });
-
-  /// App id.
-  final AppId appId;
-
-  /// Exit code.
-  final int exitCode;
-
-  /// Whether the exit was considered a crash.
-  final bool wasCrash;
-}
-
-/// Session manager API backed by `plutod`.
+/// Session manager API backed by the Pluto supervisor.
 abstract interface class SessionManager {
-  /// Fetches session information.
-  Future<SessionInfo> info();
-
-  /// Fetches renderer diagnostics for the developer screen.
-  Future<LauncherDeveloperStats> developerStats();
-
-  /// Shows the display calibration test card.
-  Future<void> runDisplayTestCard();
-
-  /// Enables or disables the damage-rect debug overlay.
-  Future<void> setDamageOverlayEnabled(bool enabled);
-
   /// Launches [id].
   Future<LaunchResult> launch(AppId id);
 
@@ -88,17 +47,11 @@ abstract interface class SessionManager {
   /// Releases the native no-flash gate after system UI has been routed.
   Future<void> systemUiReady();
 
-  /// Cancels a launch attempt.
-  Future<void> cancelLaunch(AppId id);
-
   /// Switches to the stock reMarkable UI.
   Future<void> switchToStockUi();
 
   /// Requests a safe full device power-off through the supervisor.
   Future<void> powerOffDevice();
-
-  /// Starts the full Pluto uninstall flow.
-  Future<void> beginPlutoUninstall(PlutoUninstallOptions options);
 
   /// Requests the supervisor-managed standby launcher transition.
   Future<void> sleepNow();
@@ -111,9 +64,6 @@ abstract interface class SessionManager {
 
   /// Restarts the launcher at its normal home route.
   Future<void> returnToLauncher();
-
-  /// Session event stream.
-  Stream<SessionEvent> get events;
 }
 
 /// Settings and telemetry used by the launcher.
@@ -199,6 +149,9 @@ enum RotationPreference {
 abstract interface class LauncherDeviceRepository {
   /// Reads device info.
   Future<DeviceInfo> deviceInfo();
+
+  /// Reads the capabilities exposed by the validated device profile.
+  Future<DeviceCapabilities> capabilities();
 }
 
 /// Service bundle injected into the launcher app.
@@ -224,165 +177,69 @@ final class LauncherServices {
   final LauncherDeviceRepository device;
 }
 
-/// Channel-backed session manager for the on-device launcher.
-final class PlutodSessionManager implements SessionManager {
-  /// Creates a session manager using [channel].
-  const PlutodSessionManager({MethodChannel? channel})
-    : _channel = channel ?? const MethodChannel('pluto/launcher');
-
-  final MethodChannel _channel;
-
-  @override
-  Stream<SessionEvent> get events => const Stream<SessionEvent>.empty();
-
-  @override
-  Future<void> beginPlutoUninstall(PlutoUninstallOptions options) async {
-    await _channel.invokeMethod<void>('beginPlutoUninstall', <String, Object?>{
-      'deleteAppData': options.deleteAppData,
-      'keepAppListBackup': options.keepAppListBackup,
-    });
-  }
-
-  @override
-  Future<void> cancelLaunch(AppId id) async {
-    await _channel.invokeMethod<void>('cancelLaunch', <String, Object?>{
-      'appId': id.value,
-    });
-  }
-
-  @override
-  Future<SessionInfo> info() async {
-    final Map<String, Object?>? map = await _channel
-        .invokeMapMethod<String, Object?>('info');
-    if (map == null) {
-      throw const FormatException('Missing session info.');
-    }
-    return SessionInfo(
-      plutoVersion: _string(map, 'plutoVersion'),
-      engineVersion: _string(map, 'engineVersion'),
-      flutterVersion: _string(map, 'flutterVersion'),
-      dartVersion: _string(map, 'dartVersion'),
-      returnInstructions: _string(map, 'returnInstructions'),
-    );
-  }
-
-  @override
-  Future<LaunchResult> launch(AppId id) async {
-    final Map<String, Object?>? map = await _channel
-        .invokeMapMethod<String, Object?>('launch', <String, Object?>{
-          'appId': id.value,
-        });
-    if (map == null) {
-      return const LaunchFailure(reason: 'plutod returned no response');
-    }
-    final bool ok = map['ok'] == true;
-    if (ok) {
-      return LaunchSuccess(pid: _int(map, 'pid'));
-    }
-    return LaunchFailure(
-      reason: _string(map, 'error'),
-      stderr: map['stderr'] is String ? map['stderr']! as String : null,
-    );
-  }
-
-  @override
-  Future<AppSwitcherRequest?> pendingAppSwitcher() async => null;
-
-  @override
-  Future<void> forceStop(AppId id) async {
-    await _channel.invokeMethod<void>('forceStop', <String, Object?>{
-      'appId': id.value,
-    });
-  }
-
-  @override
-  Future<StatusOverlayRequest?> pendingStatusOverlay() async => null;
-
-  @override
-  Future<PowerMenuRequest?> pendingPowerMenu() async => null;
-
-  @override
-  Future<void> systemUiReady() async {
-    await _channel.invokeMethod<void>('systemUiReady');
-  }
-
-  @override
-  Future<void> sleepNow() async {
-    await _channel.invokeMethod<void>('sleepNow');
-  }
-
-  @override
-  Future<void> handoffStandbyToSupervisor() async {
-    await _channel.invokeMethod<void>('suspendNow');
-  }
-
-  @override
-  Future<void> returnToLauncher() async {
-    await _channel.invokeMethod<void>('home');
-  }
-
-  @override
-  Future<void> switchToStockUi() async {
-    await _channel.invokeMethod<void>('exitToStock');
-  }
-
-  @override
-  Future<void> powerOffDevice() async {
-    await _channel.invokeMethod<void>('powerOff');
-  }
-
-  @override
-  Future<LauncherDeveloperStats> developerStats() async {
-    final Map<String, Object?> map =
-        await _channel.invokeMapMethod<String, Object?>('developerStats') ??
-        const <String, Object?>{};
-    return LauncherDeveloperStats(
-      vmServiceUri: _stringOr(map, 'vmServiceUri', 'unavailable'),
-      renderer: _stringOr(map, 'renderer', 'unknown'),
-      ghostPartialsSinceFull: _intOr(map, 'ghostPartialsSinceFull', 0),
-      ghostBudget: _intOr(map, 'ghostBudget', 0),
-      buildMs: _doubleOr(map, 'buildMs', 0),
-      rasterMs: _doubleOr(map, 'rasterMs', 0),
-    );
-  }
-
-  @override
-  Future<void> runDisplayTestCard() async {
-    await _channel.invokeMethod<void>('runDisplayTestCard');
-  }
-
-  @override
-  Future<void> setDamageOverlayEnabled(bool enabled) async {
-    await _channel.invokeMethod<void>('setDamageOverlay', <String, Object?>{
-      'enabled': enabled,
-    });
-  }
-}
-
 /// Settings facade backed by `pluto_settings`.
 final class PlutoLauncherSettings implements LauncherSettings {
   /// Creates a launcher settings wrapper.
-  PlutoLauncherSettings({
-    PlutoSettings? settings,
-    MethodChannel? rotationChannel,
-  }) : _settings = settings ?? PlutoSettings.instance,
-       _rotationChannel =
-           rotationChannel ?? const MethodChannel('pluto/settings');
+  PlutoLauncherSettings({PlutoSettings? settings, MethodChannel? channel})
+    : _settings = settings ?? PlutoSettings.instance,
+      _channel = channel ?? const MethodChannel('pluto/settings');
 
   final PlutoSettings _settings;
-  final MethodChannel _rotationChannel;
+  final MethodChannel _channel;
+  static const Duration _statusInterval = Duration(seconds: 5);
+  final StreamController<StatusSnapshot> _statusUpdates =
+      StreamController<StatusSnapshot>.broadcast();
+  StatusSnapshot? _latestStatus;
+  Timer? _statusTimer;
+  int _statusListenerCount = 0;
+  bool _disposed = false;
+  late final Stream<StatusSnapshot> _statusStream =
+      Stream<StatusSnapshot>.multi((
+        MultiStreamController<StatusSnapshot> controller,
+      ) {
+        if (_disposed) {
+          controller.close();
+          return;
+        }
+        _statusListenerCount += 1;
+        final StatusSnapshot? latest = _latestStatus;
+        if (latest != null) {
+          controller.add(latest);
+        }
+        _startStatusPolling();
+        final StreamSubscription<StatusSnapshot> subscription = _statusUpdates
+            .stream
+            .listen(
+              controller.add,
+              onError: controller.addError,
+              onDone: controller.close,
+            );
+        controller.onCancel = () async {
+          await subscription.cancel();
+          _statusListenerCount -= 1;
+          if (_statusListenerCount == 0) {
+            _statusTimer?.cancel();
+            _statusTimer = null;
+          }
+        };
+      }, isBroadcast: true);
 
   @override
   Future<WifiConnection> connectWifi({
     required String ssid,
     String? passphrase,
-  }) {
-    return _settings.wifi.connect(ssid: ssid, passphrase: passphrase);
+  }) async {
+    final WifiConnection connection = await _settings.wifi.connect(
+      ssid: ssid,
+      passphrase: passphrase,
+    );
+    await _refreshStatus();
+    return connection;
   }
 
   @override
   Future<void> forgetWifi(String ssid) {
-    return _settings.wifi.forgetNetwork(ssid: ssid);
+    return _refreshAfter(_settings.wifi.forgetNetwork(ssid: ssid));
   }
 
   @override
@@ -396,20 +253,18 @@ final class PlutoLauncherSettings implements LauncherSettings {
 
   @override
   Future<void> setFrontlightRaw(int raw) {
-    return _settings.frontlight.setBrightnessRaw(raw);
+    return _refreshAfter(_settings.frontlight.setBrightnessRaw(raw));
   }
 
   @override
   Future<RotationPreference> rotationPreference() async {
-    final Object? value = await _rotationChannel.invokeMethod<Object?>(
-      'rotationGet',
-    );
+    final Object? value = await _channel.invokeMethod<Object?>('rotation.read');
     return RotationPreference.parse(value);
   }
 
   @override
   Future<void> setRotationPreference(RotationPreference preference) {
-    return _rotationChannel.invokeMethod<void>('rotationSet', <String, Object?>{
+    return _channel.invokeMethod<void>('rotation.write', <String, Object?>{
       'value': preference.wireName,
     });
   }
@@ -430,13 +285,11 @@ final class PlutoLauncherSettings implements LauncherSettings {
 
   @override
   Future<void> setWifiEnabled(bool enabled) {
-    return _settings.wifi.setEnabled(enabled);
+    return _refreshAfter(_settings.wifi.setEnabled(enabled));
   }
 
   @override
-  Stream<StatusSnapshot> watchStatus() async* {
-    yield await _readStatusSnapshot();
-  }
+  Stream<StatusSnapshot> watchStatus() => _statusStream;
 
   @override
   Future<WifiStatus> wifiStatus() async {
@@ -454,20 +307,88 @@ final class PlutoLauncherSettings implements LauncherSettings {
   @override
   Future<LauncherNetworkInfo> networkInfo() async {
     final WifiConnection? connection = await _settings.wifi.activeConnection();
+    final Map<String, Object?> network = await _readAuxiliaryMap(
+      'network.info',
+    );
+    final bool usbConnected = _boolOr(network, 'usbConnected', false);
+    final String usbIp = _stringOr(network, 'usbIp', '');
     return LauncherNetworkInfo(
-      // The package-level API does not expose USB link state. Do not infer a
-      // tether from charger power; the on-device channel implementation reads
-      // the actual USB network carrier.
-      usbIp: null,
+      // pluto_settings intentionally keeps USB gadget state out of the Wi-Fi
+      // facade. The native dotted method reads the actual network carrier; it
+      // never infers a tether from charger power.
+      usbIp: usbConnected && usbIp.isNotEmpty ? usbIp : null,
       wifiIp: connection?.ipAddress,
     );
   }
 
-  Future<StatusSnapshot> _readStatusSnapshot() async {
-    final BatteryStatus battery = await _settings.battery.deviceBattery();
-    final MarkerBatteryStatus? marker = await _settings.battery.markerBattery();
-    final WifiStatus wifi = await wifiStatus();
-    final FrontlightState frontlight = await _settings.frontlight.state();
+  /// Stops passive status polling and releases stream resources.
+  Future<void> dispose() async {
+    if (_disposed) {
+      return;
+    }
+    _disposed = true;
+    _statusTimer?.cancel();
+    _statusTimer = null;
+    await _statusUpdates.close();
+  }
+
+  void _startStatusPolling() {
+    if (_statusTimer != null || _disposed) {
+      return;
+    }
+    unawaited(_refreshStatus());
+    _statusTimer = Timer.periodic(_statusInterval, (_) {
+      unawaited(_refreshStatus());
+    });
+  }
+
+  Future<void> _refreshAfter(Future<void> operation) async {
+    await operation;
+    await _refreshStatus();
+  }
+
+  Future<void> _refreshStatus() async {
+    if (_statusListenerCount == 0 || _disposed) {
+      return;
+    }
+    final StatusSnapshot? status = await _readStatusSnapshot();
+    if (status != null && !_disposed) {
+      _latestStatus = status;
+      _statusUpdates.add(status);
+    }
+  }
+
+  Future<StatusSnapshot?> _readStatusSnapshot() async {
+    final BatteryStatus battery;
+    try {
+      battery = await _settings.battery.deviceBattery();
+    } on PlutoException {
+      return null;
+    } on FormatException {
+      return null;
+    }
+
+    MarkerBatteryStatus? marker;
+    try {
+      marker = await _settings.battery.markerBattery();
+    } on PlutoException {
+      marker = null;
+    } on FormatException {
+      marker = null;
+    }
+
+    final WifiStatus? wifi = await _wifiStatusForChrome();
+    FrontlightState? frontlight;
+    try {
+      frontlight = await _settings.frontlight.state();
+    } on PlutoException {
+      frontlight = null;
+    } on FormatException {
+      frontlight = null;
+    }
+    final Map<String, Object?> network = await _readAuxiliaryMap(
+      'network.info',
+    );
     return StatusSnapshot(
       time: DateTime.now(),
       battery: StatusBattery(
@@ -491,10 +412,41 @@ final class PlutoLauncherSettings implements LauncherSettings {
             )
           : null,
       isWifiEnabled: wifi is! WifiDisabled,
-      frontlightRaw: frontlight.raw,
-      frontlightMaxRaw: frontlight.maxRaw,
-      isUsbTethered: false,
+      frontlightRaw: frontlight?.raw,
+      frontlightMaxRaw: frontlight?.maxRaw ?? 2047,
+      isUsbTethered: _boolOr(network, 'usbConnected', false),
     );
+  }
+
+  Future<WifiStatus?> _wifiStatusForChrome() async {
+    try {
+      return await wifiStatus();
+    } on PlutoException {
+      return null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  Future<Map<String, Object?>> _readAuxiliaryMap(String method) async {
+    try {
+      final Object? value = await _channel.invokeMethod<Object?>(method);
+      if (value is! Map<Object?, Object?>) {
+        return const <String, Object?>{};
+      }
+      final Map<String, Object?> result = <String, Object?>{};
+      for (final MapEntry<Object?, Object?> entry in value.entries) {
+        final Object? key = entry.key;
+        if (key is String) {
+          result[key] = entry.value;
+        }
+      }
+      return result;
+    } on PlatformException {
+      return const <String, Object?>{};
+    } on MissingPluginException {
+      return const <String, Object?>{};
+    }
   }
 }
 
@@ -508,22 +460,9 @@ final class PlutoDeviceRepository implements LauncherDeviceRepository {
 
   @override
   Future<DeviceInfo> deviceInfo() => _device.deviceInfo();
-}
 
-String _string(Map<String, Object?> map, String key) {
-  final Object? value = map[key];
-  if (value is String) {
-    return value;
-  }
-  throw FormatException('Expected $key string.');
-}
-
-int _int(Map<String, Object?> map, String key) {
-  final Object? value = map[key];
-  if (value is int) {
-    return value;
-  }
-  throw FormatException('Expected $key int.');
+  @override
+  Future<DeviceCapabilities> capabilities() => _device.capabilities();
 }
 
 String _stringOr(Map<String, Object?> map, String key, String fallback) {
@@ -531,12 +470,7 @@ String _stringOr(Map<String, Object?> map, String key, String fallback) {
   return value is String ? value : fallback;
 }
 
-int _intOr(Map<String, Object?> map, String key, int fallback) {
+bool _boolOr(Map<String, Object?> map, String key, bool fallback) {
   final Object? value = map[key];
-  return value is int ? value : fallback;
-}
-
-double _doubleOr(Map<String, Object?> map, String key, double fallback) {
-  final Object? value = map[key];
-  return value is num ? value.toDouble() : fallback;
+  return value is bool ? value : fallback;
 }

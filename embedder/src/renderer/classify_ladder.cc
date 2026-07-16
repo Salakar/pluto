@@ -273,7 +273,6 @@ bool ClassifyLadder::export_state(ClassifyLadderState *out) const {
     return false;
   }
   ClassifyLadderState state;
-  state.version = kStateVersion;
   state.config = config_;
   state.epoch = epoch_;
   state.history = history_;
@@ -282,8 +281,7 @@ bool ClassifyLadder::export_state(ClassifyLadderState *out) const {
 }
 
 bool ClassifyLadder::import_state(const ClassifyLadderState &state) {
-  if (!valid_ || state.version != kStateVersion ||
-      !same_config(state.config, config_) ||
+  if (!valid_ || !same_config(state.config, config_) ||
       state.history.size() != history_.size()) {
     return false;
   }

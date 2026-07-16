@@ -504,18 +504,19 @@ void main() {
           source: MemoryPackageSource(<PackageEntry>[
             PackageEntry(
               path: 'manifest.json',
-              bytes: Uint8List.fromList(
-                utf8.encode(
-                  '{"id":"dev.example.notes","runtime":'
-                  '{"type":"flutter-aot","appElf":"lib/app.so",'
-                  '"assets":"flutter_assets"}}',
-                ),
+              bytes: _manifestBytes(
+                appId: 'dev.example.notes',
+                mode: PlutoBuildMode.release,
               ),
             ),
             PackageEntry(path: 'bundle/lib/app.so', bytes: releaseAotElf()),
             PackageEntry(
               path: 'bundle/flutter_assets/AssetManifest.bin',
               bytes: Uint8List.fromList(<int>[2]),
+            ),
+            PackageEntry(
+              path: 'assets/pluto/icon.png',
+              bytes: Uint8List.fromList(<int>[3]),
             ),
           ]),
           metadata: const PackageMetadata(
@@ -643,7 +644,7 @@ void main() {
     addTearDown(harness.dispose);
     final File package = await _writePackageForMode(
       harness.temp,
-      appId: 'dev.example.arm64-only',
+      appId: 'dev.example.arm64_only',
       mode: PlutoBuildMode.release,
     );
 
@@ -973,6 +974,15 @@ void main() {
       expect(
         transport.uploads.any(
           (FakeUpload u) =>
+              u.remotePath == '$stage/bin/pluto-rm2-cpufreq-restore.sh' &&
+              u.executable,
+        ),
+        isFalse,
+        reason: 'the Move release must not carry an RM2-only helper',
+      );
+      expect(
+        transport.uploads.any(
+          (FakeUpload u) =>
               u.remotePath == '$stage/bin/pluto-power-key-watch.sh' &&
               u.executable,
         ),
@@ -1182,6 +1192,15 @@ void main() {
     expect(
       transport.uploads.any(
         (FakeUpload upload) =>
+            upload.remotePath == '$stage/bin/pluto-rm2-cpufreq-restore.sh' &&
+            upload.executable,
+      ),
+      isTrue,
+      reason: 'the shared ARM slice carries the RM2 crash restorer',
+    );
+    expect(
+      transport.uploads.any(
+        (FakeUpload upload) =>
             upload.remotePath == '$stage/bin/codex' &&
             upload.bytes.length == _testCodexBinary().length,
       ),
@@ -1192,10 +1211,12 @@ void main() {
       transport.commands.any(
         (String command) =>
             command.contains('$candidate/bin/pluto-release-activate.sh') &&
-            command.contains("activate '$candidate' 'persistent'"),
+            command.contains("activate '$candidate' 'transient'"),
       ),
       isTrue,
-      reason: 'the complete ARM release is activated through one commit',
+      reason:
+          'the complete ARM release is activated for the current boot through '
+          'one commit while the profile recovery gate is closed',
     );
   });
 
@@ -1501,23 +1522,9 @@ void _writeLayout(
   } else {
     File('${assets.path}/kernel_blob.bin').writeAsBytesSync(<int>[3]);
   }
-  File('$path/manifest.json').writeAsStringSync(
-    jsonEncode(<String, Object?>{
-      'schema': 1,
-      'id': appId,
-      'icon': 'assets/pluto/icon.png',
-      'runtime': mode.isAot
-          ? <String, Object?>{
-              'type': 'flutter-aot',
-              'appElf': 'lib/app.so',
-              'assets': 'flutter_assets',
-            }
-          : <String, Object?>{
-              'type': 'flutter-kernel',
-              'assets': 'flutter_assets',
-            },
-    }),
-  );
+  File(
+    '$path/manifest.json',
+  ).writeAsStringSync(utf8.decode(_manifestBytes(appId: appId, mode: mode)));
   File('$path/assets/pluto/icon.png')
     ..createSync(recursive: true)
     ..writeAsBytesSync(<int>[4, 5]);
@@ -1529,6 +1536,43 @@ void _writeLayout(
     target: target.cliName,
   ).write(path);
 }
+
+Uint8List _manifestBytes({
+  required String appId,
+  required PlutoBuildMode mode,
+}) => Uint8List.fromList(
+  utf8.encode(
+    jsonEncode(<String, Object?>{
+      'id': appId,
+      'name': 'Test app',
+      'version': '1.0.0',
+      'icon': 'assets/pluto/icon.png',
+      'runtime': mode.isAot
+          ? <String, Object?>{
+              'type': 'flutter-aot',
+              'appElf': 'lib/app.so',
+              'assets': 'flutter_assets',
+            }
+          : <String, Object?>{
+              'type': 'flutter-kernel',
+              'assets': 'flutter_assets',
+            },
+      'engine': <String, Object?>{
+        'flutterVersion': '3.44.4',
+        'engineCommit': _engineHash,
+      },
+      'permissions': <Object?>[],
+      'display': <String, Object?>{
+        'orientations': <Object?>['portrait'],
+        'defaultOrientation': 'portrait',
+        'scale': 'auto',
+        'color': 'auto',
+        'refreshProfile': 'ui',
+      },
+      'launch': <String, Object?>{'singleInstance': true, 'args': <Object?>[]},
+    }),
+  ),
+);
 
 List<int> _aotElf(PlutoBuildMode mode) =>
     mode == PlutoBuildMode.release ? releaseAotElf() : profileAotElf();
@@ -1543,6 +1587,7 @@ String _writeProvisionRuntime(
   for (final String script in <String>[
     'pluto-session.sh',
     'pluto-session-once.sh',
+    'pluto-rm2-cpufreq-restore.sh',
     'pluto-boot-confirm.sh',
     'pluto-power-key-watch.sh',
     'pluto-boot-install.sh',

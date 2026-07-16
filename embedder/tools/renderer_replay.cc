@@ -33,6 +33,7 @@
 #include <thread>
 #include <vector>
 
+#include "compositor/frame_recording.h"
 #include "compositor/software_compositor.h"
 #include "pluto/presenter.h"
 #include "presenter/host_preview.h"
@@ -43,10 +44,6 @@ namespace {
 using pluto::FrameRenderer;
 using pluto::FrameRendererConfig;
 using pluto::PlutoFramePacket;
-
-constexpr uint32_t k_file_magic = 0x52464c50u;  // "PLFR"
-constexpr uint32_t k_frame_magic = 0x304d5246u; // "FRM0"
-constexpr uint32_t k_file_version = 1;
 
 constexpr uint32_t k_gen_width = 480;
 constexpr uint32_t k_gen_height = 800;
@@ -308,11 +305,11 @@ size_t bytes_per_pixel(PlutoPixelFormat format) {
   case kPlutoPixelFormatRgb565:
     return 2;
   }
-  return 2;
+  return 0;
 }
 
 PlutoFramePacket packet_for(const StreamFrame &frame,
-                              const std::vector<uint8_t> *payload) {
+                            const std::vector<uint8_t> *payload) {
   PlutoFramePacket packet{};
   packet.pixels = payload->data();
   packet.row_bytes = frame.width * bytes_per_pixel(frame.format);
@@ -367,50 +364,106 @@ bool read_stream(const std::string &path, std::vector<StreamFrame> *out) {
     std::fprintf(stderr, "renderer_replay: cannot open %s\n", path.c_str());
     return false;
   }
-  const auto read_u32 = [&in]() {
-    uint32_t value = 0;
-    in.read(reinterpret_cast<char *>(&value), sizeof(value));
-    return value;
+  const auto read_exact = [&in](void *data, size_t size) {
+    in.read(reinterpret_cast<char *>(data), static_cast<std::streamsize>(size));
+    return in.good();
   };
-  const auto read_u64 = [&in]() {
-    uint64_t value = 0;
-    in.read(reinterpret_cast<char *>(&value), sizeof(value));
-    return value;
-  };
-  if (read_u32() != k_file_magic || read_u32() != k_file_version ||
-      !in.good()) {
-    std::fprintf(stderr, "renderer_replay: %s is not a PLFR v1 stream\n",
+  uint32_t file_magic = 0;
+  if (!read_exact(&file_magic, sizeof(file_magic)) ||
+      file_magic != pluto::frame_recording::kFileMagic) {
+    std::fprintf(stderr, "renderer_replay: %s is not a PLFR stream\n",
                  path.c_str());
     return false;
   }
   out->clear();
   for (;;) {
-    const uint32_t magic = read_u32();
-    if (in.eof()) {
+    uint32_t magic = 0;
+    in.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+    if (in.eof() && in.gcount() == 0) {
       break;
     }
-    if (magic != k_frame_magic || !in.good()) {
+    uint32_t frame_bytes = 0;
+    if (!in.good() || !read_exact(&frame_bytes, sizeof(frame_bytes)) ||
+        magic != pluto::frame_recording::kFrameMagic ||
+        frame_bytes < pluto::frame_recording::kMinimumFrameBytes ||
+        frame_bytes > pluto::frame_recording::kMaximumFrameBytes) {
       std::fprintf(stderr, "renderer_replay: bad frame magic in %s\n",
                    path.c_str());
       return false;
     }
+
+    uint32_t crc = pluto::frame_recording::kCrc32Initial;
+    crc = pluto::frame_recording::crc32_update(crc, &magic, sizeof(magic));
+    crc = pluto::frame_recording::crc32_update(crc, &frame_bytes,
+                                               sizeof(frame_bytes));
+    const auto read_crc = [&in, &crc](void *data, size_t size) {
+      in.read(reinterpret_cast<char *>(data),
+              static_cast<std::streamsize>(size));
+      if (!in.good()) {
+        return false;
+      }
+      crc = pluto::frame_recording::crc32_update(crc, data, size);
+      return true;
+    };
+    const auto read_u32_crc = [&read_crc](uint32_t *value) {
+      return read_crc(value, sizeof(*value));
+    };
+    const auto read_u64_crc = [&read_crc](uint64_t *value) {
+      return read_crc(value, sizeof(*value));
+    };
+
     StreamFrame frame;
-    frame.time_ns = read_u64();
-    frame.width = read_u32();
-    frame.height = read_u32();
-    frame.format = static_cast<PlutoPixelFormat>(read_u32());
-    frame.did_update = read_u32() != 0;
-    frame.bounds.resize(read_u32());
-    for (PlutoRect &rect : frame.bounds) {
-      in.read(reinterpret_cast<char *>(&rect), sizeof(rect));
-    }
-    const uint32_t payload_bytes = read_u32();
-    frame.payload.resize(payload_bytes);
-    in.read(reinterpret_cast<char *>(frame.payload.data()), payload_bytes);
-    if (!in.good() || (frame.did_update &&
-                       payload_bytes != frame.width * frame.height *
-                                            bytes_per_pixel(frame.format))) {
+    uint32_t format = 0;
+    uint32_t did_update = 0;
+    uint32_t bounds_count = 0;
+    uint32_t payload_bytes = 0;
+    if (!read_u64_crc(&frame.time_ns) || !read_u32_crc(&frame.width) ||
+        !read_u32_crc(&frame.height) || !read_u32_crc(&format) ||
+        !read_u32_crc(&did_update) || !read_u32_crc(&bounds_count) ||
+        !read_u32_crc(&payload_bytes)) {
       std::fprintf(stderr, "renderer_replay: truncated frame in %s\n",
+                   path.c_str());
+      return false;
+    }
+    frame.format = static_cast<PlutoPixelFormat>(format);
+    frame.did_update = did_update == 1u;
+    const size_t bpp = bytes_per_pixel(frame.format);
+    const uint64_t row_bytes = static_cast<uint64_t>(frame.width) * bpp;
+    const bool payload_overflow =
+        frame.height != 0 && row_bytes > UINT64_MAX / frame.height;
+    const uint64_t expected_payload =
+        payload_overflow ? UINT64_MAX : row_bytes * frame.height;
+    const uint64_t expected_frame_bytes =
+        pluto::frame_recording::kMinimumFrameBytes +
+        static_cast<uint64_t>(bounds_count) * sizeof(PlutoRect) + payload_bytes;
+    if (frame.width == 0 || frame.height == 0 || bpp == 0 || did_update > 1u ||
+        payload_overflow ||
+        payload_bytes != (frame.did_update ? expected_payload : 0u) ||
+        expected_frame_bytes != frame_bytes) {
+      std::fprintf(stderr, "renderer_replay: invalid frame layout in %s\n",
+                   path.c_str());
+      return false;
+    }
+
+    frame.bounds.resize(bounds_count);
+    for (PlutoRect &rect : frame.bounds) {
+      if (!read_crc(&rect, sizeof(rect))) {
+        std::fprintf(stderr, "renderer_replay: truncated frame in %s\n",
+                     path.c_str());
+        return false;
+      }
+    }
+    frame.payload.resize(payload_bytes);
+    if (payload_bytes != 0 &&
+        !read_crc(frame.payload.data(), frame.payload.size())) {
+      std::fprintf(stderr, "renderer_replay: truncated frame in %s\n",
+                   path.c_str());
+      return false;
+    }
+    uint32_t checksum = 0;
+    if (!read_exact(&checksum, sizeof(checksum)) ||
+        checksum != pluto::frame_recording::crc32_finish(crc)) {
+      std::fprintf(stderr, "renderer_replay: bad frame checksum in %s\n",
                    path.c_str());
       return false;
     }
@@ -441,14 +494,19 @@ struct Sink {
   PresentStats stats;
 };
 
-PlutoStatus sink_info(PlutoPresenter *presenter,
-                        PlutoDisplayInfo *out_info) {
+PlutoStatus sink_open(const PlutoPresenterConfig *, PlutoPresenter **) {
+  return kPlutoStatusUnsupported;
+}
+
+void sink_close(PlutoPresenter *) {}
+
+PlutoStatus sink_info(PlutoPresenter *presenter, PlutoDisplayInfo *out_info) {
   auto *sink = reinterpret_cast<Sink *>(presenter);
   return sink->inner_ops->info(sink->inner, out_info);
 }
 
 PlutoStatus sink_present(PlutoPresenter *presenter,
-                           const PlutoPresentRequest *request) {
+                         const PlutoPresentRequest *request) {
   auto *sink = reinterpret_cast<Sink *>(presenter);
   if ((request->flags & kPlutoPresentFlagSparkle) != 0) {
     // Sparkle top-off passes are wall-clock-paced background maintenance:
@@ -469,12 +527,10 @@ PlutoStatus sink_present(PlutoPresenter *presenter,
       sink->stats.damaged_px += px;
       sink->stats.class_px[request->refresh_class] += px;
     }
-    sink->stats.max_class_request_px[request->refresh_class] =
-        std::max(sink->stats.max_class_request_px[request->refresh_class],
-                 request_px);
-    const uint64_t surface_px =
-        static_cast<uint64_t>(request->surface.width) *
-        static_cast<uint64_t>(request->surface.height);
+    sink->stats.max_class_request_px[request->refresh_class] = std::max(
+        sink->stats.max_class_request_px[request->refresh_class], request_px);
+    const uint64_t surface_px = static_cast<uint64_t>(request->surface.width) *
+                                static_cast<uint64_t>(request->surface.height);
     // Presenter ABI damage rects are disjoint. Their summed area therefore
     // detects a full-surface request even when it is expressed as many rects.
     if (request_px >= surface_px) {
@@ -499,14 +555,57 @@ bool sink_ready(PlutoPresenter *presenter, PlutoRefreshClass cls) {
   return sink->inner_ops->ready(sink->inner, cls);
 }
 
+PlutoStatus sink_wait_idle(PlutoPresenter *presenter, uint32_t timeout_ms) {
+  auto *sink = reinterpret_cast<Sink *>(presenter);
+  return sink->inner_ops->wait_idle(sink->inner, timeout_ms);
+}
+
+PlutoStatus sink_snapshot(PlutoPresenter *presenter,
+                          PlutoSurface *out_surface) {
+  auto *sink = reinterpret_cast<Sink *>(presenter);
+  return sink->inner_ops->snapshot(sink->inner, out_surface);
+}
+
+PlutoStatus sink_set_pen_focus(PlutoPresenter *presenter,
+                               const PlutoPenFocus *focus) {
+  auto *sink = reinterpret_cast<Sink *>(presenter);
+  return sink->inner_ops->set_pen_focus(sink->inner, focus);
+}
+
+PlutoStatus sink_stage_handoff(PlutoPresenter *presenter,
+                               const PlutoHandoffPayload *payload,
+                               uint32_t timeout_ms) {
+  auto *sink = reinterpret_cast<Sink *>(presenter);
+  return sink->inner_ops->stage_handoff(sink->inner, payload, timeout_ms);
+}
+
+PlutoStatus sink_get_handoff(PlutoPresenter *presenter,
+                             PlutoHandoffPayload *out_payload) {
+  auto *sink = reinterpret_cast<Sink *>(presenter);
+  return sink->inner_ops->get_handoff(sink->inner, out_payload);
+}
+
+PlutoStatus sink_confirm_handoff(PlutoPresenter *presenter, bool accepted) {
+  auto *sink = reinterpret_cast<Sink *>(presenter);
+  return sink->inner_ops->confirm_handoff(sink->inner, accepted);
+}
+
 const PlutoPresenterOps *sink_ops() {
   static const PlutoPresenterOps ops = [] {
     PlutoPresenterOps o{};
     o.struct_size = sizeof(o);
     o.name = "renderer-replay-sink";
+    o.open = sink_open;
+    o.close = sink_close;
     o.info = sink_info;
     o.present = sink_present;
     o.ready = sink_ready;
+    o.wait_idle = sink_wait_idle;
+    o.snapshot = sink_snapshot;
+    o.set_pen_focus = sink_set_pen_focus;
+    o.stage_handoff = sink_stage_handoff;
+    o.get_handoff = sink_get_handoff;
+    o.confirm_handoff = sink_confirm_handoff;
     return o;
   }();
   return &ops;
@@ -630,10 +729,10 @@ bool run_replay(const std::vector<StreamFrame> &frames, const char *label,
       out->final_frame.assign(static_cast<size_t>(frames.front().width) * bpp *
                                   frames.front().height,
                               0);
-      PlutoSurface surface{
-          out->final_frame.data(), frames.front().width * bpp,
-          static_cast<int32_t>(frames.front().width),
-          static_cast<int32_t>(frames.front().height), frames.front().format};
+      PlutoSurface surface{out->final_frame.data(), frames.front().width * bpp,
+                           static_cast<int32_t>(frames.front().width),
+                           static_cast<int32_t>(frames.front().height),
+                           frames.front().format};
       if (sink.inner_ops->snapshot(sink.inner, &surface) != kPlutoStatusOk) {
         std::fprintf(stderr, "renderer_replay: %s snapshot failed\n", label);
         ok = false;

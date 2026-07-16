@@ -1044,6 +1044,8 @@ TEST(MxcfbBackend, StrictlyRejectsMalformedAndUnsupportedRequests) {
   const std::size_t valid_struct_size = owned.request.struct_size;
   owned.request.struct_size = 0;
   EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusInvalidArgument);
+  owned.request.struct_size = valid_struct_size + 1u;
+  EXPECT_EQ(backend.submit(&owned.request), kPlutoStatusInvalidArgument);
   owned.request.struct_size = valid_struct_size;
 
   const auto valid_format = owned.request.surface.format;

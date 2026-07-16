@@ -14,7 +14,6 @@ final class AttachCommand extends PlutoCommand {
       )
       ..addOption(
         'debug-url',
-        aliases: <String>['debug-uri'],
         help: 'Full Dart VM Service URL, including auth token.',
       )
       ..addFlag(

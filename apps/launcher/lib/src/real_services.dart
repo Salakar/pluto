@@ -4,10 +4,7 @@ import 'dart:io';
 import 'dart:typed_data' show Endian;
 
 import 'package:flutter/services.dart';
-import 'package:pluto_device/pluto_device.dart';
 import 'package:pluto_manifest/pluto_manifest.dart';
-import 'package:pluto_settings/pluto_settings.dart';
-import 'package:pluto_ui/pluto_ui.dart';
 
 import 'models.dart';
 import 'services.dart';
@@ -15,22 +12,18 @@ import 'services.dart';
 /// The launcher's own app id; it is hidden from its own gallery.
 const String kLauncherAppId = 'dev.pluto.launcher';
 
-// SDK pins baked into the launcher build; the embedder does not know them.
-const String _flutterVersionPin = '3.44.4';
-const String _dartVersionPin = '3.12.2';
-const String _engineCommitPin = 'a10d8ac38de835021c8d2f920dbf50a920ccc030';
-
 /// Creates services backed by the embedder platform channels
 /// (`pluto/session`, `pluto/settings`, `pluto/apps`, `pluto/device`).
 ///
-/// All channels speak the standard method codec. Reads degrade gracefully
-/// when a backend is unavailable (e.g. host preview without device sysfs).
+/// All channels speak the standard method codec. Device identity is decoded
+/// through `pluto_device` and fails closed if the native service is absent or
+/// returns malformed data.
 LauncherServices createRealServices() {
   return LauncherServices(
     manifests: ChannelManifestRepository(),
     session: ChannelSessionManager(),
-    settings: ChannelLauncherSettings(),
-    device: ChannelLauncherDeviceRepository(),
+    settings: PlutoLauncherSettings(),
+    device: PlutoDeviceRepository(),
   );
 }
 
@@ -47,23 +40,17 @@ final class ChannelSessionManager implements SessionManager {
   final MethodChannel _channel;
 
   @override
-  Stream<SessionEvent> get events => const Stream<SessionEvent>.empty();
-
-  @override
   Future<LaunchResult> launch(AppId id) async {
     try {
       final Object? reply = await _channel.invokeMethod<Object?>(
         'launch',
         <String, Object?>{'appId': id.value},
       );
-      final Map<String, Object?> map = _stringKeyed(reply);
-      if (map['ok'] == true) {
-        // The embedder exits and the supervisor spawns the app; no pid yet.
-        return const LaunchSuccess(pid: 0);
-      }
-      return LaunchFailure(
-        reason: _stringOr(map, 'error', 'session channel refused the launch'),
-      );
+      _expectOkSessionReply(reply, 'launch');
+      // The embedder exits and the supervisor spawns the app; no pid yet.
+      return const LaunchSuccess(pid: 0);
+    } on FormatException catch (error) {
+      return LaunchFailure(reason: error.message.toString());
     } on PlatformException catch (error) {
       return LaunchFailure(reason: error.message ?? error.code);
     } on MissingPluginException {
@@ -75,69 +62,95 @@ final class ChannelSessionManager implements SessionManager {
 
   @override
   Future<AppSwitcherRequest?> pendingAppSwitcher() async {
-    final Map<String, Object?> map = await _invokeMap('switcherInfo');
-    if (map['active'] != true || map['originAppId'] is! String) {
+    const String method = 'switcherInfo';
+    final Map<String, Object?> map = _decodeSessionMap(
+      await _channel.invokeMethod<Object?>(method),
+      method,
+    );
+    final bool active = _sessionBool(map, 'active', method);
+    _expectExactSessionKeys(
+      map,
+      active
+          ? const <String>{'active', 'originAppId', 'apps'}
+          : const <String>{'active'},
+      method,
+    );
+    if (!active) {
       return null;
     }
-    final AppId? origin = AppId.tryParse(map['originAppId']! as String);
-    if (origin == null) {
-      return null;
-    }
+    final AppId origin = _sessionAppId(map, 'originAppId', method);
     final List<AppSwitcherPreview> previews = <AppSwitcherPreview>[];
     final Object? rawApps = map['apps'];
-    if (rawApps is List<Object?>) {
-      for (final Object? rawApp in rawApps) {
-        final Map<String, Object?> app = _stringKeyed(rawApp);
-        final AppId? id = AppId.tryParse(_stringOr(app, 'appId', ''));
-        if (id == null || id == origin || id.value == kLauncherAppId) {
-          continue;
-        }
-        Uint8List? bytes;
-        double? aspectRatio;
-        final String path = _stringOr(app, 'previewPath', '');
-        if (path.isNotEmpty) {
-          try {
-            final File preview = File(path);
-            if (preview.existsSync() && preview.lengthSync() <= 2 << 20) {
-              bytes = preview.readAsBytesSync();
-              aspectRatio = _bmpAspectRatio(bytes);
-            }
-          } on FileSystemException {
-            // A just-evicted app can disappear between state and preview read.
-          }
-        }
-        previews.add(
-          AppSwitcherPreview(
-            appId: id,
-            imageBytes: bytes,
-            aspectRatio: aspectRatio,
-          ),
-        );
+    if (rawApps is! List<Object?>) {
+      _invalidSessionResponse(method);
+    }
+    for (final Object? rawApp in rawApps) {
+      final Map<String, Object?> app = _decodeSessionMap(rawApp, method);
+      _expectExactSessionKeys(app, const <String>{
+        'appId',
+        'previewPath',
+      }, method);
+      final AppId id = _sessionAppId(app, 'appId', method);
+      if (id == origin || id.value == kLauncherAppId) {
+        continue;
       }
+      Uint8List? bytes;
+      double? aspectRatio;
+      final String path = _sessionString(app, 'previewPath', method);
+      if (path.isNotEmpty) {
+        try {
+          final File preview = File(path);
+          if (preview.existsSync() && preview.lengthSync() <= 2 << 20) {
+            bytes = preview.readAsBytesSync();
+            aspectRatio = _bmpAspectRatio(bytes);
+          }
+        } on FileSystemException {
+          // A just-evicted app can disappear between state and preview read.
+        }
+      }
+      previews.add(
+        AppSwitcherPreview(
+          appId: id,
+          imageBytes: bytes,
+          aspectRatio: aspectRatio,
+        ),
+      );
     }
     return AppSwitcherRequest(originAppId: origin, previews: previews);
   }
 
   @override
   Future<void> forceStop(AppId id) async {
-    await _channel.invokeMethod<Object?>('forceStop', <String, Object?>{
-      'appId': id.value,
-    });
+    _expectOkSessionReply(
+      await _channel.invokeMethod<Object?>('forceStop', <String, Object?>{
+        'appId': id.value,
+      }),
+      'forceStop',
+    );
   }
 
   @override
   Future<StatusOverlayRequest?> pendingStatusOverlay() async {
-    final Map<String, Object?> map = await _invokeMap('statusInfo');
-    if (map['active'] != true || map['originAppId'] is! String) {
+    const String method = 'statusInfo';
+    final Map<String, Object?> map = _decodeSessionMap(
+      await _channel.invokeMethod<Object?>(method),
+      method,
+    );
+    final bool active = _sessionBool(map, 'active', method);
+    _expectExactSessionKeys(
+      map,
+      active
+          ? const <String>{'active', 'originAppId', 'previewPath'}
+          : const <String>{'active'},
+      method,
+    );
+    if (!active) {
       return null;
     }
-    final AppId? origin = AppId.tryParse(map['originAppId']! as String);
-    if (origin == null) {
-      return null;
-    }
+    final AppId origin = _sessionAppId(map, 'originAppId', method);
     Uint8List? bytes;
     double? aspectRatio;
-    final String path = _stringOr(map, 'previewPath', '');
+    final String path = _sessionString(map, 'previewPath', method);
     if (path.isNotEmpty) {
       try {
         final File preview = File(path);
@@ -158,123 +171,129 @@ final class ChannelSessionManager implements SessionManager {
 
   @override
   Future<PowerMenuRequest?> pendingPowerMenu() async {
-    final Map<String, Object?> map = await _invokeMap('powerMenuInfo');
-    if (map['active'] != true || map['originAppId'] is! String) {
+    const String method = 'powerMenuInfo';
+    final Map<String, Object?> map = _decodeSessionMap(
+      await _channel.invokeMethod<Object?>(method),
+      method,
+    );
+    final bool active = _sessionBool(map, 'active', method);
+    _expectExactSessionKeys(
+      map,
+      active
+          ? const <String>{'active', 'originAppId'}
+          : const <String>{'active'},
+      method,
+    );
+    if (!active) {
       return null;
     }
-    final AppId? origin = AppId.tryParse(map['originAppId']! as String);
-    return origin == null ? null : PowerMenuRequest(originAppId: origin);
+    return PowerMenuRequest(
+      originAppId: _sessionAppId(map, 'originAppId', method),
+    );
   }
 
   @override
   Future<void> systemUiReady() async {
-    await _channel.invokeMethod<void>('systemUiReady');
+    _expectOkSessionReply(
+      await _channel.invokeMethod<Object?>('systemUiReady'),
+      'systemUiReady',
+    );
   }
 
   @override
-  Future<void> cancelLaunch(AppId id) {
-    return _invokeBestEffort('cancelLaunch', <String, Object?>{
-      'appId': id.value,
-    });
+  Future<void> switchToStockUi() async {
+    await _channel.invokeMethod<void>('exitToStock');
   }
-
-  @override
-  Future<void> switchToStockUi() => _invokeBestEffort('exitToStock');
 
   @override
   Future<void> powerOffDevice() async {
-    final Map<String, Object?> reply = await _invokeMap('powerOff');
-    if (reply['ok'] != true) {
-      throw StateError('The supervisor rejected the power-off request.');
-    }
+    _expectOkSessionReply(
+      await _channel.invokeMethod<Object?>('powerOff'),
+      'powerOff',
+    );
   }
 
   @override
   Future<void> sleepNow() async {
-    await _channel.invokeMethod<Object?>('sleepNow');
+    _expectOkSessionReply(
+      await _channel.invokeMethod<Object?>('sleepNow'),
+      'sleepNow',
+    );
   }
 
   @override
   Future<void> handoffStandbyToSupervisor() async {
-    final Object? reply = await _channel.invokeMethod<Object?>('suspendNow');
-    final Map<String, Object?> map = _stringKeyed(reply);
-    if (map['ok'] != true) {
-      throw StateError('The supervisor standby handoff was rejected.');
-    }
+    _expectOkSessionReply(
+      await _channel.invokeMethod<Object?>('suspendNow'),
+      'suspendNow',
+    );
   }
 
   @override
   Future<void> returnToLauncher() async {
     await _channel.invokeMethod<Object?>('home');
   }
+}
 
-  @override
-  Future<SessionInfo> info() async {
-    final Map<String, Object?> map = await _invokeMap('info');
-    return SessionInfo(
-      plutoVersion: _stringOr(map, 'plutoVersion', 'unknown'),
-      engineVersion: _stringOr(map, 'engineVersion', _engineCommitPin),
-      flutterVersion: _stringOr(map, 'flutterVersion', _flutterVersionPin),
-      dartVersion: _stringOr(map, 'dartVersion', _dartVersionPin),
-      returnInstructions: _stringOr(
-        map,
-        'returnInstructions',
-        'restart it with pluto-session.sh over SSH.',
-      ),
-    );
+Map<String, Object?> _decodeSessionMap(Object? value, String method) {
+  if (value is! Map<Object?, Object?>) {
+    _invalidSessionResponse(method);
   }
-
-  @override
-  Future<LauncherDeveloperStats> developerStats() async {
-    final Map<String, Object?> map = await _invokeMap('developerStats');
-    return LauncherDeveloperStats(
-      vmServiceUri: _stringOr(map, 'vmServiceUri', 'unavailable'),
-      renderer: _stringOr(map, 'renderer', 'unknown'),
-      ghostPartialsSinceFull: _intOr(map, 'ghostPartialsSinceFull', 0),
-      ghostBudget: _intOr(map, 'ghostBudget', 0),
-      buildMs: _doubleOr(map, 'buildMs', 0),
-      rasterMs: _doubleOr(map, 'rasterMs', 0),
-    );
-  }
-
-  @override
-  Future<void> beginPlutoUninstall(PlutoUninstallOptions options) async {
-    // Not implemented natively yet; surfaces the platform error rather than
-    // pretending the uninstall happened.
-    await _channel.invokeMethod<void>('beginPlutoUninstall', <String, Object?>{
-      'deleteAppData': options.deleteAppData,
-      'keepAppListBackup': options.keepAppListBackup,
-    });
-  }
-
-  @override
-  Future<void> runDisplayTestCard() => _invokeBestEffort('runDisplayTestCard');
-
-  @override
-  Future<void> setDamageOverlayEnabled(bool enabled) {
-    return _invokeBestEffort('setDamageOverlay', <String, Object?>{
-      'enabled': enabled,
-    });
-  }
-
-  Future<Map<String, Object?>> _invokeMap(
-    String method, [
-    Object? arguments,
-  ]) async {
-    try {
-      return _stringKeyed(
-        await _channel.invokeMethod<Object?>(method, arguments),
-      );
-    } on PlatformException {
-      return const <String, Object?>{};
-    } on MissingPluginException {
-      return const <String, Object?>{};
+  final Map<String, Object?> result = <String, Object?>{};
+  for (final MapEntry<Object?, Object?> entry in value.entries) {
+    final Object? key = entry.key;
+    if (key is! String) {
+      _invalidSessionResponse(method);
     }
+    result[key] = entry.value;
   }
+  return result;
+}
 
-  Future<void> _invokeBestEffort(String method, [Object? arguments]) async {
-    await _invokeMap(method, arguments);
+void _expectExactSessionKeys(
+  Map<String, Object?> map,
+  Set<String> expected,
+  String method,
+) {
+  if (map.length != expected.length || !map.keys.every(expected.contains)) {
+    _invalidSessionResponse(method);
   }
+}
+
+String _sessionString(Map<String, Object?> map, String key, String method) {
+  final Object? value = map[key];
+  if (value is! String) {
+    _invalidSessionResponse(method);
+  }
+  return value;
+}
+
+bool _sessionBool(Map<String, Object?> map, String key, String method) {
+  final Object? value = map[key];
+  if (value is! bool) {
+    _invalidSessionResponse(method);
+  }
+  return value;
+}
+
+AppId _sessionAppId(Map<String, Object?> map, String key, String method) {
+  final AppId? id = AppId.tryParse(_sessionString(map, key, method));
+  if (id == null) {
+    _invalidSessionResponse(method);
+  }
+  return id;
+}
+
+void _expectOkSessionReply(Object? value, String method) {
+  final Map<String, Object?> map = _decodeSessionMap(value, method);
+  _expectExactSessionKeys(map, const <String>{'ok'}, method);
+  if (map['ok'] != true) {
+    _invalidSessionResponse(method);
+  }
+}
+
+Never _invalidSessionResponse(String method) {
+  throw FormatException('Invalid pluto/session $method response.');
 }
 
 double? _bmpAspectRatio(Uint8List? bytes) {
@@ -292,334 +311,6 @@ double? _bmpAspectRatio(Uint8List? bytes) {
   }
   final double ratio = width / height;
   return ratio >= 0.25 && ratio <= 4 ? ratio : null;
-}
-
-/// Settings facade backed by the embedder `pluto/settings` channel.
-final class ChannelLauncherSettings implements LauncherSettings {
-  /// Creates a settings facade over [channel].
-  ChannelLauncherSettings({MethodChannel? channel})
-    : _channel = channel ?? const MethodChannel('pluto/settings');
-
-  final MethodChannel _channel;
-
-  static const Duration _statusInterval = Duration(seconds: 5);
-  // wpa_supplicant scan results settle shortly after the trigger.
-  static const Duration _scanSettle = Duration(milliseconds: 2500);
-  static const Duration _connectTimeout = Duration(seconds: 25);
-  static const Duration _connectPoll = Duration(seconds: 1);
-  final StreamController<StatusSnapshot> _statusUpdates =
-      StreamController<StatusSnapshot>.broadcast();
-  StatusSnapshot? _latestStatus;
-  Timer? _statusTimer;
-  int _statusListenerCount = 0;
-  bool _disposed = false;
-  late final Stream<StatusSnapshot> _statusStream =
-      Stream<StatusSnapshot>.multi((
-        MultiStreamController<StatusSnapshot> controller,
-      ) {
-        if (_disposed) {
-          controller.close();
-          return;
-        }
-        _statusListenerCount += 1;
-        final StatusSnapshot? latest = _latestStatus;
-        if (latest != null) {
-          controller.add(latest);
-        }
-        _startStatusPolling();
-        final StreamSubscription<StatusSnapshot> subscription = _statusUpdates
-            .stream
-            .listen(
-              controller.add,
-              onError: controller.addError,
-              onDone: controller.close,
-            );
-        controller.onCancel = () async {
-          await subscription.cancel();
-          _statusListenerCount -= 1;
-          if (_statusListenerCount == 0) {
-            _statusTimer?.cancel();
-            _statusTimer = null;
-          }
-        };
-      }, isBroadcast: true);
-
-  @override
-  Future<FrontlightState> frontlight() async {
-    final Map<String, Object?> map = _stringKeyed(
-      await _channel.invokeMethod<Object?>('frontlightGet'),
-    );
-    if (map['raw'] is! int || map['max'] is! int) {
-      throw StateError('Frontlight state is unavailable.');
-    }
-    return FrontlightState(raw: map['raw']! as int, maxRaw: map['max']! as int);
-  }
-
-  @override
-  Future<void> setFrontlightRaw(int raw) async {
-    await _invokeStrict('frontlightSet', <String, Object?>{'raw': raw});
-    await _refreshStatus();
-  }
-
-  @override
-  Future<RotationPreference> rotationPreference() async {
-    final Object? value = await _channel.invokeMethod<Object?>('rotationGet');
-    return RotationPreference.parse(value);
-  }
-
-  @override
-  Future<void> setRotationPreference(RotationPreference preference) async {
-    await _invokeStrict('rotationSet', <String, Object?>{
-      'value': preference.wireName,
-    });
-  }
-
-  @override
-  Future<WifiStatus> wifiStatus() async {
-    final Map<String, Object?> map = _stringKeyed(
-      await _channel.invokeMethod<Object?>('wifiStatus'),
-    );
-    if (map['status'] is! String) {
-      throw const FormatException('Wi-Fi status is unavailable.');
-    }
-    switch (map['status']) {
-      case 'connected':
-        return WifiConnected(
-          connection: WifiConnection(
-            ssid: _stringOr(map, 'ssid', ''),
-            ipAddress: _stringOr(map, 'ipAddress', ''),
-            signal: _doubleOr(map, 'signal', 0),
-          ),
-        );
-      case 'connecting':
-        return WifiConnecting(ssid: _stringOr(map, 'ssid', ''));
-      case 'disabled':
-        return const WifiDisabled();
-      default:
-        return const WifiDisconnected();
-    }
-  }
-
-  @override
-  Future<List<WifiNetwork>> scanWifiNetworks() async {
-    await _invokeStrict('wifiScan');
-    await Future<void>.delayed(_scanSettle);
-    final Object? reply = await _channel.invokeMethod<Object?>(
-      'wifiScanResults',
-    );
-    if (reply is! List<Object?>) {
-      return const <WifiNetwork>[];
-    }
-    final List<WifiNetwork> networks = <WifiNetwork>[];
-    for (final Object? item in reply) {
-      final Map<String, Object?> map = _stringKeyed(item);
-      final String ssid = _stringOr(map, 'ssid', '');
-      if (ssid.isEmpty) {
-        continue;
-      }
-      networks.add(
-        WifiNetwork(
-          ssid: ssid,
-          signal: _doubleOr(map, 'signal', 0),
-          security: WifiSecurity.parse(_stringOr(map, 'security', 'unknown')),
-          isKnown: _boolOr(map, 'isKnown', false),
-          isActive: _boolOr(map, 'isActive', false),
-        ),
-      );
-    }
-    return networks;
-  }
-
-  @override
-  Future<WifiConnection> connectWifi({
-    required String ssid,
-    String? passphrase,
-  }) async {
-    await _invokeStrict('wifiConnect', <String, Object?>{
-      'ssid': ssid,
-      'psk': ?passphrase,
-    });
-    // wpa_supplicant associates in the background; poll until the active
-    // connection matches instead of presenting a speculative success.
-    final DateTime deadline = DateTime.now().add(_connectTimeout);
-    while (DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(_connectPoll);
-      final WifiStatus status = await wifiStatus();
-      if (status is WifiConnected && status.connection.ssid == ssid) {
-        await _refreshStatus();
-        return status.connection;
-      }
-    }
-    throw TimeoutException('Timed out connecting to "$ssid".', _connectTimeout);
-  }
-
-  @override
-  Future<void> forgetWifi(String ssid) async {
-    await _invokeStrict('wifiForget', <String, Object?>{'ssid': ssid});
-    await _refreshStatus();
-  }
-
-  @override
-  Future<void> setWifiEnabled(bool enabled) async {
-    await _invokeStrict('wifiSetEnabled', <String, Object?>{
-      'enabled': enabled,
-    });
-    await _refreshStatus();
-  }
-
-  @override
-  Future<void> setStandbyTimeout(Duration? delay) {
-    return _invokeBestEffort('standbySet', <String, Object?>{
-      'ms': delay?.inMilliseconds ?? 0,
-    });
-  }
-
-  @override
-  Future<bool> hasPin() async {
-    try {
-      return await _channel.invokeMethod<bool>('pinIsSet') ?? false;
-    } on PlatformException {
-      return false;
-    } on MissingPluginException {
-      return false;
-    }
-  }
-
-  @override
-  Future<void> setPin(String digits) async {
-    final DevicePin? pin = DevicePin.tryParse(digits);
-    if (pin == null) {
-      throw ArgumentError.value(digits, 'digits', 'must be 4-8 digits');
-    }
-    await _channel.invokeMethod<void>('pinSet', <String, Object?>{
-      'digits': pin.digits,
-    });
-  }
-
-  @override
-  Future<void> removePin() => _invokeBestEffort('pinRemove');
-
-  @override
-  Future<LauncherNetworkInfo> networkInfo() async {
-    final Map<String, Object?> network = await _invokeMap('networkInfo');
-    final bool usbConnected = _boolOr(network, 'usbConnected', false);
-    final String usbIp = _stringOr(network, 'usbIp', '');
-    final String wifiIp = _stringOr(network, 'wifiIp', '');
-    return LauncherNetworkInfo(
-      usbIp: usbConnected && usbIp.isNotEmpty ? usbIp : null,
-      wifiIp: wifiIp.isEmpty ? null : wifiIp,
-    );
-  }
-
-  @override
-  Stream<StatusSnapshot> watchStatus() => _statusStream;
-
-  /// Stops passive status polling and releases stream resources.
-  Future<void> dispose() async {
-    if (_disposed) {
-      return;
-    }
-    _disposed = true;
-    _statusTimer?.cancel();
-    _statusTimer = null;
-    await _statusUpdates.close();
-  }
-
-  void _startStatusPolling() {
-    if (_statusTimer != null || _disposed) {
-      return;
-    }
-    unawaited(_refreshStatus());
-    _statusTimer = Timer.periodic(_statusInterval, (_) {
-      unawaited(_refreshStatus());
-    });
-  }
-
-  Future<void> _refreshStatus() async {
-    final StatusSnapshot? status = await _statusSnapshot();
-    if (status != null && !_disposed) {
-      _latestStatus = status;
-      _statusUpdates.add(status);
-    }
-  }
-
-  Future<StatusSnapshot?> _statusSnapshot() async {
-    final Map<String, Object?> battery = await _invokeMap('batteryGet');
-    if (!battery.containsKey('levelPercent')) {
-      return null;
-    }
-    final WifiStatus? wifi = await _wifiStatusForChrome();
-    final Map<String, Object?> frontlight = await _invokeMap('frontlightGet');
-    final bool usbNetworkConnected = _boolOr(
-      battery,
-      'isUsbNetworkConnected',
-      false,
-    );
-    return StatusSnapshot(
-      time: DateTime.now(),
-      battery: StatusBattery(
-        levelPercent: _intOr(battery, 'levelPercent', 0).clamp(0, 100),
-        isCharging: _boolOr(battery, 'isCharging', false),
-      ),
-      penBattery: battery.containsKey('markerLevelPercent')
-          ? StatusPenBattery(
-              levelPercent: _intOr(
-                battery,
-                'markerLevelPercent',
-                0,
-              ).clamp(0, 100),
-            )
-          : null,
-      wifi: wifi is WifiConnected
-          ? StatusWifi(
-              ssid: wifi.connection.ssid,
-              signalPercent: (wifi.connection.signal * 100).round().clamp(
-                0,
-                100,
-              ),
-            )
-          : null,
-      isWifiEnabled: wifi is! WifiDisabled,
-      frontlightRaw: frontlight.containsKey('raw')
-          ? _intOr(frontlight, 'raw', 0)
-          : null,
-      frontlightMaxRaw: _intOr(frontlight, 'max', 2047),
-      isUsbTethered: usbNetworkConnected,
-    );
-  }
-
-  Future<WifiStatus?> _wifiStatusForChrome() async {
-    try {
-      return await wifiStatus();
-    } on PlatformException {
-      return null;
-    } on MissingPluginException {
-      return null;
-    }
-  }
-
-  Future<Map<String, Object?>> _invokeMap(
-    String method, [
-    Object? arguments,
-  ]) async {
-    try {
-      return _stringKeyed(
-        await _channel.invokeMethod<Object?>(method, arguments),
-      );
-    } on PlatformException {
-      return const <String, Object?>{};
-    } on MissingPluginException {
-      return const <String, Object?>{};
-    }
-  }
-
-  Future<void> _invokeBestEffort(String method, [Object? arguments]) async {
-    await _invokeMap(method, arguments);
-  }
-
-  Future<void> _invokeStrict(String method, [Object? arguments]) async {
-    await _channel.invokeMethod<Object?>(method, arguments);
-  }
 }
 
 /// Installed-app repository backed by the embedder `pluto/apps` channel.
@@ -743,7 +434,17 @@ final class ChannelManifestRepository implements ManifestRepository {
     InstallRecord? record;
     final Object? installJson = map['install'];
     if (installJson is String) {
-      record = InstallRecord.decode(installJson).valueOrNull;
+      final Result<InstallRecord, ManifestError> result = InstallRecord.decode(
+        installJson,
+      );
+      record = result.valueOrNull;
+      if (record == null) {
+        error ??=
+            result.errorOrNull?.message ?? 'install.json failed validation';
+      } else if (record.appId != manifest.id) {
+        error ??= 'install.json appId does not match manifest.json';
+        record = null;
+      }
     }
 
     final int updatedAtMs = _intOr(map, 'updatedAtMs', 0);
@@ -791,72 +492,22 @@ final class ChannelManifestRepository implements ManifestRepository {
       return null;
     }
     final String name = id.split('.').last;
-    final Result<AppManifest, ManifestError> result = AppManifest.decode(
-      jsonEncode(<String, Object?>{
-        'schema': 1,
-        'id': id,
-        'name': name.isEmpty
-            ? id
-            : '${name[0].toUpperCase()}${name.substring(1)}',
-        'version': '0.0.0',
-        'runtime': <String, Object?>{
-          'type': 'flutter-aot',
-          'appElf': 'lib/app.so',
-          'assets': 'flutter_assets',
-        },
-        'engine': <String, Object?>{
-          'flutterVersion': _flutterVersionPin,
-          'engineCommit': _engineCommitPin,
-          'plutoAbi': 1,
-        },
-      }),
-    );
+    final Result<AppManifest, ManifestError> result =
+        AppManifest.decodeAuthoredYaml(
+          jsonEncode(<String, Object?>{
+            'id': id,
+            'name': name.isEmpty
+                ? id
+                : '${name[0].toUpperCase()}${name.substring(1)}',
+            'version': '0.0.0',
+          }),
+          runtime: const FlutterAotRuntime(),
+          engine: const EngineRequirement(
+            flutterVersion: kFlutterVersionPin,
+            engineCommit: kEngineCommitPin,
+          ),
+        );
     return result.valueOrNull;
-  }
-}
-
-/// Device identity backed by the embedder `pluto/device` channel.
-final class ChannelLauncherDeviceRepository
-    implements LauncherDeviceRepository {
-  /// Creates a device repository over [channel].
-  ChannelLauncherDeviceRepository({MethodChannel? channel})
-    : _channel = channel ?? const MethodChannel('pluto/device');
-
-  final MethodChannel _channel;
-  Future<DeviceInfo>? _cached;
-
-  @override
-  Future<DeviceInfo> deviceInfo() => _cached ??= _read();
-
-  Future<DeviceInfo> _read() async {
-    Map<String, Object?> map = const <String, Object?>{};
-    try {
-      map = _stringKeyed(await _channel.invokeMethod<Object?>('getInfo'));
-    } on PlatformException {
-      // Fall through to defaults below.
-    } on MissingPluginException {
-      // Fall through to defaults below.
-    }
-    final Map<String, Object?> panel = _stringKeyed(map['panelSize']);
-    final String codename = _stringOr(map, 'codename', 'chiappa');
-    return DeviceInfo(
-      model: RemarkableModel.parse(
-        _stringOr(map, 'model', 'paperProMove'),
-        codename,
-      ),
-      codename: codename,
-      firmwareBuild: _stringOr(map, 'firmwareVersion', 'unknown'),
-      osVersion: 'unknown',
-      panel: PanelGeometry(
-        width: _intOr(panel, 'width', 954),
-        height: _intOr(panel, 'height', 1696),
-        dpi: _intOr(map, 'dpi', 264),
-        pixelFormat: PanelPixelFormat.rgb565,
-        colorMode: _boolOr(map, 'isColor', true)
-            ? PanelColorMode.gallery3
-            : PanelColorMode.monochrome,
-      ),
-    );
   }
 }
 
@@ -882,11 +533,6 @@ String _stringOr(Map<String, Object?> map, String key, String fallback) {
 int _intOr(Map<String, Object?> map, String key, int fallback) {
   final Object? value = map[key];
   return value is int ? value : fallback;
-}
-
-double _doubleOr(Map<String, Object?> map, String key, double fallback) {
-  final Object? value = map[key];
-  return value is num ? value.toDouble() : fallback;
 }
 
 bool _boolOr(Map<String, Object?> map, String key, bool fallback) {

@@ -289,7 +289,6 @@ bool GhostLedger::export_state(GhostLedgerState *out) const {
     return false;
   }
   GhostLedgerState state;
-  state.version = kStateVersion;
   state.grid = grid_;
   state.tau_ms = tau_ms_;
   state.owed_threshold = owed_threshold_;
@@ -304,8 +303,7 @@ bool GhostLedger::export_state(GhostLedgerState *out) const {
 }
 
 bool GhostLedger::import_state(const GhostLedgerState &state) {
-  if (!valid_ || state.version != kStateVersion ||
-      !same_grid(state.grid, grid_) || state.tau_ms != tau_ms_ ||
+  if (!valid_ || !same_grid(state.grid, grid_) || state.tau_ms != tau_ms_ ||
       state.owed_threshold != owed_threshold_ ||
       state.debt.size() != debt_.size() || state.owed.size() != owed_.size() ||
       (!state.clock_started && state.last_decay_us != 0) ||
@@ -401,7 +399,6 @@ bool StressLedger::export_state(StressLedgerState *out) const {
     return false;
   }
   StressLedgerState state;
-  state.version = kStateVersion;
   state.grid = grid_;
   state.last_decay_us = last_decay_us_;
   state.clock_started = clock_started_;
@@ -413,8 +410,8 @@ bool StressLedger::export_state(StressLedgerState *out) const {
 }
 
 bool StressLedger::import_state(const StressLedgerState &state) {
-  if (!valid_ || state.version != kStateVersion ||
-      !same_grid(state.grid, grid_) || state.stress.size() != stress_.size() ||
+  if (!valid_ || !same_grid(state.grid, grid_) ||
+      state.stress.size() != stress_.size() ||
       (!state.clock_started && state.last_decay_us != 0) ||
       !valid_active_window(state.stress, state.active_lo, state.active_hi)) {
     return false;
@@ -472,7 +469,6 @@ bool ChromaPendingSet::export_state(ChromaPendingState *out) const {
     return false;
   }
   ChromaPendingState state;
-  state.version = kStateVersion;
   state.grid = grid_;
   state.pending_count = pending_count_;
   state.pending = pending_;
@@ -481,8 +477,7 @@ bool ChromaPendingSet::export_state(ChromaPendingState *out) const {
 }
 
 bool ChromaPendingSet::import_state(const ChromaPendingState &state) {
-  if (!valid_ || state.version != kStateVersion ||
-      !same_grid(state.grid, grid_) ||
+  if (!valid_ || !same_grid(state.grid, grid_) ||
       state.pending.size() != pending_.size() ||
       std::any_of(state.pending.begin(), state.pending.end(),
                   [](uint8_t value) { return value > 1u; })) {

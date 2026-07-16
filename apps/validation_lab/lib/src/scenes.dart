@@ -24,8 +24,8 @@ export 'scenes/static_text_scene.dart';
 /// Builds the full validation scene loop in playback order.
 ///
 /// One full cycle is 184 seconds of dwell plus ten 2.5-second rest beacons
-/// (209 seconds total in auto mode), satisfying the >= 3 minute dead-man
-/// discipline from the device validation plan.
+/// (209 seconds total in auto mode), satisfying the >= 3 minute device
+/// restart-safety discipline from the validation plan.
 List<SceneSpec> buildValidationScenes() {
   return <SceneSpec>[
     SceneSpec(

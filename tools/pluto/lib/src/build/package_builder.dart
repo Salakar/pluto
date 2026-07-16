@@ -325,6 +325,13 @@ _ValidatedPackageSlice _validatePackageLayout(
       message: 'Package target is invalid: ${metadata.target}.',
     );
   }
+  if (metadata.flutterVersion.isEmpty ||
+      !RegExp(r'^[0-9a-f]{40}$').hasMatch(metadata.engineCommit) ||
+      metadata.plutoVersion.isEmpty) {
+    throw const ArtifactVerificationException(
+      message: 'Package build/toolchain identity is incomplete or invalid.',
+    );
+  }
   if (!const <String>{
         'debug',
         'profile',
@@ -365,24 +372,29 @@ _ValidatedPackageSlice _validatePackageLayout(
     manifestEntry.bytes,
     description: 'Package manifest.json',
   );
-  final Object? appId = manifest['id'];
-  if (appId is! String || !_isSafeAppId(appId)) {
-    throw ArtifactVerificationException(
-      message: 'Package manifest has no valid "id" (got: $appId).',
-    );
-  }
-  final Object? rawIconPath = manifest['icon'];
-  final String? iconPath = rawIconPath is String ? rawIconPath : null;
-  if (rawIconPath != null && iconPath == null) {
+  final AppManifest appManifest = _decodeCanonicalManifest(
+    manifestEntry.bytes,
+    description: 'Package manifest.json',
+  );
+  if (appManifest.engine.flutterVersion != metadata.flutterVersion ||
+      appManifest.engine.engineCommit != metadata.engineCommit) {
     throw const ArtifactVerificationException(
-      message: 'Package manifest icon must be a relative string path.',
+      message: 'Package manifest engine identity does not match its slice.',
     );
   }
-  if (iconPath != null) {
-    _validateLayoutPath(iconPath);
-    if (!iconPath.startsWith('assets/')) {
+  final String iconPath = appManifest.icon;
+  _validateLayoutPath(iconPath);
+  if (!iconPath.startsWith('assets/')) {
+    throw const ArtifactVerificationException(
+      message: 'Package manifest icon must be under assets/.',
+    );
+  }
+  final String? iconMonoPath = appManifest.iconMono;
+  if (iconMonoPath != null) {
+    _validateLayoutPath(iconMonoPath);
+    if (!iconMonoPath.startsWith('assets/')) {
       throw const ArtifactVerificationException(
-        message: 'Package manifest icon must be under assets/.',
+        message: 'Package manifest iconMono must be under assets/.',
       );
     }
   }
@@ -394,7 +406,8 @@ _ValidatedPackageSlice _validatePackageLayout(
         path == 'bundle/icudtl.dat' ||
         path.startsWith('bundle/flutter_assets/') ||
         path.startsWith('bundle/lib/') ||
-        path == iconPath;
+        path == iconPath ||
+        path == iconMonoPath;
     if (!allowed) {
       throw ArtifactVerificationException(
         message: 'Package layout contains unsupported path $path.',
@@ -540,36 +553,65 @@ Map<String, Object?> _decodeJsonObject(
   return decoded;
 }
 
+AppManifest _decodeCanonicalManifest(
+  Uint8List bytes, {
+  required String description,
+}) {
+  final String source;
+  try {
+    source = utf8.decode(bytes);
+  } on FormatException catch (error) {
+    throw ArtifactVerificationException(
+      message: '$description is not valid UTF-8: ${error.message}',
+    );
+  }
+  final Result<AppManifest, ManifestError> result = AppManifest.decode(source);
+  final AppManifest? manifest = result.valueOrNull;
+  if (manifest == null) {
+    throw ArtifactVerificationException(
+      message: '$description is not canonical: ${result.errorOrNull!.message}',
+      remediation: 'Rebuild the app with the current Pluto builder.',
+    );
+  }
+  return manifest;
+}
+
 void _validateBuildMetadataDocument(Uint8List bytes, PackageMetadata expected) {
-  final Map<String, Object?> document = _decodeJsonObject(
+  final BuildLayoutMetadata document = BuildLayoutMetadata.decodeBytes(
     bytes,
     description: BuildLayoutMetadata.fileName,
   );
-  final Map<String, Object?> identity = <String, Object?>{
-    'schema': BuildLayoutMetadata.schema,
-    'buildMode': expected.buildMode,
-    'engineFlavor': expected.engineFlavor,
-    'flutterVersion': expected.flutterVersion,
-    'engineCommit': expected.engineCommit,
-    'target': expected.target,
+  final Map<String, (Object?, Object?)> identity = <String, (Object?, Object?)>{
+    'buildMode': (document.buildMode.cliName, expected.buildMode),
+    'engineFlavor': (document.engineFlavor, expected.engineFlavor),
+    'flutterVersion': (document.flutterVersion, expected.flutterVersion),
+    'engineCommit': (document.engineCommit, expected.engineCommit),
+    'target': (document.target, expected.target),
   };
-  for (final MapEntry<String, Object?> field in identity.entries) {
-    if (document[field.key] != field.value) {
+  for (final MapEntry<String, (Object?, Object?)> field in identity.entries) {
+    final (Object? actual, Object? wanted) = field.value;
+    if (actual != wanted) {
       throw ArtifactVerificationException(
         message:
             '${BuildLayoutMetadata.fileName} ${field.key} does not match '
-            'the package slice (${document[field.key]} vs ${field.value}).',
+            'the package slice ($actual vs $wanted).',
       );
     }
   }
 }
 
 Uint8List _encodeBuildMetadata(PackageMetadata metadata) {
-  return Uint8List.fromList(
-    utf8.encode(
-      '${const JsonEncoder.withIndent('  ').convert(<String, Object?>{'schema': BuildLayoutMetadata.schema, 'buildMode': metadata.buildMode, 'engineFlavor': metadata.engineFlavor, 'flutterVersion': metadata.flutterVersion, 'engineCommit': metadata.engineCommit, 'target': metadata.target})}\n',
-    ),
+  final PlutoBuildMode mode = PlutoBuildMode.values.firstWhere(
+    (PlutoBuildMode candidate) => candidate.cliName == metadata.buildMode,
   );
+  final BuildLayoutMetadata document = BuildLayoutMetadata(
+    buildMode: mode,
+    engineFlavor: metadata.engineFlavor,
+    flutterVersion: metadata.flutterVersion,
+    engineCommit: metadata.engineCommit,
+    target: metadata.target,
+  );
+  return Uint8List.fromList(utf8.encode(document.encode()));
 }
 
 bool _jsonEquivalent(Object? a, Object? b) {
@@ -607,13 +649,6 @@ void _validateLayoutPath(String path) {
       message: 'Package layout contains forbidden host metadata: $path.',
     );
   }
-}
-
-bool _isSafeAppId(String id) {
-  return id.length <= 128 &&
-      RegExp(
-        r'^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*)+$',
-      ).hasMatch(id);
 }
 
 final class _ValidatedPackageSlice {

@@ -168,7 +168,6 @@ TEST(FrameLedgerTest, PersistentStateRoundTripsEveryMirrorTransactionally) {
 
   FrameLedgerState actual;
   ASSERT_TRUE(destination.export_state(&actual));
-  EXPECT_EQ(actual.version, expected.version);
   EXPECT_EQ(actual.epoch, expected.epoch);
   EXPECT_EQ(actual.cur_hash, expected.cur_hash);
   EXPECT_TRUE(actual.levels == expected.levels);

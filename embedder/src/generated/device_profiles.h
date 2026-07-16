@@ -316,7 +316,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                         {
                             .confirmation_strategy = GeneratedBootConfirmationStrategy::kUbootEnv,
                             .failure_strategy = GeneratedBootFailureStrategy::kUbootEnvForceReboot,
-                            .boot_default_enabled = true,
+                            .boot_default_enabled = false,
                             .mmc_device = "/dev/mmcblk1",
                             .root_partitions = std::array<std::uint32_t, 2>{2, 3},
                             .expected_boot_limit = 1,
@@ -402,7 +402,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                         {
                             .confirmation_strategy = GeneratedBootConfirmationStrategy::kUbootEnv,
                             .failure_strategy = GeneratedBootFailureStrategy::kUbootEnvForceReboot,
-                            .boot_default_enabled = true,
+                            .boot_default_enabled = false,
                             .mmc_device = "/dev/mmcblk2",
                             .root_partitions = std::array<std::uint32_t, 2>{2, 3},
                             .expected_boot_limit = 1,
@@ -464,7 +464,7 @@ inline constexpr std::array<GeneratedDeviceProfile, 3>
                             .accepted_sources = kMoveAcceptedWaveformSources,
                         },
                     .waveform_option_key = "eink",
-                    .presenter_options = "exact_color=1,enable_rails=1,vcom=-0.62,du_mode=7,dither=1,settle_delay_ms=0,full_refresh_every=0",
+                    .presenter_options = "exact_color=1,enable_rails=1,vcom=-0.62",
                     .pen =
                         {
                             .by_path = "/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse",
@@ -589,7 +589,7 @@ inline constexpr std::array<GeneratedDeviceIdentityFixture, 10>
         },
     }};
 
-inline constexpr std::array<GeneratedDeviceIdentityFixture, 12>
+inline constexpr std::array<GeneratedDeviceIdentityFixture, 14>
     kGeneratedRejectedDeviceIdentityFixtures = {{
         {
             .profile_id = "",
@@ -667,6 +667,20 @@ inline constexpr std::array<GeneratedDeviceIdentityFixture, 12>
             .device_tree_model = "",
             .device_tree_compatible = "fsl,imx93",
             .architecture = "wrong-architecture",
+        },
+        {
+            .profile_id = "",
+            .machine = "remarkable 1.0 remarkable 2.0",
+            .device_tree_model = "",
+            .device_tree_compatible = "remarkable,zero-gravitas",
+            .architecture = "armv7l",
+        },
+        {
+            .profile_id = "",
+            .machine = "remarkable 1.0",
+            .device_tree_model = "",
+            .device_tree_compatible = "remarkable,zero-gravitas fsl,imx7d-sdb",
+            .architecture = "armv7l",
         },
         {
             .profile_id = "",

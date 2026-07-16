@@ -37,6 +37,15 @@ assert_profile move \
 assert_rejected 'reMarkable 1.0' '' '' armv7l
 assert_rejected '' '' 'fsl,imx7d-sdb' armv7l
 assert_rejected 'reMarkable Chiappa' '' 'fsl,imx93' armv7l
+# Each immutable evidence group must independently resolve to exactly one
+# profile. These asymmetric RM1/RM2 conflicts used to slip through the shell
+# matcher because their unique board/compatible intersection was RM1.
+assert_rejected \
+  'reMarkable 1.0 reMarkable 2.0' '' \
+  'remarkable,zero-gravitas' armv7l
+assert_rejected \
+  'reMarkable 1.0' '' \
+  'remarkable,zero-gravitas fsl,imx7d-sdb' armv7l
 assert_rejected \
   'reMarkable 1.0 reMarkable 2.0' '' \
   'remarkable,zero-gravitas fsl,imx7d-sdb' armv7l
@@ -67,8 +76,8 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
   fail "rm1 kernel-owned waveform incorrectly gained a presenter option"
 [ "$(pluto_profile_presenter_options '' /verified/epdc.fw)" = '' ] ||
   fail "rm1 waveform path leaked into presenter options"
-[ "$(pluto_profile_presenter_options 'dither=1' /verified/epdc.fw)" = \
-    'dither=1' ] ||
+[ "$(pluto_profile_presenter_options 'base=1' /verified/epdc.fw)" = \
+    'base=1' ] ||
   fail "rm1 waveform handling changed existing presenter options"
 [ -z "$PLUTO_PROFILE_BUFFER_SLOTS$PLUTO_PROFILE_PHASE_INTERVAL_NS" ] ||
   fail "rm1 incorrectly gained userspace phase scanout fields"
@@ -84,7 +93,7 @@ pluto_profile_load rm1 || fail "could not load rm1 runtime profile"
 [ -z "$PLUTO_PROFILE_FRONTLIGHT_BRIGHTNESS" ] ||
   fail "rm1 incorrectly gained a frontlight path"
 [ "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY:$PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY:$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED:$PLUTO_PROFILE_RECOVERY_MMC_DEVICE:$PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS:$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT" = \
-    'uboot_env:uboot_env_force_reboot:1:/dev/mmcblk1:2,3:1' ] ||
+    'uboot_env:uboot_env_force_reboot:0:/dev/mmcblk1:2,3:1' ] ||
   fail "rm1 U-Boot recovery contract drifted"
 [ -z "$PLUTO_PROFILE_RECOVERY_HELPER$PLUTO_PROFILE_RECOVERY_COUNTER_DIR" ] ||
   fail "rm1 incorrectly gained the Move LPGPR helper"
@@ -116,8 +125,8 @@ pluto_profile_load rm2 || fail "could not load rm2 runtime profile"
 [ "$(pluto_profile_presenter_options '' /verified/active.wbf)" = \
     'wbf=/verified/active.wbf' ] ||
   fail "rm2 empty base options gained a leading comma"
-[ "$(pluto_profile_presenter_options 'dither=1' /verified/active.wbf)" = \
-    'dither=1,wbf=/verified/active.wbf' ] ||
+[ "$(pluto_profile_presenter_options 'base=1' /verified/active.wbf)" = \
+    'base=1,wbf=/verified/active.wbf' ] ||
   fail "rm2 waveform option did not join non-empty base options"
 if pluto_profile_presenter_options '' '' >/dev/null 2>&1; then
   fail "rm2 waveform option accepted an empty verified path"
@@ -147,7 +156,7 @@ esac
     /dev/input/by-path/platform-30370000.snvs:snvs-powerkey-event ] ||
   fail "rm2 power-key path drifted"
 [ "$PLUTO_PROFILE_RECOVERY_CONFIRMATION_STRATEGY:$PLUTO_PROFILE_RECOVERY_FAILURE_STRATEGY:$PLUTO_PROFILE_RECOVERY_BOOT_DEFAULT_ENABLED:$PLUTO_PROFILE_RECOVERY_MMC_DEVICE:$PLUTO_PROFILE_RECOVERY_ROOT_PARTITIONS:$PLUTO_PROFILE_RECOVERY_BOOT_LIMIT" = \
-    'uboot_env:uboot_env_force_reboot:1:/dev/mmcblk2:2,3:1' ] ||
+    'uboot_env:uboot_env_force_reboot:0:/dev/mmcblk2:2,3:1' ] ||
   fail "rm2 U-Boot recovery contract drifted"
 
 pluto_profile_load move || fail "could not load Move runtime profile"

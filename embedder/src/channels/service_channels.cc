@@ -23,30 +23,32 @@
 #include <vector>
 
 #include "channels/wpa_supplicant_client.h"
+#include "generated/device_profiles.h"
 
 namespace pluto {
 namespace {
 
 namespace fs = std::filesystem;
 
-std::string env_or(const char* name, const std::string& fallback) {
-  const char* value = std::getenv(name);
+std::string env_or(const char *name, const std::string &fallback) {
+  const char *value = std::getenv(name);
   return value != nullptr && *value != '\0' ? std::string(value) : fallback;
 }
 
-std::string trim(const std::string& text) {
+std::string trim(const std::string &text) {
   size_t begin = 0;
   size_t end = text.size();
   while (begin < end && std::isspace(static_cast<unsigned char>(text[begin]))) {
     ++begin;
   }
-  while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(text[end - 1]))) {
     --end;
   }
   return text.substr(begin, end - begin);
 }
 
-std::optional<std::string> read_file(const std::string& path) {
+std::optional<std::string> read_file(const std::string &path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     return std::nullopt;
@@ -59,7 +61,7 @@ std::optional<std::string> read_file(const std::string& path) {
   return buffer.str();
 }
 
-std::optional<int64_t> read_int_file(const std::string& path) {
+std::optional<int64_t> read_int_file(const std::string &path) {
   std::optional<std::string> content = read_file(path);
   if (!content.has_value()) {
     return std::nullopt;
@@ -68,7 +70,7 @@ std::optional<int64_t> read_int_file(const std::string& path) {
   if (text.empty()) {
     return std::nullopt;
   }
-  char* end = nullptr;
+  char *end = nullptr;
   const long long value = std::strtoll(text.c_str(), &end, 10);
   if (end == text.c_str()) {
     return std::nullopt;
@@ -76,7 +78,7 @@ std::optional<int64_t> read_int_file(const std::string& path) {
   return static_cast<int64_t>(value);
 }
 
-bool write_file(const std::string& path, const std::string& content) {
+bool write_file(const std::string &path, const std::string &content) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {
     return false;
@@ -86,7 +88,7 @@ bool write_file(const std::string& path, const std::string& content) {
   return static_cast<bool>(out);
 }
 
-bool write_file_atomic(const std::string& path, const std::string& content) {
+bool write_file_atomic(const std::string &path, const std::string &content) {
   const std::string temporary = path + ".tmp";
   if (!write_file(temporary, content)) {
     return false;
@@ -99,13 +101,13 @@ bool write_file_atomic(const std::string& path, const std::string& content) {
   return false;
 }
 
-bool ensure_dir(const std::string& path) {
+bool ensure_dir(const std::string &path) {
   std::error_code ec;
   fs::create_directories(path, ec);
   return !ec || fs::is_directory(path, ec);
 }
 
-int64_t file_mtime_ms(const std::string& path) {
+int64_t file_mtime_ms(const std::string &path) {
   struct stat st {};
   if (::stat(path.c_str(), &st) != 0) {
     return 0;
@@ -113,7 +115,7 @@ int64_t file_mtime_ms(const std::string& path) {
   return static_cast<int64_t>(st.st_mtime) * 1000;
 }
 
-int64_t directory_size_bytes(const fs::path& dir) {
+int64_t directory_size_bytes(const fs::path &dir) {
   std::error_code ec;
   if (!fs::is_directory(dir, ec) || ec) {
     return 0;
@@ -136,8 +138,8 @@ int64_t directory_size_bytes(const fs::path& dir) {
 }
 
 // Runs a shell command, returning stdout on exit status 0.
-std::optional<std::string> run_command(const std::string& command) {
-  FILE* pipe = ::popen((command + " 2>/dev/null").c_str(), "r");
+std::optional<std::string> run_command(const std::string &command) {
+  FILE *pipe = ::popen((command + " 2>/dev/null").c_str(), "r");
   if (pipe == nullptr) {
     return std::nullopt;
   }
@@ -154,7 +156,7 @@ std::optional<std::string> run_command(const std::string& command) {
   return output;
 }
 
-std::string shell_quote(const std::string& value) {
+std::string shell_quote(const std::string &value) {
   std::string quoted = "'";
   for (const char c : value) {
     if (c == '\'') {
@@ -167,7 +169,7 @@ std::string shell_quote(const std::string& value) {
   return quoted;
 }
 
-std::vector<std::string> split_lines(const std::string& text) {
+std::vector<std::string> split_lines(const std::string &text) {
   std::vector<std::string> lines;
   std::istringstream stream(text);
   std::string line;
@@ -180,10 +182,10 @@ std::vector<std::string> split_lines(const std::string& text) {
   return lines;
 }
 
-std::unordered_map<std::string, std::string> parse_key_values(
-    const std::string& text) {
+std::unordered_map<std::string, std::string>
+parse_key_values(const std::string &text) {
   std::unordered_map<std::string, std::string> result;
-  for (const std::string& line : split_lines(text)) {
+  for (const std::string &line : split_lines(text)) {
     const size_t pos = line.find('=');
     if (pos == std::string::npos || pos == 0) {
       continue;
@@ -195,13 +197,13 @@ std::unordered_map<std::string, std::string> parse_key_values(
 
 // ---- method-call argument helpers -----------------------------------------
 
-const StandardValue* arg_value(const MethodCall& call, const char* key) {
-  const StandardValue::Map* map = call.arguments.map();
+const StandardValue *arg_value(const MethodCall &call, const char *key) {
+  const StandardValue::Map *map = call.arguments.map();
   if (map == nullptr) {
     return nullptr;
   }
-  for (const auto& [k, v] : *map) {
-    const std::string* name = k.string();
+  for (const auto &[k, v] : *map) {
+    const std::string *name = k.string();
     if (name != nullptr && *name == key) {
       return &v;
     }
@@ -209,35 +211,35 @@ const StandardValue* arg_value(const MethodCall& call, const char* key) {
   return nullptr;
 }
 
-const std::string* string_arg(const MethodCall& call, const char* key) {
-  const StandardValue* value = arg_value(call, key);
+const std::string *string_arg(const MethodCall &call, const char *key) {
+  const StandardValue *value = arg_value(call, key);
   return value == nullptr ? nullptr : value->string();
 }
 
-std::optional<int64_t> int_arg(const MethodCall& call, const char* key) {
-  const StandardValue* value = arg_value(call, key);
+std::optional<int64_t> int_arg(const MethodCall &call, const char *key) {
+  const StandardValue *value = arg_value(call, key);
   if (value == nullptr) {
     return std::nullopt;
   }
-  const int64_t* integer = value->integer();
+  const int64_t *integer = value->integer();
   if (integer == nullptr) {
     return std::nullopt;
   }
   return *integer;
 }
 
-bool bool_arg(const MethodCall& call, const char* key, bool fallback) {
-  const StandardValue* value = arg_value(call, key);
+bool bool_arg(const MethodCall &call, const char *key, bool fallback) {
+  const StandardValue *value = arg_value(call, key);
   if (value == nullptr) {
     return fallback;
   }
-  const bool* boolean = value->boolean();
+  const bool *boolean = value->boolean();
   return boolean == nullptr ? fallback : *boolean;
 }
 
 // App ids are used as path components; reject anything that could escape the
 // registry directory.
-bool is_safe_app_id(const std::string& id) {
+bool is_safe_app_id(const std::string &id) {
   if (id.empty() || id == "." || id == "..") {
     return false;
   }
@@ -247,17 +249,17 @@ bool is_safe_app_id(const std::string& id) {
 
 // ---- pinned-app state ------------------------------------------------------
 
-std::string pinned_file(const ServicePaths& paths) {
+std::string pinned_file(const ServicePaths &paths) {
   return (fs::path(paths.config_dir) / "pinned").string();
 }
 
-std::set<std::string> read_pinned(const ServicePaths& paths) {
+std::set<std::string> read_pinned(const ServicePaths &paths) {
   std::set<std::string> pinned;
   const std::optional<std::string> content = read_file(pinned_file(paths));
   if (!content.has_value()) {
     return pinned;
   }
-  for (const std::string& line : split_lines(*content)) {
+  for (const std::string &line : split_lines(*content)) {
     const std::string id = trim(line);
     if (!id.empty()) {
       pinned.insert(id);
@@ -266,12 +268,12 @@ std::set<std::string> read_pinned(const ServicePaths& paths) {
   return pinned;
 }
 
-bool write_pinned(const ServicePaths& paths, const std::set<std::string>& ids) {
+bool write_pinned(const ServicePaths &paths, const std::set<std::string> &ids) {
   if (!ensure_dir(paths.config_dir)) {
     return false;
   }
   std::string content;
-  for (const std::string& id : ids) {
+  for (const std::string &id : ids) {
     content += id;
     content += '\n';
   }
@@ -280,13 +282,13 @@ bool write_pinned(const ServicePaths& paths, const std::set<std::string>& ids) {
 
 // ---- pluto/session -------------------------------------------------------
 
-void request_shutdown(ChannelRegistry* registry) {
+void request_shutdown(ChannelRegistry *registry) {
   if (registry->context().request_shutdown) {
     registry->context().request_shutdown();
   }
 }
 
-void request_handoff(ChannelRegistry* registry) {
+void request_handoff(ChannelRegistry *registry) {
   if (registry->context().request_hibernate) {
     registry->context().request_hibernate();
   } else {
@@ -294,10 +296,10 @@ void request_handoff(ChannelRegistry* registry) {
   }
 }
 
-PlatformResponse session_write_control(ChannelRegistry* registry,
-                                       const ServicePaths& paths,
-                                       const char* leaf,
-                                       const std::string& content,
+PlatformResponse session_write_control(ChannelRegistry *registry,
+                                       const ServicePaths &paths,
+                                       const char *leaf,
+                                       const std::string &content,
                                        StandardValue reply) {
   if (!ensure_dir(paths.run_dir) ||
       !write_file((fs::path(paths.run_dir) / leaf).string(), content)) {
@@ -308,9 +310,9 @@ PlatformResponse session_write_control(ChannelRegistry* registry,
   return standard_success(reply);
 }
 
-PlatformResponse handle_session(ChannelRegistry* registry,
-                                const ServicePaths& paths,
-                                const MethodCall& call) {
+PlatformResponse handle_session(ChannelRegistry *registry,
+                                const ServicePaths &paths,
+                                const MethodCall &call) {
   if (call.method == "powerMenuInfo") {
     const std::optional<std::string> content =
         read_file((fs::path(paths.run_dir) / "power-menu-active").string());
@@ -361,8 +363,7 @@ PlatformResponse handle_session(ChannelRegistry* registry,
     StandardValue::List apps;
     for (size_t i = 1; i < lines.size(); ++i) {
       const std::string id = trim(lines[i]);
-      if (!is_safe_app_id(id) || id == origin ||
-          id == "dev.pluto.launcher") {
+      if (!is_safe_app_id(id) || id == origin || id == "dev.pluto.launcher") {
         continue;
       }
       apps.push_back(make_map({
@@ -389,7 +390,7 @@ PlatformResponse handle_session(ChannelRegistry* registry,
     return standard_success(make_map({{"ok", true}}));
   }
   if (call.method == "forceStop") {
-    const std::string* app_id = string_arg(call, "appId");
+    const std::string *app_id = string_arg(call, "appId");
     if (app_id == nullptr || !is_safe_app_id(*app_id) ||
         *app_id == "dev.pluto.launcher") {
       return standard_error("bad-args",
@@ -405,17 +406,12 @@ PlatformResponse handle_session(ChannelRegistry* registry,
     return standard_success(make_map({{"ok", true}}));
   }
   if (call.method == "launch") {
-    const std::string* app_id = string_arg(call, "appId");
+    const std::string *app_id = string_arg(call, "appId");
     if (app_id == nullptr || !is_safe_app_id(*app_id)) {
       return standard_error("bad-args", "launch requires a valid appId");
     }
     return session_write_control(registry, paths, "launch", *app_id,
                                  make_map({{"ok", true}}));
-  }
-  if (call.method == "cancelLaunch") {
-    std::error_code ec;
-    fs::remove(fs::path(paths.run_dir) / "launch", ec);
-    return standard_success();
   }
   if (call.method == "home") {
     return session_write_control(registry, paths, "home", "", StandardValue());
@@ -436,26 +432,38 @@ PlatformResponse handle_session(ChannelRegistry* registry,
           "Power off is available only from the active launcher power menu");
     }
     if (!ensure_dir(paths.run_dir) ||
-        !write_file_atomic(
-            (fs::path(paths.run_dir) / "poweroff").string(), "ui\n")) {
+        !write_file_atomic((fs::path(paths.run_dir) / "poweroff").string(),
+                           "ui\n")) {
       return standard_error("io", "Unable to publish power-off request");
     }
     request_handoff(registry);
     return standard_success(make_map({{"ok", true}}));
   }
   if (call.method == "sleepNow") {
-    const std::optional<int64_t> raw = read_int_file(
-        (fs::path(paths.backlight_dir) / "brightness").string());
-    if (!raw.has_value() || *raw < 0) {
-      return standard_error(
-          "unavailable",
-          "Cannot enter standby without capturing frontlight brightness");
-    }
-    if (!ensure_dir(paths.run_dir) ||
-        !write_file_atomic(
-            (fs::path(paths.run_dir) / "standby-frontlight").string(),
-            std::to_string(*raw) + "\n")) {
-      return standard_error("io", "Unable to persist standby frontlight");
+    const std::string &brightness_path =
+        registry->context().frontlight_brightness_path;
+    const fs::path frontlight_marker =
+        fs::path(paths.run_dir) / "standby-frontlight";
+    if (!brightness_path.empty()) {
+      const std::optional<int64_t> raw = read_int_file(brightness_path);
+      if (!raw.has_value() || *raw < 0) {
+        return standard_error(
+            "unavailable",
+            "Cannot enter standby without capturing frontlight brightness");
+      }
+      if (!ensure_dir(paths.run_dir) ||
+          !write_file_atomic(frontlight_marker.string(),
+                             std::to_string(*raw) + "\n")) {
+        return standard_error("io", "Unable to persist standby frontlight");
+      }
+    } else {
+      // A marker left by another profile must never be interpreted as state
+      // for a device with no frontlight.
+      std::error_code ec;
+      fs::remove(frontlight_marker, ec);
+      if (ec) {
+        return standard_error("io", "Unable to clear stale standby frontlight");
+      }
     }
     return session_write_control(registry, paths, "standby", "launcher\n",
                                  make_map({{"ok", true}}));
@@ -465,18 +473,21 @@ PlatformResponse handle_session(ChannelRegistry* registry,
     // regulator rejects system suspend while that timer is pending, so change
     // its configured hold length while the CRTC is still active. The next
     // normal presenter open reapplies the standard 30000 ms value.
-    const std::optional<int64_t> vpdd_length =
-        read_int_file(paths.vpdd_length_file);
-    if (!vpdd_length.has_value() || *vpdd_length < 0) {
-      return standard_error("unavailable",
-                            "Unable to read the VPDD hold length");
+    const std::string &vpdd_length_path = registry->context().vpdd_length_path;
+    if (!vpdd_length_path.empty()) {
+      const std::optional<int64_t> vpdd_length =
+          read_int_file(vpdd_length_path);
+      if (!vpdd_length.has_value() || *vpdd_length < 0) {
+        return standard_error("unavailable",
+                              "Unable to read the VPDD hold length");
+      }
     }
     const fs::path suspend_marker = fs::path(paths.run_dir) / "suspend";
     if (!ensure_dir(paths.run_dir) ||
         !write_file(suspend_marker.string(), "system\n")) {
       return standard_error("io", "Unable to write control file suspend");
     }
-    if (!write_file(paths.vpdd_length_file, "0\n")) {
+    if (!vpdd_length_path.empty() && !write_file(vpdd_length_path, "0\n")) {
       std::error_code ec;
       fs::remove(suspend_marker, ec);
       return standard_error("io", "Unable to prepare VPDD for standby");
@@ -484,64 +495,61 @@ PlatformResponse handle_session(ChannelRegistry* registry,
     request_shutdown(registry);
     return standard_success(make_map({{"ok", true}}));
   }
-  if (call.method == "info") {
-    const ChannelContext& ctx = registry->context();
-    return standard_success(make_map({
-        {"plutoVersion", "0.1.0"},
-        {"presenter", ctx.presenter_name},
-    }));
-  }
-  if (call.method == "developerStats") {
-    return standard_success(make_map({
-        {"renderer", registry->context().presenter_name},
-    }));
-  }
   return standard_unimplemented(call.method);
 }
 
 // ---- pluto/settings ------------------------------------------------------
 
-int64_t frontlight_max(const ServicePaths& paths) {
+int64_t frontlight_max(const std::string &brightness_path) {
   const std::optional<int64_t> max = read_int_file(
-      (fs::path(paths.backlight_dir) / "max_brightness").string());
+      (fs::path(brightness_path).parent_path() / "max_brightness").string());
   return max.has_value() && *max > 0 ? *max : 2047;
 }
 
-PlatformResponse settings_frontlight_get(const ServicePaths& paths) {
-  const std::optional<int64_t> raw =
-      read_int_file((fs::path(paths.backlight_dir) / "brightness").string());
+PlatformResponse settings_frontlight_get(const ChannelContext &context) {
+  const std::string &brightness_path = context.frontlight_brightness_path;
+  if (brightness_path.empty()) {
+    return standard_error("unsupported",
+                          "Frontlight is not supported by this device");
+  }
+  const std::optional<int64_t> raw = read_int_file(brightness_path);
   if (!raw.has_value()) {
     return standard_error("unavailable", "Frontlight sysfs is unreadable");
   }
   return standard_success(
-      make_map({{"raw", *raw}, {"max", frontlight_max(paths)}}));
+      make_map({{"raw", *raw}, {"maxRaw", frontlight_max(brightness_path)}}));
 }
 
-PlatformResponse settings_frontlight_set(const ServicePaths& paths,
-                                         const MethodCall& call) {
+PlatformResponse settings_frontlight_set(const ChannelContext &context,
+                                         const MethodCall &call) {
+  const std::string &brightness_path = context.frontlight_brightness_path;
+  if (brightness_path.empty()) {
+    return standard_error("unsupported",
+                          "Frontlight is not supported by this device");
+  }
   const std::optional<int64_t> raw = int_arg(call, "raw");
   if (!raw.has_value()) {
-    return standard_error("bad-args", "frontlightSet requires an int raw");
+    return standard_error("bad-args", "frontlight.write requires an int raw");
   }
-  const int64_t clamped = std::clamp<int64_t>(*raw, 0, frontlight_max(paths));
-  if (!write_file((fs::path(paths.backlight_dir) / "brightness").string(),
-                  std::to_string(clamped))) {
+  const int64_t clamped =
+      std::clamp<int64_t>(*raw, 0, frontlight_max(brightness_path));
+  if (!write_file(brightness_path, std::to_string(clamped))) {
     return standard_error("unavailable", "Frontlight sysfs is unwritable");
   }
   return standard_success();
 }
 
-std::optional<std::string> wpa_request(const ServicePaths& paths,
-                                       const std::string& command) {
+std::optional<std::string> wpa_request(const ServicePaths &paths,
+                                       const std::string &command) {
   return WpaSupplicantClient(paths.wpa_control_dir, paths.wifi_interface)
       .request(command);
 }
 
-bool wpa_ok(const std::optional<std::string>& response) {
+bool wpa_ok(const std::optional<std::string> &response) {
   return response.has_value() && trim(*response) == "OK";
 }
 
-std::vector<std::string> split_fields(const std::string& line,
+std::vector<std::string> split_fields(const std::string &line,
                                       const char separator) {
   std::vector<std::string> fields;
   size_t begin = 0;
@@ -571,7 +579,7 @@ int hex_digit(const char value) {
 
 // wpa_supplicant renders non-printable SSID bytes as \xNN and escapes a small
 // set of characters. Decode that representation before sending it to Dart.
-std::string decode_wpa_text(const std::string& value) {
+std::string decode_wpa_text(const std::string &value) {
   std::string decoded;
   decoded.reserve(value.size());
   for (size_t index = 0; index < value.size(); ++index) {
@@ -590,27 +598,27 @@ std::string decode_wpa_text(const std::string& value) {
       }
     }
     switch (escaped) {
-      case 'n':
-        decoded += '\n';
-        break;
-      case 'r':
-        decoded += '\r';
-        break;
-      case 't':
-        decoded += '\t';
-        break;
-      case 'e':
-        decoded += static_cast<char>(27);
-        break;
-      default:
-        decoded += escaped;
-        break;
+    case 'n':
+      decoded += '\n';
+      break;
+    case 'r':
+      decoded += '\r';
+      break;
+    case 't':
+      decoded += '\t';
+      break;
+    case 'e':
+      decoded += static_cast<char>(27);
+      break;
+    default:
+      decoded += escaped;
+      break;
     }
   }
   return decoded;
 }
 
-std::string hex_encode(const std::string& value) {
+std::string hex_encode(const std::string &value) {
   static constexpr char kHex[] = "0123456789abcdef";
   std::string encoded;
   encoded.reserve(value.size() * 2);
@@ -621,7 +629,7 @@ std::string hex_encode(const std::string& value) {
   return encoded;
 }
 
-std::string wpa_quoted(const std::string& value) {
+std::string wpa_quoted(const std::string &value) {
   std::string quoted = "\"";
   for (const char character : value) {
     if (character == '\\' || character == '"') {
@@ -633,10 +641,10 @@ std::string wpa_quoted(const std::string& value) {
   return quoted;
 }
 
-std::unordered_map<std::string, std::string> wpa_properties(
-    const std::string& response) {
+std::unordered_map<std::string, std::string>
+wpa_properties(const std::string &response) {
   std::unordered_map<std::string, std::string> properties;
-  for (const std::string& line : split_lines(response)) {
+  for (const std::string &line : split_lines(response)) {
     const size_t separator = line.find('=');
     if (separator == std::string::npos || separator == 0) {
       continue;
@@ -646,7 +654,7 @@ std::unordered_map<std::string, std::string> wpa_properties(
   return properties;
 }
 
-std::string wpa_security(const std::string& flags) {
+std::string wpa_security(const std::string &flags) {
   if (flags.find("SAE") != std::string::npos) {
     return "sae";
   }
@@ -667,14 +675,13 @@ std::string wpa_security(const std::string& flags) {
   return "unknown";
 }
 
-int64_t signal_percent(const std::string& dbm_text) {
-  char* end = nullptr;
+int64_t signal_percent(const std::string &dbm_text) {
+  char *end = nullptr;
   const long dbm = std::strtol(dbm_text.c_str(), &end, 10);
   if (end == dbm_text.c_str()) {
     return 0;
   }
-  return std::clamp<int64_t>((static_cast<int64_t>(dbm) + 100) * 2, 0,
-                             100);
+  return std::clamp<int64_t>((static_cast<int64_t>(dbm) + 100) * 2, 0, 100);
 }
 
 struct WpaNetwork {
@@ -693,8 +700,7 @@ struct WpaKnownNetwork {
   bool current = false;
 };
 
-std::optional<std::vector<WpaNetwork>> wpa_networks(
-    const ServicePaths& paths) {
+std::optional<std::vector<WpaNetwork>> wpa_networks(const ServicePaths &paths) {
   const std::optional<std::string> response =
       wpa_request(paths, "SCAN_RESULTS");
   if (!response.has_value() || response->rfind("FAIL", 0) == 0) {
@@ -717,8 +723,8 @@ std::optional<std::vector<WpaNetwork>> wpa_networks(
   return networks;
 }
 
-std::optional<std::vector<WpaKnownNetwork>> wpa_known_networks(
-    const ServicePaths& paths) {
+std::optional<std::vector<WpaKnownNetwork>>
+wpa_known_networks(const ServicePaths &paths) {
   const std::optional<std::string> response =
       wpa_request(paths, "LIST_NETWORKS");
   if (!response.has_value() || response->rfind("FAIL", 0) == 0) {
@@ -731,20 +737,19 @@ std::optional<std::vector<WpaKnownNetwork>> wpa_known_networks(
     if (fields.size() < 4) {
       continue;
     }
-    char* end = nullptr;
+    char *end = nullptr;
     const long id = std::strtol(fields[0].c_str(), &end, 10);
     if (end == fields[0].c_str() || id < 0) {
       continue;
     }
     networks.push_back(WpaKnownNetwork{
-        static_cast<int>(id), decode_wpa_text(fields[1]),
-        fields[3],
+        static_cast<int>(id), decode_wpa_text(fields[1]), fields[3],
         fields[3].find("[CURRENT]") != std::string::npos});
   }
   return networks;
 }
 
-bool is_wifi_setting(const std::string& line) {
+bool is_wifi_setting(const std::string &line) {
   const std::string text = trim(line);
   if (text.empty() || text[0] == '#' || text[0] == ';') {
     return false;
@@ -753,13 +758,13 @@ bool is_wifi_setting(const std::string& line) {
   return equals != std::string::npos && trim(text.substr(0, equals)) == "wifi";
 }
 
-bool wifi_setting_is_off(const ServicePaths& paths) {
+bool wifi_setting_is_off(const ServicePaths &paths) {
   const std::optional<std::string> settings =
       read_file(paths.wifi_settings_file);
   if (!settings.has_value()) {
     return false;
   }
-  for (const std::string& line : split_lines(*settings)) {
+  for (const std::string &line : split_lines(*settings)) {
     if (!is_wifi_setting(line)) {
       continue;
     }
@@ -771,10 +776,10 @@ bool wifi_setting_is_off(const ServicePaths& paths) {
   return false;
 }
 
-std::string wifi_settings_with_enabled(const std::string& settings,
+std::string wifi_settings_with_enabled(const std::string &settings,
                                        const bool enabled) {
   std::string updated;
-  for (const std::string& line : split_lines(settings)) {
+  for (const std::string &line : split_lines(settings)) {
     if (!is_wifi_setting(line)) {
       updated += line + "\n";
     }
@@ -783,13 +788,13 @@ std::string wifi_settings_with_enabled(const std::string& settings,
   return updated;
 }
 
-std::string interface_ipv4_address(const std::string& interface_name) {
-  ifaddrs* raw_addresses = nullptr;
+std::string interface_ipv4_address(const std::string &interface_name) {
+  ifaddrs *raw_addresses = nullptr;
   if (::getifaddrs(&raw_addresses) != 0 || raw_addresses == nullptr) {
     return "";
   }
   std::string address;
-  for (const ifaddrs* current = raw_addresses; current != nullptr;
+  for (const ifaddrs *current = raw_addresses; current != nullptr;
        current = current->ifa_next) {
     if (current->ifa_addr == nullptr || current->ifa_name == nullptr ||
         interface_name != current->ifa_name ||
@@ -797,8 +802,7 @@ std::string interface_ipv4_address(const std::string& interface_name) {
       continue;
     }
     char buffer[INET_ADDRSTRLEN] = {};
-    const auto* ipv4 =
-        reinterpret_cast<const sockaddr_in*>(current->ifa_addr);
+    const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(current->ifa_addr);
     if (::inet_ntop(AF_INET, &ipv4->sin_addr, buffer, sizeof(buffer)) !=
         nullptr) {
       address = buffer;
@@ -818,7 +822,7 @@ struct WifiState {
   double signal = 0.0;
 };
 
-std::optional<WifiState> read_wifi_state(const ServicePaths& paths) {
+std::optional<WifiState> read_wifi_state(const ServicePaths &paths) {
   const std::optional<std::string> response = wpa_request(paths, "STATUS");
   if (!response.has_value()) {
     if (wifi_setting_is_off(paths)) {
@@ -835,14 +839,13 @@ std::optional<WifiState> read_wifi_state(const ServicePaths& paths) {
   if (state_it == status.end()) {
     return std::nullopt;
   }
-  const std::string& state = state_it->second;
+  const std::string &state = state_it->second;
   if (state == "AUTHENTICATING" || state == "ASSOCIATING" ||
       state == "ASSOCIATED" || state == "4WAY_HANDSHAKE" ||
       state == "GROUP_HANDSHAKE") {
     const auto ssid = status.find("ssid");
     return WifiState{WifiStateKind::kConnecting,
-                     ssid == status.end() ? ""
-                                          : decode_wpa_text(ssid->second),
+                     ssid == status.end() ? "" : decode_wpa_text(ssid->second),
                      "", 0.0};
   }
   if (state != "COMPLETED") {
@@ -862,8 +865,7 @@ std::optional<WifiState> read_wifi_state(const ServicePaths& paths) {
   // until systemd-networkd has installed the DHCP address expected by callers.
   if (ip_address.empty()) {
     return WifiState{WifiStateKind::kConnecting,
-                     ssid == status.end() ? ""
-                                          : decode_wpa_text(ssid->second),
+                     ssid == status.end() ? "" : decode_wpa_text(ssid->second),
                      "", 0.0};
   }
   double signal = 0.0;
@@ -881,32 +883,7 @@ std::optional<WifiState> read_wifi_state(const ServicePaths& paths) {
                    ip_address, signal};
 }
 
-PlatformResponse settings_wifi_status(const ServicePaths& paths) {
-  const std::optional<WifiState> state = read_wifi_state(paths);
-  if (!state.has_value()) {
-    return standard_error("unavailable",
-                          "wpa_supplicant control socket is unavailable");
-  }
-  switch (state->kind) {
-    case WifiStateKind::kDisabled:
-      return standard_success(make_map({{"status", "disabled"}}));
-    case WifiStateKind::kDisconnected:
-      return standard_success(make_map({{"status", "disconnected"}}));
-    case WifiStateKind::kConnecting:
-      return standard_success(make_map(
-          {{"status", "connecting"}, {"ssid", state->ssid}}));
-    case WifiStateKind::kConnected:
-      return standard_success(make_map({
-          {"status", "connected"},
-          {"ssid", state->ssid},
-          {"ipAddress", state->ip_address},
-          {"signal", state->signal},
-      }));
-  }
-  return standard_error("unavailable", "Unknown wpa_supplicant state");
-}
-
-PlatformResponse settings_wifi_scan(const ServicePaths& paths) {
+PlatformResponse settings_wifi_scan(const ServicePaths &paths) {
   const std::optional<std::string> response = wpa_request(paths, "SCAN");
   if (!response.has_value() ||
       (trim(*response) != "OK" && trim(*response) != "FAIL-BUSY")) {
@@ -915,7 +892,7 @@ PlatformResponse settings_wifi_scan(const ServicePaths& paths) {
   return standard_success();
 }
 
-PlatformResponse settings_wifi_scan_results(const ServicePaths& paths) {
+PlatformResponse settings_wifi_scan_results(const ServicePaths &paths) {
   const std::optional<std::vector<WpaNetwork>> found = wpa_networks(paths);
   if (!found.has_value()) {
     return standard_error("unavailable",
@@ -928,7 +905,7 @@ PlatformResponse settings_wifi_scan_results(const ServicePaths& paths) {
     return standard_error("unavailable",
                           "wpa_supplicant saved networks are unavailable");
   }
-  for (const WpaKnownNetwork& network : *known) {
+  for (const WpaKnownNetwork &network : *known) {
     known_ssids.insert(network.ssid);
   }
   std::string active_ssid;
@@ -941,8 +918,7 @@ PlatformResponse settings_wifi_scan_results(const ServicePaths& paths) {
     if (state != status.end() && state->second == "COMPLETED") {
       const auto ssid = status.find("ssid");
       const auto bssid = status.find("bssid");
-      active_ssid =
-          ssid == status.end() ? "" : decode_wpa_text(ssid->second);
+      active_ssid = ssid == status.end() ? "" : decode_wpa_text(ssid->second);
       active_bssid = bssid == status.end() ? "" : bssid->second;
     }
   }
@@ -963,12 +939,12 @@ PlatformResponse settings_wifi_scan_results(const ServicePaths& paths) {
     }
   }
   std::sort(order.begin(), order.end(),
-            [&strongest](const std::string& a, const std::string& b) {
+            [&strongest](const std::string &a, const std::string &b) {
               return strongest[a].signal > strongest[b].signal;
-  });
+            });
   StandardValue::List networks;
-  for (const std::string& ssid : order) {
-    const WpaNetwork& network = strongest[ssid];
+  for (const std::string &ssid : order) {
+    const WpaNetwork &network = strongest[ssid];
     networks.push_back(make_map({
         {"ssid", ssid},
         {"signal", static_cast<double>(network.signal) / 100.0},
@@ -980,19 +956,16 @@ PlatformResponse settings_wifi_scan_results(const ServicePaths& paths) {
   return standard_success(StandardValue(std::move(networks)));
 }
 
-PlatformResponse settings_wifi_connect(const ServicePaths& paths,
-                                       const MethodCall& call) {
-  const std::string* ssid = string_arg(call, "ssid");
+PlatformResponse settings_wifi_connect(const ServicePaths &paths,
+                                       const MethodCall &call) {
+  const std::string *ssid = string_arg(call, "ssid");
   if (ssid == nullptr || ssid->empty()) {
-    return standard_error("bad-args", "wifiConnect requires an ssid");
+    return standard_error("bad-args", "wifi.connect requires an ssid");
   }
   if (ssid->size() > 32) {
     return standard_error("bad-args", "Wi-Fi SSIDs are limited to 32 bytes");
   }
-  const std::string* psk = string_arg(call, "psk");
-  if (psk == nullptr) {
-    psk = string_arg(call, "passphrase");
-  }
+  const std::string *psk = string_arg(call, "passphrase");
   const bool has_psk = psk != nullptr && !psk->empty();
   if (has_psk && (psk->size() < 8 || psk->size() > 63)) {
     return standard_error("wifi.bad-passphrase",
@@ -1013,7 +986,7 @@ PlatformResponse settings_wifi_connect(const ServicePaths& paths,
                           "wpa_supplicant saved networks are unavailable");
   }
   int network_id = -1;
-  for (const WpaKnownNetwork& network : *known) {
+  for (const WpaKnownNetwork &network : *known) {
     if (network.ssid == *ssid) {
       network_id = network.id;
       break;
@@ -1028,7 +1001,7 @@ PlatformResponse settings_wifi_connect(const ServicePaths& paths,
                             "wpa_supplicant could not add " + *ssid);
     }
     const std::string id_text = trim(*response);
-    char* end = nullptr;
+    char *end = nullptr;
     const long parsed = std::strtol(id_text.c_str(), &end, 10);
     if (end == id_text.c_str() || *end != '\0' || parsed < 0) {
       return standard_error("wifi.connect-failed",
@@ -1038,7 +1011,7 @@ PlatformResponse settings_wifi_connect(const ServicePaths& paths,
   }
 
   const std::string id = std::to_string(network_id);
-  const auto command_ok = [&paths](const std::string& command) {
+  const auto command_ok = [&paths](const std::string &command) {
     return wpa_ok(wpa_request(paths, command));
   };
   const auto rollback_added = [&paths, &id, added] {
@@ -1057,7 +1030,7 @@ PlatformResponse settings_wifi_connect(const ServicePaths& paths,
   std::string security = has_psk ? "wpaPsk" : "open";
   const std::optional<std::vector<WpaNetwork>> scan = wpa_networks(paths);
   if (scan.has_value()) {
-    for (const WpaNetwork& network : *scan) {
+    for (const WpaNetwork &network : *scan) {
       if (network.ssid == *ssid) {
         security = network.security;
         break;
@@ -1085,8 +1058,7 @@ PlatformResponse settings_wifi_connect(const ServicePaths& paths,
                             "wpa_supplicant rejected the credentials for " +
                                 *ssid);
     }
-  } else if (added &&
-             !command_ok("SET_NETWORK " + id + " key_mgmt NONE")) {
+  } else if (added && !command_ok("SET_NETWORK " + id + " key_mgmt NONE")) {
     rollback_added();
     return standard_error("wifi.connect-failed",
                           "wpa_supplicant rejected the open network " + *ssid);
@@ -1103,11 +1075,11 @@ PlatformResponse settings_wifi_connect(const ServicePaths& paths,
   return standard_success();
 }
 
-PlatformResponse settings_wifi_forget(const ServicePaths& paths,
-                                      const MethodCall& call) {
-  const std::string* ssid = string_arg(call, "ssid");
+PlatformResponse settings_wifi_forget(const ServicePaths &paths,
+                                      const MethodCall &call) {
+  const std::string *ssid = string_arg(call, "ssid");
   if (ssid == nullptr || ssid->empty()) {
-    return standard_error("bad-args", "wifiForget requires an ssid");
+    return standard_error("bad-args", "wifi.forget requires an ssid");
   }
   const std::optional<std::vector<WpaKnownNetwork>> known =
       wpa_known_networks(paths);
@@ -1116,7 +1088,7 @@ PlatformResponse settings_wifi_forget(const ServicePaths& paths,
                           "wpa_supplicant saved networks are unavailable");
   }
   bool removed = false;
-  for (const WpaKnownNetwork& network : *known) {
+  for (const WpaKnownNetwork &network : *known) {
     if (network.ssid != *ssid) {
       continue;
     }
@@ -1136,16 +1108,16 @@ PlatformResponse settings_wifi_forget(const ServicePaths& paths,
   return standard_success();
 }
 
-PlatformResponse settings_wifi_set_enabled(const ServicePaths& paths,
-                                           const MethodCall& call) {
+PlatformResponse settings_wifi_set_enabled(const ServicePaths &paths,
+                                           const MethodCall &call) {
   const bool enabled = bool_arg(call, "enabled", true);
   const std::optional<std::string> previous =
       read_file(paths.wifi_settings_file);
   const fs::path settings_path(paths.wifi_settings_file);
   if (!ensure_dir(settings_path.parent_path().string()) ||
-      !write_file_atomic(paths.wifi_settings_file,
-                         wifi_settings_with_enabled(previous.value_or(""),
-                                                    enabled))) {
+      !write_file_atomic(
+          paths.wifi_settings_file,
+          wifi_settings_with_enabled(previous.value_or(""), enabled))) {
     return standard_error("unavailable",
                           "The firmware Wi-Fi preference is unwritable");
   }
@@ -1162,8 +1134,8 @@ PlatformResponse settings_wifi_set_enabled(const ServicePaths& paths,
                    " wpa_supplicant.service")
            .has_value()) {
     restore_preference();
-    return standard_error("unavailable",
-                          "The firmware could not change the Wi-Fi radio state");
+    return standard_error(
+        "unavailable", "The firmware could not change the Wi-Fi radio state");
   }
   if (enabled) {
     bool ready = false;
@@ -1184,7 +1156,7 @@ PlatformResponse settings_wifi_set_enabled(const ServicePaths& paths,
   return standard_success();
 }
 
-StandardValue wifi_connection_value(const WifiState& state) {
+StandardValue wifi_connection_value(const WifiState &state) {
   return make_map({
       {"ssid", state.ssid},
       {"ipAddress", state.ip_address},
@@ -1192,7 +1164,7 @@ StandardValue wifi_connection_value(const WifiState& state) {
   });
 }
 
-PlatformResponse settings_wifi_is_enabled(const ServicePaths& paths) {
+PlatformResponse settings_wifi_is_enabled(const ServicePaths &paths) {
   const std::optional<WifiState> state = read_wifi_state(paths);
   if (!state.has_value()) {
     return standard_error("unavailable",
@@ -1201,7 +1173,7 @@ PlatformResponse settings_wifi_is_enabled(const ServicePaths& paths) {
   return standard_success(state->kind != WifiStateKind::kDisabled);
 }
 
-PlatformResponse settings_wifi_active(const ServicePaths& paths) {
+PlatformResponse settings_wifi_active(const ServicePaths &paths) {
   const std::optional<WifiState> state = read_wifi_state(paths);
   if (!state.has_value()) {
     return standard_error("unavailable",
@@ -1213,8 +1185,8 @@ PlatformResponse settings_wifi_active(const ServicePaths& paths) {
   return standard_success(wifi_connection_value(*state));
 }
 
-PlatformResponse settings_wifi_scan_combined(const ServicePaths& paths,
-                                             const MethodCall& call) {
+PlatformResponse settings_wifi_scan_combined(const ServicePaths &paths,
+                                             const MethodCall &call) {
   const PlatformResponse trigger = settings_wifi_scan(paths);
   if (trigger.empty() || trigger[0] != 0) {
     return trigger;
@@ -1227,14 +1199,14 @@ PlatformResponse settings_wifi_scan_combined(const ServicePaths& paths,
   return settings_wifi_scan_results(paths);
 }
 
-bool network_is_temporarily_disabled(const ServicePaths& paths,
-                                     const std::string& ssid) {
+bool network_is_temporarily_disabled(const ServicePaths &paths,
+                                     const std::string &ssid) {
   const std::optional<std::vector<WpaKnownNetwork>> known =
       wpa_known_networks(paths);
   if (!known.has_value()) {
     return false;
   }
-  for (const WpaKnownNetwork& network : *known) {
+  for (const WpaKnownNetwork &network : *known) {
     if (network.ssid == ssid &&
         network.flags.find("[TEMP-DISABLED]") != std::string::npos) {
       return true;
@@ -1243,20 +1215,20 @@ bool network_is_temporarily_disabled(const ServicePaths& paths,
   return false;
 }
 
-PlatformResponse settings_wifi_connect_and_wait(const ServicePaths& paths,
-                                                const MethodCall& call) {
+PlatformResponse settings_wifi_connect_and_wait(const ServicePaths &paths,
+                                                const MethodCall &call) {
   const PlatformResponse started = settings_wifi_connect(paths, call);
   if (started.empty() || started[0] != 0) {
     return started;
   }
-  const std::string* ssid = string_arg(call, "ssid");
+  const std::string *ssid = string_arg(call, "ssid");
   if (ssid == nullptr) {
     return standard_error("bad-args", "wifi.connect requires an ssid");
   }
   const int64_t requested_ms = int_arg(call, "timeoutMs").value_or(45000);
   const int64_t timeout_ms = std::clamp<int64_t>(requested_ms, 0, 60000);
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(timeout_ms);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (true) {
     const std::optional<WifiState> state = read_wifi_state(paths);
     if (state.has_value() && state->kind == WifiStateKind::kConnected &&
@@ -1278,7 +1250,7 @@ PlatformResponse settings_wifi_connect_and_wait(const ServicePaths& paths,
   return standard_error("wifi.timeout", "Timed out connecting to " + *ssid);
 }
 
-PlatformResponse settings_wifi_disconnect(const ServicePaths& paths) {
+PlatformResponse settings_wifi_disconnect(const ServicePaths &paths) {
   if (!wpa_ok(wpa_request(paths, "DISCONNECT"))) {
     return standard_error("unavailable",
                           "wpa_supplicant could not disconnect Wi-Fi");
@@ -1286,7 +1258,7 @@ PlatformResponse settings_wifi_disconnect(const ServicePaths& paths) {
   return standard_success();
 }
 
-PlatformResponse settings_wifi_known(const ServicePaths& paths) {
+PlatformResponse settings_wifi_known(const ServicePaths &paths) {
   const std::optional<std::vector<WpaKnownNetwork>> known =
       wpa_known_networks(paths);
   if (!known.has_value()) {
@@ -1294,7 +1266,7 @@ PlatformResponse settings_wifi_known(const ServicePaths& paths) {
                           "wpa_supplicant saved networks are unavailable");
   }
   StandardValue::List result;
-  for (const WpaKnownNetwork& network : *known) {
+  for (const WpaKnownNetwork &network : *known) {
     const std::optional<std::string> key_management = wpa_request(
         paths, "GET_NETWORK " + std::to_string(network.id) + " key_mgmt");
     std::string security = "unknown";
@@ -1308,7 +1280,7 @@ PlatformResponse settings_wifi_known(const ServicePaths& paths) {
   return standard_success(StandardValue(std::move(result)));
 }
 
-std::optional<std::string> active_usb_interface(const ServicePaths& paths) {
+std::optional<std::string> active_usb_interface(const ServicePaths &paths) {
   std::error_code ec;
   fs::directory_iterator it(paths.network_class_dir, ec);
   const fs::directory_iterator end;
@@ -1323,8 +1295,8 @@ std::optional<std::string> active_usb_interface(const ServicePaths& paths) {
       // When sysfs exposes carrier it is authoritative. Some USB gadget
       // interfaces report operstate=up while no host is attached; use that
       // weaker signal only on kernels that do not expose a carrier value.
-      const bool connected = carrier.has_value() ? *carrier == 1
-                                                  : operstate == "up";
+      const bool connected =
+          carrier.has_value() ? *carrier == 1 : operstate == "up";
       if (connected) {
         return name;
       }
@@ -1334,7 +1306,7 @@ std::optional<std::string> active_usb_interface(const ServicePaths& paths) {
   return std::nullopt;
 }
 
-PlatformResponse settings_network_info(const ServicePaths& paths) {
+PlatformResponse settings_network_info(const ServicePaths &paths) {
   const std::optional<std::string> usb = active_usb_interface(paths);
   const std::optional<WifiState> wifi = read_wifi_state(paths);
   const std::string wifi_ip =
@@ -1349,11 +1321,15 @@ PlatformResponse settings_network_info(const ServicePaths& paths) {
   }));
 }
 
-PlatformResponse settings_battery_get(const ServicePaths& paths) {
-  int64_t level = -1;
-  int64_t marker_level = -1;
-  bool charging = false;
-  bool usb_present = false;
+struct BatteryReadings {
+  std::optional<int64_t> level_percent;
+  std::optional<int64_t> marker_level_percent;
+  std::string state = "unknown";
+  bool usb_power_present = false;
+};
+
+BatteryReadings read_battery(const ServicePaths &paths) {
+  BatteryReadings readings;
   std::error_code ec;
   fs::directory_iterator it(paths.power_supply_dir, ec);
   const fs::directory_iterator end;
@@ -1371,54 +1347,75 @@ PlatformResponse settings_battery_get(const ServicePaths& paths) {
       // battery. Retain the strongest candidate when several marker supplies
       // exist, while preserving 0% as a truthful value when it is the only
       // attached marker telemetry.
-      if (capacity.has_value() && *capacity > marker_level) {
-        marker_level = std::clamp<int64_t>(*capacity, 0, 100);
+      if (capacity.has_value() &&
+          (!readings.marker_level_percent.has_value() ||
+           *capacity > *readings.marker_level_percent)) {
+        readings.marker_level_percent = std::clamp<int64_t>(*capacity, 0, 100);
       }
-    } else if (type == "Battery" && level < 0) {
+    } else if (type == "Battery" && !readings.level_percent.has_value()) {
       const std::optional<int64_t> capacity =
           read_int_file((supply / "capacity").string());
       if (capacity.has_value()) {
-        level = std::clamp<int64_t>(*capacity, 0, 100);
+        readings.level_percent = std::clamp<int64_t>(*capacity, 0, 100);
         const std::string status =
             trim(read_file((supply / "status").string()).value_or(""));
-        charging = status == "Charging" || status == "Full";
+        if (status == "Charging") {
+          readings.state = "charging";
+        } else if (status == "Discharging") {
+          readings.state = "discharging";
+        } else if (status == "Full") {
+          readings.state = "full";
+        } else if (status == "Not charging") {
+          readings.state = "notCharging";
+        }
       }
     } else if (type == "USB" || type == "Mains") {
       if (read_int_file((supply / "online").string()).value_or(0) == 1) {
-        usb_present = true;
+        readings.usb_power_present = true;
       }
     }
     it.increment(ec);
   }
-  if (level < 0) {
-    return standard_error("unavailable", "No battery telemetry");
-  }
-  StandardValue::Map values{
-      {"levelPercent", level},
-      {"isCharging", charging},
-      {"isUsbPowerPresent", usb_present},
-      {"isUsbNetworkConnected", active_usb_interface(paths).has_value()},
-  };
-  if (marker_level >= 0) {
-    values.emplace_back("markerLevelPercent", marker_level);
-  }
-  return standard_success(StandardValue(std::move(values)));
+  return readings;
 }
 
-std::string pin_file(const ServicePaths& paths) {
+PlatformResponse settings_battery_device(const ServicePaths &paths) {
+  const BatteryReadings readings = read_battery(paths);
+  if (!readings.level_percent.has_value()) {
+    return standard_error("unavailable", "No battery telemetry");
+  }
+  return standard_success(make_map({
+      {"level", static_cast<double>(*readings.level_percent) / 100.0},
+      {"state", readings.state},
+      {"isUsbPowerPresent", readings.usb_power_present},
+  }));
+}
+
+PlatformResponse settings_battery_marker(const ServicePaths &paths) {
+  const BatteryReadings readings = read_battery(paths);
+  if (!readings.marker_level_percent.has_value()) {
+    return standard_success();
+  }
+  return standard_success(make_map({
+      {"level", static_cast<double>(*readings.marker_level_percent) / 100.0},
+  }));
+}
+
+std::string pin_file(const ServicePaths &paths) {
   return (fs::path(paths.config_dir) / "pin").string();
 }
 
-std::string rotation_file(const ServicePaths& paths) {
+std::string rotation_file(const ServicePaths &paths) {
   return (fs::path(paths.config_dir) / "rotation").string();
 }
 
-PlatformResponse settings_pin_set(const ServicePaths& paths,
-                                  const MethodCall& call) {
-  const std::string* digits = string_arg(call, "digits");
+PlatformResponse settings_pin_set(const ServicePaths &paths,
+                                  const MethodCall &call) {
+  const std::string *digits = string_arg(call, "pin");
   if (digits == nullptr || digits->size() < 4 || digits->size() > 8 ||
       digits->find_first_not_of("0123456789") != std::string::npos) {
-    return standard_error("bad-args", "PIN must be 4-8 digits");
+    return standard_error("bad-args",
+                          "security.setPin requires a 4-8 digit pin");
   }
   if (!ensure_dir(paths.config_dir) || !write_file(pin_file(paths), *digits)) {
     return standard_error("io", "Unable to persist PIN");
@@ -1427,34 +1424,82 @@ PlatformResponse settings_pin_set(const ServicePaths& paths,
   return standard_success();
 }
 
-PlatformResponse handle_settings(const ServicePaths& paths,
-                                 const MethodCall& call) {
-  if (call.method == "frontlightGet") {
-    return settings_frontlight_get(paths);
+PlatformResponse settings_pin_is_set(const ServicePaths &paths) {
+  const std::optional<std::string> pin = read_file(pin_file(paths));
+  return standard_success(pin.has_value() && !trim(*pin).empty());
+}
+
+PlatformResponse settings_pin_remove(const ServicePaths &paths) {
+  std::error_code ec;
+  fs::remove(pin_file(paths), ec);
+  return standard_success();
+}
+
+std::string power_delay_file(const ServicePaths &paths, const char *filename) {
+  return (fs::path(paths.config_dir) / filename).string();
+}
+
+PlatformResponse settings_power_policy(const ServicePaths &paths) {
+  return standard_success(make_map({
+      {"idleSuspendDelayMs",
+       read_int_file(power_delay_file(paths, "standby_ms")).value_or(0)},
+      {"suspendPowerOffDelayMs",
+       read_int_file(power_delay_file(paths, "suspend_poweroff_ms"))
+           .value_or(0)},
+  }));
+}
+
+PlatformResponse settings_power_set_delay(const ServicePaths &paths,
+                                          const MethodCall &call,
+                                          const char *method,
+                                          const char *filename) {
+  const std::optional<int64_t> ms = int_arg(call, "ms");
+  if (!ms.has_value() || *ms < 0) {
+    return standard_error("bad-args", std::string(method) +
+                                          " requires a non-negative int ms");
   }
-  if (call.method == "frontlightSet") {
-    return settings_frontlight_set(paths, call);
+  if (!ensure_dir(paths.config_dir) ||
+      !write_file_atomic(power_delay_file(paths, filename),
+                         std::to_string(*ms) + "\n")) {
+    return standard_error("io", "Unable to persist power policy");
   }
-  if (call.method == "wifiStatus") {
-    return settings_wifi_status(paths);
+  return standard_success();
+}
+
+PlatformResponse settings_rotation_read(const ServicePaths &paths) {
+  const std::string value =
+      trim(read_file(rotation_file(paths)).value_or("auto"));
+  if (value == "portrait" || value == "landscape" || value == "auto") {
+    return standard_success(value);
   }
-  if (call.method == "wifiScan") {
-    return settings_wifi_scan(paths);
+  // Invalid persisted state must not leave the device stuck in one mode.
+  return standard_success("auto");
+}
+
+PlatformResponse settings_rotation_write(const ServicePaths &paths,
+                                         const MethodCall &call) {
+  const std::string *value = string_arg(call, "value");
+  if (value == nullptr ||
+      (*value != "portrait" && *value != "landscape" && *value != "auto")) {
+    return standard_error(
+        "bad-args", "rotation.write requires portrait, landscape, or auto");
   }
-  if (call.method == "wifiScanResults") {
-    return settings_wifi_scan_results(paths);
+  if (!ensure_dir(paths.config_dir) ||
+      !write_file_atomic(rotation_file(paths), *value + "\n")) {
+    return standard_error("io", "Unable to persist rotation preference");
   }
-  if (call.method == "wifiConnect") {
-    return settings_wifi_connect(paths, call);
+  return standard_success();
+}
+
+PlatformResponse handle_settings(ChannelRegistry *registry,
+                                 const ServicePaths &paths,
+                                 const MethodCall &call) {
+  if (call.method == "frontlight.read") {
+    return settings_frontlight_get(registry->context());
   }
-  if (call.method == "wifiForget") {
-    return settings_wifi_forget(paths, call);
+  if (call.method == "frontlight.write") {
+    return settings_frontlight_set(registry->context(), call);
   }
-  if (call.method == "wifiSetEnabled") {
-    return settings_wifi_set_enabled(paths, call);
-  }
-  // Canonical pluto_settings protocol. The camelCase methods above remain
-  // as a compatibility surface for the current launcher while it migrates.
   if (call.method == "wifi.isEnabled") {
     return settings_wifi_is_enabled(paths);
   }
@@ -1479,81 +1524,59 @@ PlatformResponse handle_settings(const ServicePaths& paths,
   if (call.method == "wifi.known") {
     return settings_wifi_known(paths);
   }
-  if (call.method == "networkInfo") {
+  if (call.method == "network.info") {
     return settings_network_info(paths);
   }
-  if (call.method == "standbySet") {
-    const std::optional<int64_t> ms = int_arg(call, "ms");
-    if (!ms.has_value()) {
-      return standard_error("bad-args", "standbySet requires an int ms");
-    }
-    if (!ensure_dir(paths.config_dir) ||
-        !write_file((fs::path(paths.config_dir) / "standby_ms").string(),
-                    std::to_string(*ms))) {
-      return standard_error("io", "Unable to persist standby timeout");
-    }
-    return standard_success();
+  if (call.method == "power.policy") {
+    return settings_power_policy(paths);
   }
-  if (call.method == "rotationGet") {
-    const std::string value =
-        trim(read_file(rotation_file(paths)).value_or("auto"));
-    if (value == "portrait" || value == "landscape" || value == "auto") {
-      return standard_success(value);
-    }
-    // Invalid or legacy state must not leave the device stuck in one mode.
-    return standard_success("auto");
+  if (call.method == "power.setIdleSuspendDelay") {
+    return settings_power_set_delay(paths, call, call.method.c_str(),
+                                    "standby_ms");
   }
-  if (call.method == "rotationSet") {
-    const std::string* value = string_arg(call, "value");
-    if (value == nullptr || (*value != "portrait" && *value != "landscape" &&
-                             *value != "auto")) {
-      return standard_error(
-          "bad-args", "rotationSet requires portrait, landscape, or auto");
-    }
-    if (!ensure_dir(paths.config_dir) ||
-        !write_file_atomic(rotation_file(paths), *value + "\n")) {
-      return standard_error("io", "Unable to persist rotation preference");
-    }
-    return standard_success();
+  if (call.method == "power.setSuspendPowerOffDelay") {
+    return settings_power_set_delay(paths, call, call.method.c_str(),
+                                    "suspend_poweroff_ms");
   }
-  if (call.method == "batteryGet") {
-    return settings_battery_get(paths);
+  if (call.method == "rotation.read") {
+    return settings_rotation_read(paths);
   }
-  if (call.method == "pinIsSet") {
-    const std::optional<std::string> pin = read_file(pin_file(paths));
-    return standard_success(pin.has_value() && !trim(*pin).empty());
+  if (call.method == "rotation.write") {
+    return settings_rotation_write(paths, call);
   }
-  if (call.method == "pinSet") {
+  if (call.method == "battery.device") {
+    return settings_battery_device(paths);
+  }
+  if (call.method == "battery.marker") {
+    return settings_battery_marker(paths);
+  }
+  if (call.method == "security.isPinSet") {
+    return settings_pin_is_set(paths);
+  }
+  if (call.method == "security.setPin") {
     return settings_pin_set(paths, call);
   }
-  if (call.method == "pinRemove") {
-    std::error_code ec;
-    fs::remove(pin_file(paths), ec);
-    return standard_success();
+  if (call.method == "security.removePin") {
+    return settings_pin_remove(paths);
   }
   return standard_unimplemented(call.method);
 }
 
 // ---- pluto/core ----------------------------------------------------------
 
-StandardValue capability_list(const ChannelContext& ctx) {
-  StandardValue::List capabilities{"frontlight", "wifi", "devicePin",
-                                   "powerPolicy"};
+StandardValue capability_list(const ChannelContext &ctx) {
+  StandardValue::List capabilities{"wifi", "devicePin", "powerPolicy"};
+  if (!ctx.frontlight_brightness_path.empty()) {
+    capabilities.push_back("frontlight");
+  }
   if (ctx.is_color) {
     capabilities.push_back("colorPanel");
   }
   return StandardValue(std::move(capabilities));
 }
 
-PlatformResponse handle_core(ChannelRegistry* registry,
-                             const MethodCall& call) {
-  if (call.method == "handshake") {
-    return standard_success(make_map({
-        {"protocol", int64_t{1}},
-        {"embedderVersion", "0.1.0"},
-        {"presenter", registry->context().presenter_name},
-    }));
-  }
+PlatformResponse handle_core(ChannelRegistry *registry,
+                             const MethodCall &call) {
   if (call.method == "capabilities") {
     return standard_success(capability_list(registry->context()));
   }
@@ -1562,17 +1585,17 @@ PlatformResponse handle_core(ChannelRegistry* registry,
 
 // ---- pluto/device --------------------------------------------------------
 
-std::string unquote(const std::string& value) {
+std::string unquote(const std::string &value) {
   if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
     return value.substr(1, value.size() - 2);
   }
   return value;
 }
 
-std::string os_release_value(
-    const std::unordered_map<std::string, std::string>& kv,
-    std::initializer_list<const char*> keys) {
-  for (const char* key : keys) {
+std::string
+os_release_value(const std::unordered_map<std::string, std::string> &kv,
+                 std::initializer_list<const char *> keys) {
+  for (const char *key : keys) {
     const auto it = kv.find(key);
     if (it != kv.end() && !it->second.empty()) {
       return unquote(it->second);
@@ -1581,9 +1604,22 @@ std::string os_release_value(
   return "unknown";
 }
 
-PlatformResponse device_info(ChannelRegistry* registry,
-                             const ServicePaths& paths) {
-  const ChannelContext& ctx = registry->context();
+bool is_supported_device_identity(const ChannelContext &ctx) {
+  return std::any_of(kGeneratedDeviceProfiles.begin(),
+                     kGeneratedDeviceProfiles.end(),
+                     [&ctx](const GeneratedDeviceProfile &profile) {
+                       return profile.wire_model == ctx.device_model &&
+                              profile.codename == ctx.device_codename;
+                     });
+}
+
+PlatformResponse device_info(ChannelRegistry *registry,
+                             const ServicePaths &paths) {
+  const ChannelContext &ctx = registry->context();
+  if (!is_supported_device_identity(ctx)) {
+    return standard_error("unsupported-device",
+                          "Device identity is not a supported Pluto profile");
+  }
   std::string firmware = "unknown";
   std::string os_version = "unknown";
   const std::optional<std::string> os_release =
@@ -1619,95 +1655,26 @@ PlatformResponse device_info(ChannelRegistry* registry,
   }));
 }
 
-PlatformResponse device_temperature(const ServicePaths& paths) {
-  std::vector<std::pair<std::string, double>> readings;
-  std::error_code ec;
-  fs::directory_iterator it(paths.hwmon_dir, ec);
-  const fs::directory_iterator end;
-  while (!ec && it != end) {
-    const fs::path entry = it->path();
-    const std::optional<int64_t> milli_c =
-        read_int_file((entry / "temp1_input").string());
-    if (milli_c.has_value()) {
-      std::string name =
-          trim(read_file((entry / "name").string()).value_or(""));
-      if (name.empty()) {
-        name = entry.filename().string();
-      }
-      readings.emplace_back(std::move(name),
-                            static_cast<double>(*milli_c) / 1000.0);
-    }
-    it.increment(ec);
-  }
-  if (readings.empty()) {
-    return standard_error("unavailable", "No temperature sensors");
-  }
-  std::sort(readings.begin(), readings.end());
-  StandardValue::List sensors;
-  for (const auto& [name, celsius] : readings) {
-    sensors.push_back(make_map({{"name", name}, {"celsius", celsius}}));
-  }
-  return standard_success(make_map({
-      {"celsius", readings.front().second},
-      {"sensor", readings.front().first},
-      {"sensors", StandardValue(std::move(sensors))},
-  }));
-}
-
-PlatformResponse handle_device(ChannelRegistry* registry,
-                               const ServicePaths& paths,
-                               const MethodCall& call) {
-  const ChannelContext& ctx = registry->context();
-  // v1 package contract (pluto_device).
+PlatformResponse handle_device(ChannelRegistry *registry,
+                               const ServicePaths &paths,
+                               const MethodCall &call) {
   if (call.method == "deviceInfo") {
     return device_info(registry, paths);
   }
   if (call.method == "capabilities") {
-    return standard_success(capability_list(ctx));
-  }
-  if (call.method == "battery") {
-    return settings_battery_get(paths);
-  }
-  if (call.method == "temperature") {
-    return device_temperature(paths);
-  }
-  // Legacy launcher methods.
-  if (call.method == "getInfo") {
-    return standard_success(make_map({
-        {"model", ctx.device_model},
-        {"codename", ctx.device_codename},
-        {"panelSize", make_map({
-                          {"width", static_cast<int64_t>(ctx.panel_width)},
-                          {"height", static_cast<int64_t>(ctx.panel_height)},
-                      })},
-        {"dpi", static_cast<int64_t>(ctx.dpi)},
-        {"isColor", ctx.is_color},
-        {"firmwareVersion", "unknown"},
-        {"presenter", ctx.presenter_name},
-    }));
-  }
-  if (call.method == "getOrientation") {
-    return standard_success(static_cast<int64_t>(ctx.rotation));
-  }
-  if (call.method == "setOrientation") {
-    const int64_t* value = call.arguments.integer();
-    if (value == nullptr ||
-        (*value != 0 && *value != 90 && *value != 180 && *value != 270)) {
-      return standard_error("bad-args",
-                            "Orientation must be 0, 90, 180, or 270");
+    if (!is_supported_device_identity(registry->context())) {
+      return standard_error("unsupported-device",
+                            "Device identity is not a supported Pluto profile");
     }
-    if (ctx.set_rotation) {
-      ctx.set_rotation(static_cast<int32_t>(*value));
-    }
-    return standard_success();
+    return standard_success(capability_list(registry->context()));
   }
   return standard_unimplemented(call.method);
 }
 
 // ---- pluto/paths ---------------------------------------------------------
 
-PlatformResponse handle_paths(const ServicePaths& paths,
-                              const MethodCall& call) {
+PlatformResponse handle_paths(const ServicePaths &paths,
+                              const MethodCall &call) {
   if (call.method == "getPaths") {
     // Always scoped to the id the supervisor launched us with; the argument
     // is intentionally ignored so apps cannot reach each other's data.
@@ -1732,7 +1699,7 @@ PlatformResponse handle_paths(const ServicePaths& paths,
 
 // ---- pluto/apps ----------------------------------------------------------
 
-PlatformResponse apps_list(const ServicePaths& paths) {
+PlatformResponse apps_list(const ServicePaths &paths) {
   StandardValue::List apps;
   std::error_code ec;
   if (!fs::is_directory(paths.apps_dir, ec) || ec) {
@@ -1750,7 +1717,7 @@ PlatformResponse apps_list(const ServicePaths& paths) {
     it.increment(ec);
   }
   std::sort(ids.begin(), ids.end());
-  for (const std::string& id : ids) {
+  for (const std::string &id : ids) {
     const fs::path app_dir = fs::path(paths.apps_dir) / id;
     const std::string manifest_path = (app_dir / "manifest.json").string();
     const std::optional<std::string> manifest = read_file(manifest_path);
@@ -1767,24 +1734,26 @@ PlatformResponse apps_list(const ServicePaths& paths) {
         {"sizeBytes", directory_size_bytes(app_dir)},
         {"dataSizeBytes", directory_size_bytes(fs::path(paths.data_dir) / id)},
         {"updatedAtMs", file_mtime_ms(manifest_path)},
-        {"error", manifest.has_value()
-                      ? StandardValue()
-                      : StandardValue("manifest.json is missing or unreadable")},
+        {"error",
+         manifest.has_value()
+             ? StandardValue()
+             : StandardValue("manifest.json is missing or unreadable")},
     }));
   }
   return standard_success(StandardValue(std::move(apps)));
 }
 
-PlatformResponse handle_apps(const ServicePaths& paths,
-                             const MethodCall& call) {
+PlatformResponse handle_apps(const ServicePaths &paths,
+                             const MethodCall &call) {
   if (call.method == "list") {
     return apps_list(paths);
   }
   if (call.method == "uninstall" || call.method == "clearAppData" ||
       call.method == "setPinned") {
-    const std::string* app_id = string_arg(call, "appId");
+    const std::string *app_id = string_arg(call, "appId");
     if (app_id == nullptr || !is_safe_app_id(*app_id)) {
-      return standard_error("bad-args", call.method + " requires a valid appId");
+      return standard_error("bad-args",
+                            call.method + " requires a valid appId");
     }
     std::error_code ec;
     if (call.method == "clearAppData") {
@@ -1820,7 +1789,7 @@ PlatformResponse handle_apps(const ServicePaths& paths,
   return standard_unimplemented(call.method);
 }
 
-}  // namespace
+} // namespace
 
 ServicePaths service_paths_from_env() {
   ServicePaths paths;
@@ -1828,11 +1797,7 @@ ServicePaths service_paths_from_env() {
   paths.apps_dir = env_or("PLUTO_APPS_DIR", paths.apps_dir);
   paths.data_dir = env_or("PLUTO_DATA_DIR", paths.data_dir);
   paths.config_dir = env_or("PLUTO_CONFIG_DIR", paths.config_dir);
-  paths.backlight_dir = env_or("PLUTO_BACKLIGHT", paths.backlight_dir);
-  paths.vpdd_length_file =
-      env_or("PLUTO_VPDD_LENGTH_FILE", paths.vpdd_length_file);
-  paths.power_supply_dir =
-      env_or("PLUTO_POWER_SUPPLY", paths.power_supply_dir);
+  paths.power_supply_dir = env_or("PLUTO_POWER_SUPPLY", paths.power_supply_dir);
   paths.wpa_control_dir =
       env_or("PLUTO_WPA_CONTROL_DIR", paths.wpa_control_dir);
   paths.wifi_settings_file =
@@ -1845,37 +1810,34 @@ ServicePaths service_paths_from_env() {
       env_or("PLUTO_USB_IFACE_PREFIX", paths.usb_interface_prefix);
   paths.os_release_file = env_or("PLUTO_OS_RELEASE", paths.os_release_file);
   paths.serial_command = env_or("PLUTO_SERIAL_CMD", paths.serial_command);
-  paths.hwmon_dir = env_or("PLUTO_HWMON", paths.hwmon_dir);
   paths.app_id = env_or("PLUTO_APP_ID", paths.app_id);
   return paths;
 }
 
-void register_service_channels(ChannelRegistry* registry, ServicePaths paths) {
+void register_service_channels(ChannelRegistry *registry, ServicePaths paths) {
   const auto shared = std::make_shared<const ServicePaths>(std::move(paths));
   registry->register_standard_method_channel(
-      "pluto/core", [registry](const MethodCall& call) {
+      "pluto/core", [registry](const MethodCall &call) {
         return handle_core(registry, call);
       });
   registry->register_standard_method_channel(
-      "pluto/device", [registry, shared](const MethodCall& call) {
+      "pluto/device", [registry, shared](const MethodCall &call) {
         return handle_device(registry, *shared, call);
       });
   registry->register_standard_method_channel(
-      "pluto/paths", [shared](const MethodCall& call) {
-        return handle_paths(*shared, call);
-      });
+      "pluto/paths",
+      [shared](const MethodCall &call) { return handle_paths(*shared, call); });
   registry->register_standard_method_channel(
-      "pluto/session", [registry, shared](const MethodCall& call) {
+      "pluto/session", [registry, shared](const MethodCall &call) {
         return handle_session(registry, *shared, call);
       });
   registry->register_standard_method_channel(
-      "pluto/settings", [shared](const MethodCall& call) {
-        return handle_settings(*shared, call);
+      "pluto/settings", [registry, shared](const MethodCall &call) {
+        return handle_settings(registry, *shared, call);
       });
   registry->register_standard_method_channel(
-      "pluto/apps", [shared](const MethodCall& call) {
-        return handle_apps(*shared, call);
-      });
+      "pluto/apps",
+      [shared](const MethodCall &call) { return handle_apps(*shared, call); });
 }
 
-}  // namespace pluto
+} // namespace pluto
