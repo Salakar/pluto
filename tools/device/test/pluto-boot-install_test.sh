@@ -313,6 +313,13 @@ expect_uninstall_failure() { # label
   fi
 }
 
+expect_restore_failure() { # label
+  erf_label=$1
+  if run_installer sh "$INSTALLER" restore > "$CASE/failure.out" 2>&1; then
+    fail "$erf_label was accepted"
+  fi
+}
+
 expect_power_loss() { # action boundary
   epl_action=$1
   epl_boundary=$2
@@ -410,6 +417,123 @@ mv "$ROOT/launcher/install.json.tmp" "$ROOT/launcher/install.json"
 if run_installer sh "$INSTALLER" validate >/dev/null 2>&1; then
   fail "release validation accepted a profile install record"
 fi
+
+# Restoring a runtime-only current-boot session must not enter the persistent
+# A/B transaction. Exact absence of every persistent artifact plus a valid,
+# active stock unit is sufficient even when peer topology and identity are
+# deliberately unavailable.
+reset_case rm1 2 3
+rm -f "$PEER/usr/bin/xochitl"
+: > "$EVENT_LOG"
+PLUTO_TEST_FW_READ_FAIL=active_partition \
+  run_installer sh "$INSTALLER" restore > "$CASE/restore-transient.out" ||
+  fail "transient-only restore required persistent peer verification"
+grep -q 'no persistent Pluto boot state' "$CASE/restore-transient.out" ||
+  fail "transient-only restore did not diagnose its exact no-op"
+if grep -q '^fw-read ' "$EVENT_LOG"; then
+  fail "transient-only restore read persistent boot topology"
+fi
+assert_eq 'systemctl is-active --quiet xochitl.service' \
+  "$(cat "$EVENT_LOG")" \
+  "transient-only restore performed more than the stock activity proof"
+unset PLUTO_TEST_FW_READ_FAIL
+
+# The no-op is fail-closed: stock identity and service activity must both be
+# exact, and any partial persistent artifact must enter neither the no-op nor
+# an unowned cleanup path.
+reset_case rm1 2 3
+chmod 0644 "$LIVE/usr/bin/xochitl"
+expect_restore_failure "transient restore with invalid active stock identity"
+grep -q 'active stock UI identity is invalid before restore' \
+  "$CASE/failure.out" ||
+  fail "invalid active stock identity did not fail at the no-op gate"
+
+reset_case rm1 2 3
+PLUTO_TEST_SYSTEMCTL_FAIL='is-active --quiet xochitl.service' \
+  expect_restore_failure "transient restore with inactive stock service"
+grep -q 'stock xochitl is not active' "$CASE/failure.out" ||
+  fail "inactive stock service did not fail at the no-op gate"
+unset PLUTO_TEST_SYSTEMCTL_FAIL
+
+reset_case rm1 2 3
+mkdir -p "$(dirname "$HANDLER")"
+printf 'partial recovery\n' > "$HANDLER"
+: > "$EVENT_LOG"
+expect_restore_failure "restore with unowned partial recovery state"
+grep -q 'inexact persistent boot state' "$CASE/failure.out" ||
+  fail "partial recovery state was not rejected as inexact"
+[ -f "$HANDLER" ] || fail "inexact restore removed an unowned artifact"
+[ ! -s "$EVENT_LOG" ] ||
+  fail "inexact restore touched boot topology or the display service"
+
+for partial_receipt in boot-confirmed boot-confirmed.tmp.partial; do
+  reset_case rm1 2 3
+  mkdir -p "$ROOT/state"
+  printf 'partial confirmation\n' > "$ROOT/state/$partial_receipt"
+  : > "$EVENT_LOG"
+  expect_restore_failure "restore with unowned $partial_receipt receipt"
+  grep -q 'inexact persistent boot state' "$CASE/failure.out" ||
+    fail "$partial_receipt did not leave the transient-only no-op path"
+  [ -f "$ROOT/state/$partial_receipt" ] ||
+    fail "inexact restore removed unowned $partial_receipt"
+  [ ! -s "$EVENT_LOG" ] ||
+    fail "inexact $partial_receipt restore touched boot topology or service"
+done
+
+for partial_attempt in boot-attempt.tmp.partial boot-attempt.cancelled.partial; do
+  reset_case rm1 2 3
+  printf 'partial attempt\n' > "$RUN/$partial_attempt"
+  : > "$EVENT_LOG"
+  expect_restore_failure "restore with unowned $partial_attempt receipt"
+  grep -q 'inexact persistent boot state' "$CASE/failure.out" ||
+    fail "$partial_attempt did not leave the transient-only no-op path"
+  [ -f "$RUN/$partial_attempt" ] ||
+    fail "inexact restore removed unowned $partial_attempt"
+  [ ! -s "$EVENT_LOG" ] ||
+    fail "inexact $partial_attempt restore touched boot topology or service"
+done
+
+reset_case rm1 2 3
+rm -f "$CONFIG" "$OWNER"
+mkdir -p "$(dirname "$CONFIG")"
+ln -s missing-config "$CONFIG"
+ln -s missing-owner "$OWNER"
+: > "$EVENT_LOG"
+expect_restore_failure "restore with dangling recovery ownership symlinks"
+grep -q 'inexact persistent boot state' "$CASE/failure.out" ||
+  fail "dangling ownership symlinks bypassed the exact contract check"
+[ -L "$CONFIG" ] && [ -L "$OWNER" ] ||
+  fail "restore removed dangling unowned recovery ownership"
+if grep -Eq '^systemctl |^fw |^sync$' "$EVENT_LOG"; then
+  fail "dangling ownership restore mutated recovery or the display service"
+fi
+
+# An exact owned persistent policy still follows the complete uninstall path;
+# `restore` is not a shortcut around peer validation or recovery disarming.
+reset_case rm1 2 3
+run_installer sh "$INSTALLER" install >/dev/null ||
+  fail "persistent install before exact restore failed"
+printf 'confirmed\n' > "$ROOT/state/boot-confirmed"
+printf 'partial confirmation\n' > "$ROOT/state/boot-confirmed.tmp.partial"
+printf 'partial attempt\n' > "$RUN/boot-attempt.tmp.partial"
+printf 'retired attempt\n' > "$RUN/boot-attempt.cancelled.partial"
+: > "$EVENT_LOG"
+run_installer sh "$INSTALLER" restore >/dev/null ||
+  fail "exact owned persistent restore failed"
+assert_no_live_recovery
+for retired in \
+  "$ROOT/state/boot-confirmed" \
+  "$ROOT/state/boot-confirmed.tmp.partial" \
+  "$RUN/boot-attempt.tmp.partial" \
+  "$RUN/boot-attempt.cancelled.partial"; do
+  assert_file_absent "$retired" "exact restore left $retired"
+done
+assert_eq 0 "$(cat "$ENV_DIR/upgrade_available")" \
+  "persistent restore did not disarm owned U-Boot recovery"
+grep -q '^fw-read active_partition$' "$EVENT_LOG" ||
+  fail "persistent restore skipped exact boot topology validation"
+grep -q '^systemctl stop xochitl.service$' "$EVENT_LOG" ||
+  fail "persistent restore skipped the owned supervisor handoff"
 
 # Exact install contract: immutable stock identities, rootfs-only recovery,
 # peer cleanup, unversioned records, file modes, and flag-last arming.

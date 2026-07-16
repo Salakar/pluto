@@ -800,7 +800,7 @@ final class LiveDeviceOperations {
       'else systemctl stop pluto-session-once.service || exit; '
       'systemctl reset-failed xochitl.service 2>/dev/null || true; '
       'systemctl start xochitl.service || exit; fi; fi; '
-      'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} uninstall',
+      'PLUTO_ROOT=${_q(deviceRoot)} sh ${_q(_bootInstall)} restore',
       failure: 'restoring the stock boot default failed',
     );
     return const DeviceOperationResult(

@@ -1112,7 +1112,7 @@ void main() {
     expect(
       transport.commands.any(
         (String c) =>
-            c.contains('pluto-boot-install.sh') && c.contains(' uninstall'),
+            c.contains('pluto-boot-install.sh') && c.contains(' restore'),
       ),
       isTrue,
     );
@@ -1166,7 +1166,7 @@ void main() {
         transport.commands.any(
           (String command) =>
               command.contains('pluto-boot-install.sh') &&
-              command.contains(' uninstall'),
+              command.contains(' restore'),
         ),
         isTrue,
         reason: 'recovery must not be disabled by a closed provision gate',

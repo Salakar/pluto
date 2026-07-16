@@ -360,6 +360,32 @@ existing_owner_is_armed() {
     [ "$EXISTING_OWNER_STATE" = armed ]
 }
 
+path_exists() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+persistent_boot_state_present() {
+  # `restore` may be called after a current-boot-only session.  That session
+  # never writes any of these paths, so an exact absence proves there is no
+  # persistent boot policy for the A/B transaction to retire.  Include staged
+  # temporaries and durable runtime markers: any partial or stale
+  # persistent state must take the full, fail-closed uninstall path.
+  for pbsp_path in \
+    "$DROPIN" "$DROPIN".tmp.* \
+    "$RECOVERY_FAILURE_UNIT" "$RECOVERY_FAILURE_UNIT".tmp.* \
+    "$STOCK_RESCUE_UNIT" "$STOCK_RESCUE_UNIT".tmp.* \
+    "$RECOVERY_CONFIG" "$RECOVERY_CONFIG".tmp.* \
+    "$RECOVERY_OWNER" "$RECOVERY_OWNER".tmp.* \
+    "$RECOVERY_HANDLER" "$RECOVERY_HANDLER".tmp.* \
+    "$STATE/boot-mode" "$STATE/boot-first" \
+    "$STATE/boot-confirmed" "$STATE/boot-confirmed".tmp.* \
+    "$ATTEMPT_FILE" "$ATTEMPT_FILE".tmp.* \
+    "$ATTEMPT_FILE".cancelled.*; do
+    path_exists "$pbsp_path" && return 0
+  done
+  return 1
+}
+
 remove_dropin_under() {
   rdu_root=$1
   rm -f "$rdu_root$DROPIN_REL" "$rdu_root$DROPIN_REL".tmp.* || return 1
@@ -646,7 +672,7 @@ do_install() {
   HAVE_EXISTING_CONTRACT=0
   if read_existing_contract && read_existing_owner; then
     HAVE_EXISTING_CONTRACT=1
-  elif [ -e "$RECOVERY_CONFIG" ] || [ -e "$RECOVERY_OWNER" ]; then
+  elif path_exists "$RECOVERY_CONFIG" || path_exists "$RECOVERY_OWNER"; then
     die "inexact recovery state; refusing to replace unowned state"
   fi
   if [ "$HAVE_EXISTING_CONTRACT" -eq 1 ] && [ -e "$ATTEMPT_FILE" ]; then
@@ -725,7 +751,7 @@ do_uninstall() {
   if read_existing_contract && read_existing_owner; then
     HAD_CONTRACT=1
     HAVE_EXISTING_CONTRACT=1
-  elif [ -e "$RECOVERY_CONFIG" ] || [ -e "$RECOVERY_OWNER" ]; then
+  elif path_exists "$RECOVERY_CONFIG" || path_exists "$RECOVERY_OWNER"; then
     die "inexact recovery state; refusing unowned removal"
   else
     HAVE_EXISTING_CONTRACT=0
@@ -785,7 +811,9 @@ do_uninstall() {
         "stock is durable but owned U-Boot recovery could not be disarmed"
     power_loss_at recovery_disarmed
   fi
-  rm -f "$ATTEMPT_FILE" "$RUN_DIR"/boot-ready.* "$RUN_DIR"/health.* ||
+  rm -f "$ATTEMPT_FILE" "$ATTEMPT_FILE".tmp.* \
+    "$ATTEMPT_FILE".cancelled.* \
+    "$RUN_DIR"/boot-ready.* "$RUN_DIR"/health.* ||
     uninstall_fail_after_stop "could not retire runtime recovery receipts"
   rootfs_rw uninstall_cleanup ||
     uninstall_fail_after_stop "cannot remount rootfs for cleanup"
@@ -796,8 +824,25 @@ do_uninstall() {
   rootfs_commit uninstall_cleanup ||
     uninstall_fail_after_stop "could not make recovery cleanup durable"
 
-  rm -f "$STATE/boot-mode" "$STATE/boot-first"
+  rm -f "$STATE/boot-mode" "$STATE/boot-first" \
+    "$STATE/boot-confirmed" "$STATE/boot-confirmed".tmp.*
   log "stock xochitl restored; peer stock identity verified"
+}
+
+do_restore() {
+  if ! persistent_boot_state_present; then
+    capture_stock_identity "$SYSTEM_ROOT" ||
+      die "active stock UI identity is invalid before restore"
+    "$SYSTEMCTL" is-active --quiet xochitl.service ||
+      die "stock xochitl is not active after current-boot session retirement"
+    log "stock boot default already exact; no persistent Pluto boot state"
+    return 0
+  fi
+  if [ ! -f "$RECOVERY_CONFIG" ] || [ -L "$RECOVERY_CONFIG" ] ||
+     [ ! -f "$RECOVERY_OWNER" ] || [ -L "$RECOVERY_OWNER" ]; then
+    die "inexact persistent boot state; refusing restore without an owned recovery contract"
+  fi
+  do_uninstall
 }
 
 do_status() {
@@ -818,11 +863,15 @@ case "${1:-status}" in
     acquire_install_lock || die "another boot transaction owns the installer lock"
     do_uninstall
     ;;
+  restore)
+    acquire_install_lock || die "another boot transaction owns the installer lock"
+    do_restore
+    ;;
   status) do_status ;;
   validate)
     load_recovery_profile || die "cannot load generated recovery profile"
     require_payload || die "release boot payload is incomplete"
     log "release AOT launcher payload validated"
     ;;
-  *) echo "usage: $0 {install|uninstall|status|validate}"; exit 64 ;;
+  *) echo "usage: $0 {install|uninstall|restore|status|validate}"; exit 64 ;;
 esac

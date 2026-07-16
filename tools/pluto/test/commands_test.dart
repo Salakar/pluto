@@ -1382,7 +1382,7 @@ void main() {
     expect(
       transport.commands.any(
         (String c) =>
-            c.contains('pluto-boot-install.sh') && c.contains(' uninstall'),
+            c.contains('pluto-boot-install.sh') && c.contains(' restore'),
       ),
       isTrue,
     );
