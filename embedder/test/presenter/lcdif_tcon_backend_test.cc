@@ -99,6 +99,7 @@ public:
       const auto *requested =
           static_cast<uapi::FramebufferVariableInfoArm32 *>(argument);
       panned_offsets.push_back(requested->yoffset);
+      pan_threads.push_back(std::this_thread::get_id());
       const std::size_t slot_index = requested->yoffset / kRm2ScanoutHeight;
       std::array<std::uint16_t, 3> before{};
       if (capture_phase_cells && slot_index < kRm2ActiveSlots) {
@@ -147,6 +148,7 @@ public:
   std::vector<std::byte> storage;
   std::vector<std::uintptr_t> blank_values;
   std::vector<std::uint32_t> panned_offsets;
+  std::vector<std::thread::id> pan_threads;
   std::vector<std::array<std::uint16_t, 3>> panned_phase_cells;
   std::array<std::size_t, 3> phase_cell_offsets{};
   std::chrono::nanoseconds pan_delay{};
@@ -734,6 +736,32 @@ TEST(LcdifTconBackend,
               std::string::npos);
   EXPECT_TRUE(diagnostics.find("stage=start.cold-initialize status=4") ==
               std::string::npos);
+}
+
+TEST(LcdifTconBackend, ColdInitializationPansRunOnDedicatedPanWorker) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{.path = ""};
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+
+  const std::thread::id caller = std::this_thread::get_id();
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  ASSERT_TRUE(!syscalls.pan_threads.empty());
+  const std::thread::id pan_worker = syscalls.pan_threads.front();
+  EXPECT_TRUE(pan_worker != caller);
+  EXPECT_TRUE(std::all_of(syscalls.pan_threads.begin(),
+                          syscalls.pan_threads.end(),
+                          [pan_worker](std::thread::id pan_thread) {
+                            return pan_thread == pan_worker;
+                          }));
+  backend.stop();
 }
 
 TEST(LcdifTconBackend,

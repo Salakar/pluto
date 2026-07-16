@@ -1733,6 +1733,10 @@ private:
 
   bool accept_pan_result(std::uint32_t slot, const Rm2PanResult &result) {
     if (!result.operation_ok) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 pan operation failed slot=%u "
+                   "duration_ns=%lld\n",
+                   slot, static_cast<long long>(result.duration.count()));
       return false;
     }
     const std::chrono::nanoseconds interval(
@@ -1741,6 +1745,11 @@ private:
     if (result.duration > limit) {
       ++underflows_;
       ++missed_deadlines_;
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 pan deadline missed slot=%u "
+                   "duration_ns=%lld limit_ns=%lld\n",
+                   slot, static_cast<long long>(result.duration.count()),
+                   static_cast<long long>(limit.count()));
       return false;
     }
     if (slot == kRm2IdleSlot) {
@@ -1750,9 +1759,16 @@ private:
   }
 
   bool pan_with_deadline(std::uint32_t slot) {
+    if (!pan_worker_.begin(slot)) {
+      std::fprintf(stderr, "lcdif_tcon: RM2 pan worker refused slot=%u\n",
+                   slot);
+      return false;
+    }
     Rm2PanResult result;
-    result.operation_ok = device_->pan(slot, &result.duration,
-                                       &result.completed_at) == kPlutoStatusOk;
+    if (!pan_worker_.finish(&result)) {
+      std::fprintf(stderr, "lcdif_tcon: RM2 pan worker lost slot=%u\n", slot);
+      return false;
+    }
     return accept_pan_result(slot, result);
   }
 
