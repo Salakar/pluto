@@ -474,6 +474,24 @@ read_renderer_health() {  # file expected_pid expected_start
   HEALTH_READ_MTIME=$rh_mtime
 }
 
+read_renderer_health_with_retry() {  # file expected_pid expected_start
+  # A receipt replacement is atomic, but observing it still crosses procfs,
+  # tmpfs, and an external stat process.  Do not turn one transient observer
+  # failure into a renderer failure: retry this same coherent-descriptor read
+  # twice before applying the normal fail-closed policy.  Persistent identity,
+  # ownership, shape, or liveness failures still fail within 20 ms.
+  health_read_attempt=1
+  while [ "$health_read_attempt" -le 3 ]; do
+    if read_renderer_health "$1" "$2" "$3"; then
+      return 0
+    fi
+    [ "$health_read_attempt" -lt 3 ] || break
+    sleep_milliseconds 10 || return 1
+    health_read_attempt=$((health_read_attempt + 1))
+  done
+  return 1
+}
+
 reset_health_watch() {  # pid health-file
   HEALTH_PID=$1
   HEALTH_FILE=$2
@@ -491,7 +509,7 @@ check_renderer_health() {
   health_now="$(health_clock_seconds)"
   [ "$health_now" != "$HEALTH_LAST_CHECK" ] || return 0
   HEALTH_LAST_CHECK=$health_now
-  if ! read_renderer_health "$HEALTH_FILE" "$HEALTH_PID" \
+  if ! read_renderer_health_with_retry "$HEALTH_FILE" "$HEALTH_PID" \
       "$HEALTH_PROCESS_START"; then
     if [ -n "$HEALTH_LAST_SEQ" ] || [ -e "$HEALTH_FILE" ] ||
        [ $((health_now - HEALTH_WATCH_STARTED)) -ge \

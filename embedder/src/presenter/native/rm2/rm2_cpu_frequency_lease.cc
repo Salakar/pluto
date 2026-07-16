@@ -23,6 +23,10 @@ constexpr std::uint64_t kRm2MinimumFrequencyKhz = 792'000;
 constexpr std::uint64_t kRm2MaximumFrequencyKhz = 1'200'000;
 constexpr unsigned kPolicySettleAttempts = 50;
 constexpr long kPolicySettleDelayNanoseconds = 1'000'000;
+// The i.MX temperature monitor measures at 10 Hz and can return EAGAIN while
+// its FINISHED bit is clear after wake. Reopening 11 times at 10 ms intervals
+// spans one complete measurement period without accepting a cached sample.
+constexpr long kTemperatureReadRetryDelayNanoseconds = 10'000'000;
 
 void set_error(std::string *error, std::string_view message) noexcept {
   if (error != nullptr) {
@@ -35,25 +39,41 @@ void set_error(std::string *error, std::string_view message) noexcept {
 }
 
 bool read_file(const char *path, char *out, std::size_t capacity,
-               std::size_t *out_size) {
+               std::size_t *out_size, int *out_error = nullptr,
+               Rm2CpuTemperatureReadForTesting read_for_testing = nullptr,
+               void *read_context_for_testing = nullptr) {
+  if (out_error != nullptr) {
+    *out_error = 0;
+  }
   if (path == nullptr || out == nullptr || capacity < 2U ||
       out_size == nullptr) {
     return false;
   }
   const int fd = ::open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) {
+    if (out_error != nullptr) {
+      *out_error = errno;
+    }
     return false;
   }
+  const auto read_once = [&](void *buffer, std::size_t size) {
+    return read_for_testing == nullptr
+               ? static_cast<std::ptrdiff_t>(::read(fd, buffer, size))
+               : read_for_testing(read_context_for_testing, fd, buffer, size);
+  };
   std::size_t size = 0;
   bool ok = true;
   while (size < capacity - 1U) {
-    const ssize_t count = ::read(fd, out + size, capacity - 1U - size);
+    const std::ptrdiff_t count = read_once(out + size, capacity - 1U - size);
     if (count == 0) {
       break;
     }
     if (count < 0) {
       if (errno == EINTR) {
         continue;
+      }
+      if (out_error != nullptr) {
+        *out_error = errno;
       }
       ok = false;
       break;
@@ -62,22 +82,34 @@ bool read_file(const char *path, char *out, std::size_t capacity,
   }
   if (ok && size == capacity - 1U) {
     char extra = 0;
-    ssize_t count = 0;
+    std::ptrdiff_t count = 0;
     do {
-      count = ::read(fd, &extra, 1);
+      count = read_once(&extra, 1);
     } while (count < 0 && errno == EINTR);
     ok = count == 0;
+    if (!ok && count < 0 && out_error != nullptr) {
+      *out_error = errno;
+    }
   }
-  ok = ::close(fd) == 0 && ok;
+  if (::close(fd) != 0) {
+    if (ok && out_error != nullptr) {
+      *out_error = errno;
+    }
+    ok = false;
+  }
   out[size] = '\0';
   *out_size = size;
   return ok;
 }
 
-bool read_line(const std::string &path, char *out, std::size_t capacity) {
+bool read_line(const std::string &path, char *out, std::size_t capacity,
+               int *out_error = nullptr,
+               Rm2CpuTemperatureReadForTesting read_for_testing = nullptr,
+               void *read_context_for_testing = nullptr) {
   std::size_t size = 0;
-  if (!read_file(path.c_str(), out, capacity, &size) || size < 2U ||
-      out[size - 1U] != '\n') {
+  if (!read_file(path.c_str(), out, capacity, &size, out_error,
+                 read_for_testing, read_context_for_testing) ||
+      size < 2U || out[size - 1U] != '\n') {
     return false;
   }
   for (std::size_t index = 0; index + 1U < size; ++index) {
@@ -122,6 +154,15 @@ void wait_for_policy_settle() noexcept {
   timespec remaining{
       .tv_sec = 0,
       .tv_nsec = kPolicySettleDelayNanoseconds,
+  };
+  while (::nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
+  }
+}
+
+void wait_for_temperature_read_retry() noexcept {
+  timespec remaining{
+      .tv_sec = 0,
+      .tv_nsec = kTemperatureReadRetryDelayNanoseconds,
   };
   while (::nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
   }
@@ -210,7 +251,10 @@ Rm2CpuFrequencyBurstLease::Rm2CpuFrequencyBurstLease(
       lock_path_(std::move(paths.lock_path)),
       cpu_thermal_type_path_(std::move(paths.cpu_thermal_type_path)),
       cpu_temperature_path_(std::move(paths.cpu_temperature_path)),
-      owner_start_ticks_for_testing_(paths.owner_start_ticks_for_testing) {
+      owner_start_ticks_for_testing_(paths.owner_start_ticks_for_testing),
+      temperature_read_for_testing_(paths.temperature_read_for_testing),
+      temperature_read_context_for_testing_(
+          paths.temperature_read_context_for_testing) {
   if (!policy_path_.empty()) {
     minimum_path_ = policy_path_ + "/scaling_min_freq";
     maximum_path_ = policy_path_ + "/scaling_max_freq";
@@ -253,12 +297,29 @@ Rm2CpuFrequencyBurstLease::read_temperature(int *out_millidegrees,
     set_error(error, "RM2 CPU thermal identity is unavailable or mismatched");
     return TemperatureState::kUnavailable;
   }
-  if (!read_line(cpu_temperature_path_, temperature.data(),
-                 temperature.size()) ||
-      !parse_uint64(temperature.data(), &millidegrees) || millidegrees == 0 ||
+  int temperature_read_error = 0;
+  bool temperature_read = false;
+  for (unsigned attempt = 0; attempt < kRm2CpuTemperatureReadAttempts;
+       ++attempt) {
+    temperature_read =
+        read_line(cpu_temperature_path_, temperature.data(), temperature.size(),
+                  &temperature_read_error, temperature_read_for_testing_,
+                  temperature_read_context_for_testing_);
+    if (temperature_read || temperature_read_error != EAGAIN) {
+      break;
+    }
+    if (attempt + 1U != kRm2CpuTemperatureReadAttempts) {
+      wait_for_temperature_read_retry();
+    }
+  }
+  if (!temperature_read || !parse_uint64(temperature.data(), &millidegrees) ||
+      millidegrees == 0 ||
       millidegrees >
           static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    set_error(error, "RM2 CPU temperature is unavailable or malformed");
+    set_error(error, temperature_read_error == EAGAIN
+                         ? "RM2 CPU temperature remained unavailable after "
+                           "bounded EAGAIN retries"
+                         : "RM2 CPU temperature is unavailable or malformed");
     return TemperatureState::kUnavailable;
   }
   if (out_millidegrees != nullptr) {

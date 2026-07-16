@@ -89,6 +89,46 @@ if [ "${PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM:-0}" = 1 ] &&
   post_confirm_count=$((post_confirm_count + 1))
   printf '%s\n' "$post_confirm_count" > "$PLUTO_TEST_HEALTH_RACE_COUNT"
 fi
+if [ "${PLUTO_TEST_HEALTH_TRANSIENT_STAT_FAILURE:-0}" = 1 ] &&
+   [ "$mtime_query" -eq 1 ] &&
+   [ ! -e "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_RETRY" ]; then
+  # Model the one-shot observer failure captured on RM1. file_metadata_follow
+  # tries GNU and BSD stat syntax inside one logical observation, so fail both
+  # invocations from that exact command-substitution process. A new caller is
+  # proof that read_renderer_health_with_retry started another observation;
+  # merely falling through to the alternate stat syntax cannot satisfy this.
+  if mkdir "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_OWNER" 2>/dev/null; then
+    printf '%s\n' "$PPID" > \
+      "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_OWNER/ppid"
+  fi
+  transient_owner=$(cat \
+    "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_OWNER/ppid" 2>/dev/null || true)
+  case "$transient_owner" in ''|*[!0-9]*) exit 97 ;; esac
+  transient_count=$(cat "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_COUNT" \
+    2>/dev/null || echo 0)
+  case "$transient_count" in ''|*[!0-9]*) exit 97 ;; esac
+  transient_syntax=bsd
+  for transient_arg in "$@"; do
+    case "$transient_arg" in *%Y*) transient_syntax=gnu ;; esac
+  done
+  if [ "$PPID" = "$transient_owner" ] && [ "$transient_count" -lt 2 ]; then
+    transient_count=$((transient_count + 1))
+    printf '%s\n' "$transient_count" > \
+      "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_COUNT"
+    printf 'injected_call=%s caller=%s syntax=%s\n' \
+      "$transient_count" "$PPID" "$transient_syntax" >> \
+      "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_EVIDENCE"
+    exit 75
+  fi
+  if [ "$transient_count" -eq 2 ] &&
+     [ "$PPID" != "$transient_owner" ] &&
+     mkdir "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_RETRY" 2>/dev/null; then
+    printf '3\n' > "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_COUNT"
+    printf 'retry_call=3 caller=%s syntax=%s\n' \
+      "$PPID" "$transient_syntax" >> \
+      "$PLUTO_TEST_HEALTH_TRANSIENT_STAT_EVIDENCE"
+  fi
+fi
 if [ "${post_confirm_count:-0}" -eq 2 ] &&
    mkdir "$PLUTO_TEST_HEALTH_RACE_MARKER" 2>/dev/null; then
   health_file=$(cat "$PLUTO_TEST_CURRENT_HEALTH_PATH" 2>/dev/null || true)
@@ -269,7 +309,12 @@ start_session() {
   PLUTO_TEST_HEALTH_RACE_MARKER="$TMP/health-race-fired" \
   PLUTO_TEST_HEALTH_RACE_COUNT="$TMP/health-race-count" \
   PLUTO_TEST_HEALTH_RACE_EVIDENCE="$TMP/health-race-evidence" \
+  PLUTO_TEST_HEALTH_TRANSIENT_STAT_OWNER="$TMP/health-transient-stat-owner" \
+  PLUTO_TEST_HEALTH_TRANSIENT_STAT_COUNT="$TMP/health-transient-stat-count" \
+  PLUTO_TEST_HEALTH_TRANSIENT_STAT_EVIDENCE="$TMP/health-transient-stat-evidence" \
+  PLUTO_TEST_HEALTH_TRANSIENT_STAT_RETRY="$TMP/health-transient-stat-retry" \
   PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM="${PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM:-0}" \
+  PLUTO_TEST_HEALTH_TRANSIENT_STAT_FAILURE="${PLUTO_TEST_HEALTH_TRANSIENT_STAT_FAILURE:-0}" \
   PLUTO_TEST_BOOT_CONFIRM_COUNT="$TMP/boot-confirm-count" \
   PLUTO_TEST_RECOVERY_CONFIRMED="$TMP/recovery-confirmed" \
   PLUTO_TEST_RECOVERY_LOG="$TMP/recovery.log" \
@@ -280,6 +325,7 @@ start_session() {
 }
 
 PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM=1
+PLUTO_TEST_HEALTH_TRANSIENT_STAT_FAILURE=1
 PLUTO_TEST_RENDERER_HEALTH_STALE_SECONDS=6
 start_session
 EXPECTED_STOCK_PID=$SESSION_PID
@@ -296,8 +342,32 @@ fi
 wait "$SESSION_PID" || fail "supervisor returned failure"
 SESSION_PID=""
 unset PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM
+unset PLUTO_TEST_HEALTH_TRANSIENT_STAT_FAILURE
 unset PLUTO_TEST_RENDERER_HEALTH_STALE_SECONDS
 
+[ "$(cat "$TMP/health-transient-stat-count" 2>/dev/null || true)" = 3 ] ||
+  fail "transient health metadata retry did not make exactly three observed calls"
+transient_owner=$(cat "$TMP/health-transient-stat-owner/ppid" \
+  2>/dev/null || true)
+case "$transient_owner" in ''|*[!0-9]*)
+  fail "transient health metadata fixture did not record its logical-read owner"
+esac
+[ "$(grep -c '^injected_call=' \
+  "$TMP/health-transient-stat-evidence" 2>/dev/null || true)" = 2 ] ||
+  fail "transient health metadata fixture did not reject both stat syntaxes"
+grep -q "^injected_call=1 caller=$transient_owner syntax=gnu$" \
+  "$TMP/health-transient-stat-evidence" ||
+  fail "transient health metadata fixture did not reject GNU stat"
+grep -q "^injected_call=2 caller=$transient_owner syntax=bsd$" \
+  "$TMP/health-transient-stat-evidence" ||
+  fail "transient health metadata fixture did not reject BSD stat fallback"
+retry_caller=$(sed -n 's/^retry_call=3 caller=\([0-9][0-9]*\) syntax=gnu$/\1/p' \
+  "$TMP/health-transient-stat-evidence")
+case "$retry_caller" in ''|*[!0-9]*)
+  fail "transient health metadata fixture did not observe the retry"
+esac
+[ "$retry_caller" != "$transient_owner" ] ||
+  fail "transient health metadata fixture mistook syntax fallback for retry"
 [ -d "$TMP/health-race-fired" ] ||
   fail "health generation was not replaced during the metadata read"
 old_mtime=$(sed -n 's/^old_mtime=\([0-9][0-9]*\) .*/\1/p' \

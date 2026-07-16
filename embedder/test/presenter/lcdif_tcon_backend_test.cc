@@ -300,6 +300,23 @@ private:
   std::filesystem::path runtime_;
 };
 
+struct BackendTransientTemperatureReader {
+  unsigned remaining_eagain = 0;
+  unsigned eagain_returns = 0;
+
+  static std::ptrdiff_t read(void *context, int fd, void *buffer,
+                             std::size_t capacity) {
+    auto *reader = static_cast<BackendTransientTemperatureReader *>(context);
+    if (reader->remaining_eagain != 0) {
+      --reader->remaining_eagain;
+      ++reader->eagain_returns;
+      errno = EAGAIN;
+      return -1;
+    }
+    return static_cast<std::ptrdiff_t>(::read(fd, buffer, capacity));
+  }
+};
+
 bool wait_for_cpu_policy(const BackendTemporaryCpuPolicy &policy,
                          std::string_view minimum, bool receipt_exists,
                          std::chrono::milliseconds timeout) {
@@ -739,6 +756,44 @@ TEST(LcdifTconBackend, Rm2UnavailableCpuTemperatureFailsStartupClosed) {
   EXPECT_EQ(backend.health().hardware_faults, 1U);
   EXPECT_FALSE(policy.receipt_exists());
   EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+}
+
+TEST(LcdifTconBackend, Rm2TransientCpuTemperatureEagainDuringStartupRecovers) {
+  LocalRm2Profile fixture;
+  BackendTemporaryCpuPolicy policy;
+  if (!fixture.valid() || !policy.valid()) {
+    return;
+  }
+  BackendTransientTemperatureReader reader{.remaining_eagain = 1};
+  auto frequency_paths = policy.paths();
+  frequency_paths.temperature_read_for_testing =
+      &BackendTransientTemperatureReader::read;
+  frequency_paths.temperature_read_context_for_testing = &reader;
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  Rm2HandoffOptions options{
+      .path = "",
+      .allow_insecure_path_for_testing = true,
+      .cpu_frequency_paths_for_testing = std::move(frequency_paths),
+  };
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return true; }, std::move(options));
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  ASSERT_EQ(backend.start(config), kPlutoStatusOk);
+  EXPECT_EQ(reader.eagain_returns, 1U);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  backend.stop();
+  EXPECT_EQ(policy.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(policy.receipt_exists());
 }
 
 TEST(LcdifTconBackend, Rm2CpuThermalHoldBackpressuresAdmissionAndRecovers) {

@@ -1,5 +1,6 @@
 #include "presenter/native/rm2/rm2_cpu_frequency_lease.h"
 
+#include <cerrno>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,23 @@
 
 namespace pluto::native::rm2 {
 namespace {
+
+struct TransientTemperatureReader {
+  unsigned remaining_eagain = 0;
+  unsigned eagain_returns = 0;
+
+  static std::ptrdiff_t read(void *context, int fd, void *buffer,
+                             std::size_t capacity) {
+    auto *reader = static_cast<TransientTemperatureReader *>(context);
+    if (reader->remaining_eagain != 0) {
+      --reader->remaining_eagain;
+      ++reader->eagain_returns;
+      errno = EAGAIN;
+      return -1;
+    }
+    return static_cast<std::ptrdiff_t>(::read(fd, buffer, capacity));
+  }
+};
 
 class TemporaryPolicy final {
 public:
@@ -229,6 +247,64 @@ TEST(Rm2CpuFrequencyBurstLease, UnavailableTemperatureRemainsAFault) {
   std::string error;
   EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kFault);
   EXPECT_NE(error.find("unavailable or malformed"), std::string::npos);
+  EXPECT_FALSE(lease.active());
+  EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
+     RetriesTransientTemperatureEagainAndAcquiresBelowCutoff) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  auto paths = fixture.paths();
+  TransientTemperatureReader reader{.remaining_eagain = 3};
+  paths.temperature_read_for_testing = &TransientTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kAcquired)
+      << error;
+  EXPECT_EQ(reader.eagain_returns, 3U);
+  EXPECT_TRUE(lease.active());
+  EXPECT_TRUE(lease.release(&error)) << error;
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
+     TransientTemperatureEagainCannotBypass45CCutoff) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  fixture.write("cpu_temperature", "45000\n");
+  auto paths = fixture.paths();
+  TransientTemperatureReader reader{.remaining_eagain = 2};
+  paths.temperature_read_for_testing = &TransientTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) ==
+              Rm2CpuFrequencyAcquireOutcome::kThermalHold);
+  EXPECT_EQ(reader.eagain_returns, 2U);
+  EXPECT_NE(error.find("45000 mC"), std::string::npos);
+  EXPECT_FALSE(lease.active());
+  EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
+  EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));
+}
+
+TEST(Rm2CpuFrequencyBurstLease,
+     ExhaustedTemperatureEagainRetriesRemainAFailClosedFault) {
+  TemporaryPolicy fixture;
+  ASSERT_TRUE(fixture.valid());
+  auto paths = fixture.paths();
+  TransientTemperatureReader reader{.remaining_eagain = 1000};
+  paths.temperature_read_for_testing = &TransientTemperatureReader::read;
+  paths.temperature_read_context_for_testing = &reader;
+  Rm2CpuFrequencyBurstLease lease(paths);
+
+  std::string error;
+  EXPECT_TRUE(lease.acquire(&error) == Rm2CpuFrequencyAcquireOutcome::kFault);
+  EXPECT_EQ(reader.eagain_returns, kRm2CpuTemperatureReadAttempts);
+  EXPECT_NE(error.find("bounded EAGAIN retries"), std::string::npos);
   EXPECT_FALSE(lease.active());
   EXPECT_EQ(fixture.read("scaling_min_freq"), "792000\n");
   EXPECT_FALSE(std::filesystem::exists(paths.receipt_path));

@@ -16,6 +16,10 @@ inline constexpr char kRm2CpuThermalTypePath[] =
 inline constexpr char kRm2CpuTemperaturePath[] =
     "/sys/devices/virtual/thermal/thermal_zone2/temp";
 inline constexpr int kRm2CpuTemperatureCutoffMillidegrees = 45'000;
+inline constexpr unsigned kRm2CpuTemperatureReadAttempts = 11;
+
+using Rm2CpuTemperatureReadForTesting = std::ptrdiff_t (*)(
+    void *context, int fd, void *buffer, std::size_t capacity);
 
 struct Rm2CpuFrequencyLeasePaths {
   std::string policy_path;
@@ -26,6 +30,10 @@ struct Rm2CpuFrequencyLeasePaths {
   // Host tests have no Linux /proc. Production always leaves this zero and
   // reads the exact owner start ticks from /proc/self/stat.
   std::uint64_t owner_start_ticks_for_testing = 0;
+  // Host tests can inject transient read(2) outcomes without changing the
+  // production path. Production always leaves both fields null.
+  Rm2CpuTemperatureReadForTesting temperature_read_for_testing = nullptr;
+  void *temperature_read_context_for_testing = nullptr;
 };
 
 enum class Rm2CpuFrequencyAcquireOutcome : std::uint8_t {
@@ -97,6 +105,8 @@ private:
   char receipt_[512]{};
   std::size_t receipt_size_ = 0;
   std::uint64_t owner_start_ticks_for_testing_ = 0;
+  Rm2CpuTemperatureReadForTesting temperature_read_for_testing_ = nullptr;
+  void *temperature_read_context_for_testing_ = nullptr;
   bool active_ = false;
 };
 
