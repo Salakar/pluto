@@ -787,6 +787,24 @@ HOME="$TMP/dart-home" DART_SUPPRESS_ANALYTICS=1 \
 grep -q '"format": "pluto-acceptance-manifest-proof"' \
   "$TMP/manifest-proof.json" || fail 'manifest proof omitted its exact format marker'
 grep -q '"status": "PASS"' "$TMP/manifest-proof.json" || fail 'manifest proof did not pass'
+
+# Final visual verification retains the exact manifest bytes but deliberately
+# does not duplicate the release payload beside them. The detached proof must
+# validate those bytes and compare the complete installed evidence without
+# weakening the normal provisioning path's adjacent-slice verification.
+DETACHED_RELEASE="$TMP/detached-release"
+mkdir -p "$DETACHED_RELEASE"
+cp "$RELEASE/release-manifest.json" \
+  "$DETACHED_RELEASE/release-manifest.json"
+HOME="$TMP/dart-home" DART_SUPPRESS_ANALYTICS=1 \
+  "$DART" --packages="$PACKAGES" "$VERIFY_MANIFEST" \
+    --manifest "$DETACHED_RELEASE/release-manifest.json" \
+    --pins "$ROOT/tools/pluto/pins" --target linux-arm \
+    --expected-revision "$REVISION" --evidence "$TMP/manifest-evidence.txt" \
+    --output "$TMP/detached-manifest-proof.json"
+cmp -s "$TMP/manifest-proof.json" "$TMP/detached-manifest-proof.json" ||
+  fail 'detached manifest proof differs from the complete release-set proof'
+
 sed "s/$ARM_EMBEDDER_SHA/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/" \
   "$TMP/manifest-evidence.txt" > "$TMP/tampered-evidence.txt"
 if HOME="$TMP/dart-home" DART_SUPPRESS_ANALYTICS=1 \

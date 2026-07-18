@@ -49,7 +49,7 @@ void main(List<String> arguments) {
   }
   final String releaseRoot = manifestFile.parent.path;
   final List<int> manifestBytes = manifestFile.readAsBytesSync();
-  final ReleaseSetManifest release = ReleaseSetManifest.readBytes(
+  final ReleaseSetManifest release = ReleaseSetManifest.readDetachedBytes(
     root: releaseRoot,
     manifestBytes: manifestBytes,
     expectedPins: ReleaseSetPins.read(values['pins']!),
@@ -63,7 +63,14 @@ void main(List<String> arguments) {
     );
     exit(74);
   }
-  final ReleaseSetSlice slice = release.verifyTarget(target);
+  final ReleaseSetSlice? selectedSlice = release.slices[target];
+  if (selectedSlice == null) {
+    stderr.writeln(
+      'acceptance manifest proof: unsupported release target $target',
+    );
+    exit(74);
+  }
+  final ReleaseSetSlice slice = selectedSlice;
 
   final Map<String, _InstalledHash> installed = <String, _InstalledHash>{};
   final File evidenceFile = File(values['evidence']!);

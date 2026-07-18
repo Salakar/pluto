@@ -241,6 +241,35 @@ final class ReleaseSetManifest {
     required String root,
     required List<int> manifestBytes,
     required ReleaseSetPins expectedPins,
+  }) => _readBytes(
+    root: root,
+    manifestBytes: manifestBytes,
+    expectedPins: expectedPins,
+    verifyPayloads: true,
+  );
+
+  /// Decodes detached manifest [manifestBytes] without reading adjacent slices.
+  ///
+  /// The exact shape, pins, target set, file paths, file digests, and internal
+  /// tree digests are still validated. This is only for a proof consumer that
+  /// independently compares every payload byte, such as physical-device
+  /// acceptance evidence. Provisioning must use [read] or [readBytes].
+  static ReleaseSetManifest readDetachedBytes({
+    required String root,
+    required List<int> manifestBytes,
+    required ReleaseSetPins expectedPins,
+  }) => _readBytes(
+    root: root,
+    manifestBytes: manifestBytes,
+    expectedPins: expectedPins,
+    verifyPayloads: false,
+  );
+
+  static ReleaseSetManifest _readBytes({
+    required String root,
+    required List<int> manifestBytes,
+    required ReleaseSetPins expectedPins,
+    required bool verifyPayloads,
   }) {
     final String manifestText;
     try {
@@ -342,10 +371,13 @@ final class ReleaseSetManifest {
       pins: pins,
       slices: Map<String, ReleaseSetSlice>.unmodifiable(slices),
     );
-    // This is one indivisible dual-target release. A consumer may deploy only
-    // one selected slice, but a missing or modified peer invalidates the set.
-    for (final String target in requiredTargets.toList()..sort()) {
-      manifest.verifyTarget(target);
+    if (verifyPayloads) {
+      // This is one indivisible dual-target release. A consumer may deploy
+      // only one selected slice, but a missing or modified peer invalidates
+      // the set.
+      for (final String target in requiredTargets.toList()..sort()) {
+        manifest.verifyTarget(target);
+      }
     }
     return manifest;
   }
