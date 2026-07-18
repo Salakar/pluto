@@ -105,6 +105,14 @@ The clean-room oracle work resolved the minimum accepted mode map behind
 temperature table. The choice remains outside `WbfDecoder`, so parsing cannot
 silently invent a display policy.
 
+An exact cross-app warm handoff has one additional RM2 execution rule. The
+first common full-panel reconciliation drives mode 6 to white from the recorded
+source levels, then mode 2 from white to the incoming content. This is the AF
+fast-mode exit protocol needed when logical target history cannot represent
+residual pigment. The worker remaps the existing transition keys through a
+256-byte phase-local LUT; it does not allocate another panel buffer, rewalk the
+Flutter surface, or expose a second lifecycle flow.
+
 `LcdifTconDisplayBackend` consumes the selected immutable record, advances
 settled optical state only after completion, writes only within the exact
 kernel-reported mapping and slots, enforces the generated phase cadence, and

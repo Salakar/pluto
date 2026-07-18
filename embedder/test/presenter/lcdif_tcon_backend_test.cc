@@ -2749,7 +2749,7 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
-     FirstWarmHandoffFullPanelTextReplayDrivesUnchangedCellsOnce) {
+     FirstWarmHandoffFullPanelReplayWhitePreconditionsExactlyOnce) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -2758,6 +2758,19 @@ TEST(LcdifTconBackend,
   OwnedHandoffPayload payload;
   GeneratedDeviceProfile relaxed_profile = fixture.profile();
   relaxed_profile.runtime.display.phase_interval_nanoseconds = 100'000'000U;
+  Rm2WaveformProgram expected_waveforms;
+  std::string waveform_error;
+  ASSERT_TRUE(expected_waveforms.open(relaxed_profile, fixture.waveform_path(),
+                                      &waveform_error))
+      << waveform_error;
+  Rm2WaveformSelection expected_precondition;
+  Rm2WaveformSelection expected_content;
+  ASSERT_TRUE(expected_waveforms.select(kPlutoRefreshFast, 24000,
+                                        &expected_precondition));
+  ASSERT_TRUE(
+      expected_waveforms.select(kPlutoRefreshText, 24000, &expected_content));
+  constexpr std::size_t kSampleX = 700;
+  constexpr std::size_t kSampleY = 900;
   BackendFakeLcdifSyscalls outgoing_syscalls;
   {
     auto outgoing_device = std::make_unique<MxsLcdifDevice>(&outgoing_syscalls);
@@ -2768,13 +2781,12 @@ TEST(LcdifTconBackend,
         handoff_options(handoff_path.get()));
     ASSERT_TRUE(probe_and_start_profile(&outgoing, relaxed_profile,
                                         fixture.waveform_path()));
-    draw_fast_pixel(&outgoing, 17, 29, 0x7befU, 200);
+    draw_fast_pixel(&outgoing, static_cast<std::uint32_t>(kSampleX),
+                    static_cast<std::uint32_t>(kSampleY), 0x0000U, 200);
     ASSERT_EQ(outgoing.stage_handoff(&payload.payload, 3000), kPlutoStatusOk);
     outgoing.stop();
   }
 
-  constexpr std::size_t kSampleX = 700;
-  constexpr std::size_t kSampleY = 900;
   BackendFakeLcdifSyscalls syscalls;
   auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
   LcdifTconDisplayBackend incoming(
@@ -2821,9 +2833,11 @@ TEST(LcdifTconBackend,
   syscalls.panned_phase_cells.clear();
   ASSERT_EQ(incoming.submit(&request), kPlutoStatusOk);
   ASSERT_EQ(incoming.wait_idle(5000), kPlutoStatusOk);
-  ASSERT_TRUE(!syscalls.panned_phase_cells.empty());
+  ASSERT_EQ(syscalls.panned_phase_cells.size(),
+            expected_precondition.phase_count + expected_content.phase_count);
   EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin(),
-                          syscalls.panned_phase_cells.end(),
+                          syscalls.panned_phase_cells.begin() +
+                              expected_precondition.phase_count,
                           [](const std::array<std::uint16_t, 3> &samples) {
                             return samples[0] != 0;
                           }));
@@ -2832,7 +2846,7 @@ TEST(LcdifTconBackend,
   request.frame_id = 202;
   ASSERT_EQ(incoming.submit(&request), kPlutoStatusOk);
   ASSERT_EQ(incoming.wait_idle(5000), kPlutoStatusOk);
-  ASSERT_TRUE(!syscalls.panned_phase_cells.empty());
+  ASSERT_EQ(syscalls.panned_phase_cells.size(), expected_content.phase_count);
   EXPECT_TRUE(std::all_of(syscalls.panned_phase_cells.begin(),
                           syscalls.panned_phase_cells.end(),
                           [](const std::array<std::uint16_t, 3> &samples) {
@@ -2841,9 +2855,9 @@ TEST(LcdifTconBackend,
 
   incoming.stop();
   const std::string diagnostics = capture.finish();
-  EXPECT_TRUE(diagnostics.find("warm handoff full-panel replay drives "
-                               "complete mode-2 transitions") !=
-              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("warm handoff full-panel replay completed "
+                               "white mode-6 precondition then complete "
+                               "mode-2 content") != std::string::npos);
   EXPECT_TRUE(diagnostics.find("handoff_cleanup_jobs=1") != std::string::npos);
 }
 

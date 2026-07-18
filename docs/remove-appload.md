@@ -1261,9 +1261,9 @@ Owners: RM2 display, supervisor, ARMv7, optical validation.
 
 - Implement scan encoder, LCDIF device seam, phase loop, real completion, health,
   and lifecycle behind the common interfaces.
-- Keep cross-app optical cleanup inside the device presenter: RM2 may retain
-  complete transition cells for the common first full-panel warm-handoff replay,
-  but must not add a second app-switch, install, setup, or refresh flow.
+- Keep cross-app optical cleanup inside the device presenter: RM2 may prepend
+  its required white exit rail to the common first full-panel warm-handoff
+  replay, but must not add a second app-switch, install, setup, or refresh flow.
 - Follow the bring-up ladder exactly; archive evidence at every rung.
 - Add RM2 input/profile/session behavior and common direct payload routing.
 - Run byte-oracle, scan timing, optical, failure, soak, lifecycle, and restore

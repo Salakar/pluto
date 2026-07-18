@@ -468,6 +468,7 @@ public:
     std::vector<std::uint8_t> transition_keys;
     std::vector<std::uint16_t> target_pixels;
     Rm2WaveformSelection waveform;
+    Rm2WaveformSelection handoff_precondition_waveform;
     bool suppress_unchanged = true;
     bool completes_handoff_cleanup = false;
   };
@@ -930,14 +931,6 @@ public:
     }
     if (handoff_cleanup_pending_) {
       handoff_cleanup_pending_ = false;
-      if (job.completes_handoff_cleanup) {
-        ++handoff_cleanup_jobs_;
-        std::fprintf(
-            stderr,
-            "lcdif_tcon: warm handoff full-panel replay drives complete "
-            "mode-%u transitions\n",
-            job.waveform.mode);
-      }
     }
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -2177,13 +2170,10 @@ private:
     job->completes_handoff_cleanup =
         handoff_cleanup_pending_ && requested_pixels == kPanelPixels;
     // The first cross-app renderer reconciliation is already one full-panel
-    // Text request. RM2's Text and Full classes select the same vendor mode;
-    // Full differs only by retaining its old==new transition cells. Preserve
-    // that one-pass scheduling while driving those cells after a warm glass
-    // handoff so residual pigment from the previous app cannot survive in
-    // logically unchanged paper. A same-app 1x1 resume proof stays Fast.
-    job->suppress_unchanged = request.refresh_class != kPlutoRefreshFull &&
-                              !job->completes_handoff_cleanup;
+    // Text request. Preserve that common scheduling decision. The RM2 worker
+    // may prepend the AF/A2 exit-to-white rail required before mode-2 content;
+    // a same-app 1x1 resume proof stays Fast and consumes no precondition.
+    job->suppress_unchanged = request.refresh_class != kPlutoRefreshFull;
     for (std::size_t index = 0; index < request.damage_count; ++index) {
       const PlutoRect &damage = request.damage[index];
       Rm2PanelRect candidate = panel_rect_for_damage(damage);
@@ -2227,6 +2217,16 @@ private:
       report_present_failure("present.powered-temperature-waveform-select",
                              kPlutoStatusDeviceLost,
                              "no waveform matches the admitted refresh class");
+      return false;
+    }
+    job->handoff_precondition_waveform = {};
+    if (job->completes_handoff_cleanup &&
+        !waveforms_.select(kPlutoRefreshFast, *temperature,
+                           &job->handoff_precondition_waveform)) {
+      report_present_failure(
+          "present.powered-temperature-handoff-precondition-select",
+          kPlutoStatusDeviceLost,
+          "no white precondition waveform matches the warm handoff");
       return false;
     }
     std::size_t pixels = 0;
@@ -2375,10 +2375,15 @@ private:
       }
       PlutoPresentCompleteCallback callback = nullptr;
       void *callback_data = nullptr;
+      bool completed_handoff_cleanup = false;
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (status == kPlutoStatusOk) {
           ++completed_jobs_;
+          if (job.completes_handoff_cleanup) {
+            ++handoff_cleanup_jobs_;
+            completed_handoff_cleanup = true;
+          }
           callback = callback_;
           callback_data = callback_user_data_;
         } else {
@@ -2387,6 +2392,13 @@ private:
           ++hardware_faults_;
           outstanding_ = false;
         }
+      }
+      if (completed_handoff_cleanup) {
+        std::fprintf(
+            stderr,
+            "lcdif_tcon: warm handoff full-panel replay completed white "
+            "mode-%u precondition then complete mode-%u content\n",
+            job.handoff_precondition_waveform.mode, job.waveform.mode);
       }
       if (callback != nullptr) {
         try {
@@ -2425,14 +2437,6 @@ private:
       (void)device_->blank_powerdown();
       return kPlutoStatusDeviceLost;
     }
-    const std::span<const std::uint8_t> drive_lut =
-        job.suppress_unchanged ? job.waveform.partial_drive_lut
-                               : job.waveform.drive_lut;
-    if (drive_lut.size() !=
-        static_cast<std::size_t>(job.waveform.phase_count) * 16U * 16U) {
-      (void)device_->blank_powerdown();
-      return kPlutoStatusInternal;
-    }
     const std::chrono::nanoseconds phase_interval(
         *profile_.runtime.display.phase_interval_nanoseconds);
     const std::chrono::nanoseconds cadence_deadline =
@@ -2445,110 +2449,173 @@ private:
           .transition_offset = job.regions[index].pixel_offset,
       };
     }
-    const auto encode_phase = [&](std::uint32_t phase,
-                                  std::uint32_t slot_index) {
-      const auto encode_begin = std::chrono::steady_clock::now();
-      const std::span<const std::uint8_t> phase_lut = drive_lut.subspan(
-          static_cast<std::size_t>(phase) * 16U * 16U, 16U * 16U);
-      const bool encoded = phase_encoder_.encode_regions(
-          device_->slot(slot_index),
-          std::span<const Rm2PhaseRegion>(phase_regions.data(),
-                                          job.region_count),
-          job.transition_keys, phase_lut);
-      if (phase_encode_delay_for_testing_ > std::chrono::nanoseconds::zero()) {
-        std::this_thread::sleep_for(phase_encode_delay_for_testing_);
-      }
-      const auto encode_duration =
-          std::chrono::steady_clock::now() - encode_begin;
-      record_encode_duration(encode_duration);
-      if (!encoded) {
+    if (device_->is_blanked()) {
+      (void)device_->blank_powerdown();
+      return kPlutoStatusDeviceLost;
+    }
+
+    enum class TransitionRemap {
+      kNone,
+      kWhiteFromRecordedSource,
+      kRecordedTargetFromWhite,
+    };
+    struct WaveformStage {
+      const Rm2WaveformSelection *waveform = nullptr;
+      std::span<const std::uint8_t> drive_lut;
+      TransitionRemap remap = TransitionRemap::kNone;
+    };
+
+    const auto drive_stage = [&](const WaveformStage &stage) {
+      if (stage.waveform == nullptr || stage.waveform->phase_count == 0 ||
+          stage.drive_lut.size() !=
+              static_cast<std::size_t>(stage.waveform->phase_count) * 16U *
+                  16U) {
+        (void)device_->blank_powerdown();
         return kPlutoStatusInternal;
       }
-      if (encode_duration > phase_interval) {
-        ++missed_deadlines_;
-        ++underflows_;
+      const auto encode_phase = [&](std::uint32_t phase,
+                                    std::uint32_t slot_index) {
+        const auto encode_begin = std::chrono::steady_clock::now();
+        const std::span<const std::uint8_t> source_phase_lut =
+            stage.drive_lut.subspan(static_cast<std::size_t>(phase) * 16U * 16U,
+                                    16U * 16U);
+        std::array<std::uint8_t, 16U * 16U> remapped_phase_lut{};
+        std::span<const std::uint8_t> phase_lut = source_phase_lut;
+        if (stage.remap != TransitionRemap::kNone) {
+          for (std::size_t key = 0; key < remapped_phase_lut.size(); ++key) {
+            const std::uint8_t old_level =
+                static_cast<std::uint8_t>(key & 0x0fU);
+            const std::uint8_t new_level = static_cast<std::uint8_t>(key >> 4U);
+            const std::size_t source_key =
+                stage.remap == TransitionRemap::kWhiteFromRecordedSource
+                    ? 15U * 16U + old_level
+                    : static_cast<std::size_t>(new_level) * 16U + 15U;
+            remapped_phase_lut[key] = source_phase_lut[source_key];
+          }
+          phase_lut = remapped_phase_lut;
+        }
+        const bool encoded = phase_encoder_.encode_regions(
+            device_->slot(slot_index),
+            std::span<const Rm2PhaseRegion>(phase_regions.data(),
+                                            job.region_count),
+            job.transition_keys, phase_lut);
+        if (phase_encode_delay_for_testing_ >
+            std::chrono::nanoseconds::zero()) {
+          std::this_thread::sleep_for(phase_encode_delay_for_testing_);
+        }
+        const auto encode_duration =
+            std::chrono::steady_clock::now() - encode_begin;
+        record_encode_duration(encode_duration);
+        if (!encoded) {
+          return kPlutoStatusInternal;
+        }
+        if (encode_duration > phase_interval) {
+          ++missed_deadlines_;
+          ++underflows_;
+          return kPlutoStatusDeviceLost;
+        }
+        return kPlutoStatusOk;
+      };
+
+      PlutoStatus encode_status = encode_phase(0, 0);
+      if (encode_status != kPlutoStatusOk) {
+        (void)device_->blank_powerdown();
+        return encode_status;
+      }
+
+      // Encoding leaves the continuously scanning idle slot at an arbitrary
+      // point in its frame. Establish one explicit boundary before phase zero.
+      if (!pan_with_deadline(kRm2IdleSlot)) {
+        (void)device_->blank_powerdown();
+        return kPlutoStatusDeviceLost;
+      }
+      std::string power_error;
+      if (!validate_powered_panel_state(kPresentPreDrivePowerStateStage,
+                                        &power_error)) {
+        report_present_failure(kPresentPreDrivePowerStateStage,
+                               kPlutoStatusDeviceLost, power_error);
+        attempt_fail_safe_blank(kPresentPreDrivePowerStateStage);
+        return kPlutoStatusDeviceLost;
+      }
+
+      auto pan_begin = std::chrono::steady_clock::now();
+      if (!pan_worker_.begin(0)) {
+        (void)device_->blank_powerdown();
+        return kPlutoStatusDeviceLost;
+      }
+      for (std::uint32_t phase = 0; phase < stage.waveform->phase_count;
+           ++phase) {
+        PlutoStatus next_encode_status = kPlutoStatusOk;
+        if (phase + 1U < stage.waveform->phase_count) {
+          next_encode_status =
+              encode_phase(phase + 1U, (phase + 1U) % kRm2ActiveSlots);
+        }
+
+        Rm2PanResult pan_result;
+        if (!pan_worker_.finish(&pan_result) ||
+            !accept_pan_result(phase % kRm2ActiveSlots, pan_result)) {
+          (void)device_->blank_powerdown();
+          return kPlutoStatusDeviceLost;
+        }
+        ++presented_phases_;
+        // `finish()` may resume well after the kernel has latched the page.
+        // Use the device-captured CUR_FRAME_DONE boundary while retaining the
+        // complete request-to-latch deadline.
+        if (pan_result.completed_at < pan_begin ||
+            pan_result.completed_at - pan_begin > cadence_deadline) {
+          ++missed_deadlines_;
+          if (pan_result.completed_at < pan_begin ||
+              pan_result.completed_at - pan_begin > phase_interval * 2) {
+            ++underflows_;
+          }
+          (void)device_->blank_powerdown();
+          return kPlutoStatusDeviceLost;
+        }
+        if (next_encode_status != kPlutoStatusOk) {
+          (void)device_->blank_powerdown();
+          return next_encode_status;
+        }
+        if (phase + 1U < stage.waveform->phase_count) {
+          pan_begin = std::chrono::steady_clock::now();
+          if (!pan_worker_.begin((phase + 1U) % kRm2ActiveSlots)) {
+            (void)device_->blank_powerdown();
+            return kPlutoStatusDeviceLost;
+          }
+        }
+      }
+      if (!pan_with_deadline(kRm2IdleSlot)) {
+        (void)device_->blank_powerdown();
         return kPlutoStatusDeviceLost;
       }
       return kPlutoStatusOk;
     };
 
-    if (device_->is_blanked()) {
-      (void)device_->blank_powerdown();
-      return kPlutoStatusDeviceLost;
+    if (job.completes_handoff_cleanup) {
+      const PlutoStatus precondition_status = drive_stage(WaveformStage{
+          .waveform = &job.handoff_precondition_waveform,
+          .drive_lut = job.handoff_precondition_waveform.drive_lut,
+          .remap = TransitionRemap::kWhiteFromRecordedSource,
+      });
+      if (precondition_status != kPlutoStatusOk) {
+        return precondition_status;
+      }
     }
-    PlutoStatus encode_status = encode_phase(0, 0);
-    if (encode_status != kPlutoStatusOk) {
-      (void)device_->blank_powerdown();
-      return encode_status;
-    }
-
-    // Job construction and RGB quantization leave the continuously scanning
-    // idle slot at an arbitrary point in its frame. Wait for one explicit
-    // idle boundary before phase zero, then issue every subsequent pan at the
-    // completion boundary of its predecessor.
-    if (!pan_with_deadline(kRm2IdleSlot)) {
-      (void)device_->blank_powerdown();
-      return kPlutoStatusDeviceLost;
+    const std::span<const std::uint8_t> content_lut =
+        job.suppress_unchanged && !job.completes_handoff_cleanup
+            ? job.waveform.partial_drive_lut
+            : job.waveform.drive_lut;
+    const PlutoStatus content_status = drive_stage(WaveformStage{
+        .waveform = &job.waveform,
+        .drive_lut = content_lut,
+        .remap = job.completes_handoff_cleanup
+                     ? TransitionRemap::kRecordedTargetFromWhite
+                     : TransitionRemap::kNone,
+    });
+    if (content_status != kPlutoStatusOk) {
+      return content_status;
     }
 
     std::string power_error;
-    if (!validate_powered_panel_state(kPresentPreDrivePowerStateStage,
-                                      &power_error)) {
-      report_present_failure(kPresentPreDrivePowerStateStage,
-                             kPlutoStatusDeviceLost, power_error);
-      attempt_fail_safe_blank(kPresentPreDrivePowerStateStage);
-      return kPlutoStatusDeviceLost;
-    }
-
-    auto pan_begin = std::chrono::steady_clock::now();
-    if (!pan_worker_.begin(0)) {
-      (void)device_->blank_powerdown();
-      return kPlutoStatusDeviceLost;
-    }
-    for (std::uint32_t phase = 0; phase < job.waveform.phase_count; ++phase) {
-      PlutoStatus next_encode_status = kPlutoStatusOk;
-      if (phase + 1U < job.waveform.phase_count) {
-        next_encode_status =
-            encode_phase(phase + 1U, (phase + 1U) % kRm2ActiveSlots);
-      }
-
-      Rm2PanResult pan_result;
-      if (!pan_worker_.finish(&pan_result) ||
-          !accept_pan_result(phase % kRm2ActiveSlots, pan_result)) {
-        (void)device_->blank_powerdown();
-        return kPlutoStatusDeviceLost;
-      }
-      ++presented_phases_;
-      // `finish()` may resume well after the kernel has latched the page. The
-      // device captures CUR_FRAME_DONE beside the ioctl return, so use that
-      // boundary while retaining the complete request-to-latch deadline.
-      if (pan_result.completed_at < pan_begin ||
-          pan_result.completed_at - pan_begin > cadence_deadline) {
-        ++missed_deadlines_;
-        if (pan_result.completed_at < pan_begin ||
-            pan_result.completed_at - pan_begin > phase_interval * 2) {
-          ++underflows_;
-        }
-        (void)device_->blank_powerdown();
-        return kPlutoStatusDeviceLost;
-      }
-      if (next_encode_status != kPlutoStatusOk) {
-        (void)device_->blank_powerdown();
-        return next_encode_status;
-      }
-      if (phase + 1U < job.waveform.phase_count) {
-        pan_begin = std::chrono::steady_clock::now();
-        if (!pan_worker_.begin((phase + 1U) % kRm2ActiveSlots)) {
-          (void)device_->blank_powerdown();
-          return kPlutoStatusDeviceLost;
-        }
-      }
-    }
-    if (!pan_with_deadline(kRm2IdleSlot)) {
-      (void)device_->blank_powerdown();
-      return kPlutoStatusDeviceLost;
-    }
-    power_error.clear();
     if (!validate_powered_panel_state(kPresentPostDrivePowerStateStage,
                                       &power_error)) {
       report_present_failure(kPresentPostDrivePowerStateStage,

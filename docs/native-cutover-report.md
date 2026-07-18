@@ -380,29 +380,57 @@ than merely failing on alignment. The intended Ink Lab camera/native pair
 scored `0.1929`, while the following ghost-contaminated Validation Lab camera
 matched the Ink Lab native frame at `0.2580`, a `-0.0650` margin. From the
 camera row, Ink Lab's intended match scored `0.1929` and the native Ink canvas
-scored `0.2511`, a `-0.0581` margin. The warm switcher later looked clean
-because its explicit full refresh drives the complete transition table.
-Automatic bleach also restored clean Home later, but took about `7.148 s`;
-a diagnostic SIGHUP black/white/blink/bleach/restore cycle took about
-`9.942 s`. Either delayed multi-flash sequence is too slow to make every
+scored `0.2511`, a `-0.0581` margin. A later clean switcher could not identify
+the cause: cumulative content passes and automatic maintenance had already
+changed the glass. Automatic bleach restored clean Home but took about
+`7.148 s`; a diagnostic SIGHUP black/white/blink/bleach/restore cycle took
+about `9.942 s`. Either delayed multi-cycle sequence is too slow to make every
 ordinary app switch optically correct.
 
 RM2 maps both `Text` and `Full` to WBF mode 2 with 38 phases. The relevant
 difference is that ordinary `Text` encoding zeros old-equals-new transition
-cells, while `Full` retains the complete table. The retained correction marks
-an accepted warm handoff as needing one pigment cleanup. If the already
-scheduled first incoming job is the common full-panel reconciliation, that job
-uses complete mode-2 transitions; no second frame, full-surface traversal, or
-waveform is added. The marker is consumed by the first successful job, so a
-same-app sparse `Fast` resume and every later `Text` update keep unchanged-cell
-suppression.
+cells, while `Full` retains the complete table. The first attempted correction
+used that complete table for the already scheduled full-panel reconciliation.
+Focused host coverage proved the intended cells were driven exactly once and
+all 80 RM2 native tests passed.
 
-Focused host coverage proves that an unchanged sample cell is driven on the
-first full-panel `Text` replay and suppressed again on the second. It also
-checks explicit telemetry for exactly one cleanup job; all 80 RM2 native tests
-pass. This remains development evidence until a newly frozen release repeats
-the Motion Lab to Ink Lab and Validation Lab sequence on glass and passes the
-complete formal verifier.
+Exact clean candidate `18cf107875a2c44c9e5648edc6d337400a4d1e2a`,
+manifest SHA-256
+`8d5a6492533ff5463e3ba7a0bfe0677cfb7a4bf43125cd59a4fce0853fe5d356`,
+then disproved the correction on the physical RM2. It was provisioned through
+the common CLI and logged
+`warm handoff full-panel replay drives complete mode-2 transitions` with
+`handoff_cleanup_jobs=1`, zero missed deadlines, and zero underflows. The
+paired native Ink Lab frame was clean, but
+`analysis/native-cutover/diagnostics/rm2-handoff-cleanup-18cf107/02-ink-lab-camera.jpg`
+still showed Motion Lab's stripes, spinner, line, and box. This candidate is
+rejected; diagonal mode-2 drive cannot substitute for a pigment precondition
+when commanded target history and physical residue have diverged.
+
+### RM2 round 10: AF white exit rail before content
+
+The retained replacement follows the AF fast-mode exit rule inside the RM2
+presenter. On the first common full-panel reconciliation after an accepted
+handoff, the same admitted job first drives mode 6 to white from every recorded
+source level, then drives complete mode-2 content from white to the incoming
+target. At the measured 24 C table this is 10 plus 38 phases instead of a
+7--10 second multi-cycle bleach.
+
+The job keeps its original `target-new | recorded-old` byte per pixel. For each
+precondition phase, a 256-byte stack LUT ignores the recorded target nibble and
+selects `white | recorded-old`; for each content phase it ignores the recorded
+old nibble and selects `target-new | white`. That avoids another 2.6-million
+pixel key buffer, allocation, Flutter traversal, or frame copy. Stable live
+power checks, cadence deadlines, safe-idle boundaries, final commit, and
+failure blanking enclose both stages. A sparse same-app resume consumes the
+handoff marker without the precondition, and later updates keep normal
+old-equals-new suppression.
+
+Focused coverage derives the exact phase counts from the bound WBF, observes
+the white precondition, proves it occurs once, and proves the next identical
+`Text` job returns to the ordinary suppressed phase stream; all 80 RM2 native
+tests pass. This is development evidence until a clean release repeats the
+Motion Lab to Ink Lab and Validation Lab sequence on the tablet.
 
 ### Lifecycle acceptance: reject early external wakes
 

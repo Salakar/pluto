@@ -167,15 +167,21 @@ or unbounded hot-path I/O.
 
 An accepted cross-app warm handoff imports the outgoing app's exact optical
 state, then the common renderer reconciles the incoming app with one
-full-panel `Text` request. On RM2, `Text` and `Full` select the same WBF mode
-and phase count; the ordinary `Text` optimization differs by suppressing
-old-equals-new transition cells. Those cells can still carry residual pigment
-after a visually dissimilar app, so the RM2 backend retains the complete mode
-table for this first full-panel reconciliation only. It does not schedule
-another frame, traversal, or waveform. The next job returns to normal unchanged
-cell suppression, and the same-app sparse `Fast` resume proof is unchanged.
-This is a panel-specific encoding detail below the common lifecycle boundary,
-not a separate app-switch flow.
+full-panel `Text` request. The imported levels are the last commanded optical
+targets, not a sensor measurement of residual pigment. Physical RM2 testing
+therefore rejected merely retaining mode-2 old-equals-new transitions: a
+high-contrast app could remain visible even though logical old and new levels
+already agreed.
+
+For this first full-panel reconciliation only, the RM2 backend follows the AF
+fast-mode exit protocol inside the same admitted job. It drives one mode-6
+white precondition from the recorded source levels, then mode-2 content from
+white to the incoming target. A 256-byte phase-local LUT remap reuses the
+existing transition-key vector for both stages, so there is no second frame,
+full-surface traversal, allocation, or copy. The next job returns to ordinary
+unchanged-cell suppression, and a same-app sparse `Fast` resume consumes no
+precondition. This is a panel-specific waveform sequence below the common
+lifecycle boundary, not a separate app-switch flow.
 
 ### Paper Pro Move
 
