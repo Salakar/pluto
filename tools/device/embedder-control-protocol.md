@@ -156,9 +156,12 @@ exposes the editor's exact tappable `Back to gallery` action:
 generation, the embedder schedules and observes two sequential Flutter frames
 on the platform thread; the first may close a frame that was already in flight,
 while the second is therefore a fresh post-semantics raster fence. It then
-waits for older user presentation to quiesce, suppresses unrelated maintenance,
-and dispatches one dedicated full-screen `Full` refresh from the retained
-surface. `surfaceGeneration` identifies that retained Flutter surface and
+waits for any update that already crossed the presenter boundary, suppresses
+unrelated maintenance, discards superseded route-transition requests that were
+never dispatched, and dispatches one dedicated full-screen `Full` refresh from
+the newest retained surface. The discarded requests cannot lose pixels because
+the dedicated refresh reads the current retained surface and covers the whole
+panel. `surfaceGeneration` identifies that retained Flutter surface and
 `proofFrameId` is captured before the presenter call; success requires the real
 completion callback for that exact frame ID. Stale, future, unrelated,
 out-of-order, and late pre-action completions cannot satisfy the proof, while a

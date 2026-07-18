@@ -493,8 +493,9 @@ TEST(FrameRendererTest,
   }
 
   // A new retained Flutter surface arrives while the old present is still in
-  // flight. The proof must drain that exact app-owned update first and its
-  // eventual Full must replay these newer pixels, not the pre-action surface.
+  // flight. The proof must drain the irreversible old update, discard the
+  // superseded never-dispatched request, and have its eventual Full replay
+  // these newer retained pixels rather than the pre-action surface.
   pixels[0] = 0;
   ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2)));
 
@@ -512,18 +513,10 @@ TEST(FrameRendererTest,
   }
   renderer.notify_present_complete(pre_action_frame_id);
   ASSERT_TRUE(wait_for_present_count(2));
-  std::uint64_t post_action_frame_id = 0;
-  {
-    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    post_action_frame_id = g_mono_capture.frame_id_history.back();
-  }
-  ASSERT_EQ(post_action_frame_id, pre_action_frame_id + 1);
-  renderer.notify_present_complete(post_action_frame_id);
-  ASSERT_TRUE(wait_for_present_count(3));
   std::uint64_t proof_frame_id = 0;
   {
     std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 3u);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 2u);
     proof_frame_id = g_mono_capture.frame_id_history.back();
     EXPECT_EQ(g_mono_capture.class_history.back(), kPlutoRefreshFull);
     EXPECT_EQ(g_mono_capture.flags_history.back(),
@@ -532,7 +525,7 @@ TEST(FrameRendererTest,
     EXPECT_EQ(g_mono_capture.pixel_history.back()[0], 0u);
     EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 64, 64}));
   }
-  ASSERT_EQ(proof_frame_id, pre_action_frame_id + 2);
+  ASSERT_EQ(proof_frame_id, pre_action_frame_id + 1);
   renderer.notify_present_complete(pre_action_frame_id);
   renderer.notify_present_complete(proof_frame_id + 50);
   std::this_thread::sleep_for(std::chrono::milliseconds(15));

@@ -2661,15 +2661,16 @@ bool FrameRenderer::present_retained_surface_full(
       return valid_receipt;
     }
 
-    // Drain all older app-owned work while the proof gate suppresses new
-    // settle/Sparkle/automatic maintenance dispatch. Once no user request or
-    // presenter fence remains, queued maintenance can be dropped without
-    // forgiving its ledgers; the dedicated Full below repays the whole panel.
-    scheduler_->tick(now_us, /*maintenance_allowed=*/false,
-                     /*intrusive_maintenance_allowed=*/false);
+    // Drain only work that already crossed the irreversible presenter
+    // boundary. Flutter may have queued several intermediate route-transition
+    // frames before canvas-ready semantics arrived. Those never-dispatched
+    // requests are superseded by the current retained surface, and presenting
+    // each one before the dedicated Full needlessly spends a complete e-ink
+    // waveform per transition. Once the presenter is idle, drop every queued
+    // request without forgiving its ledgers; the dedicated Full below replays
+    // the newest retained pixels and repays the whole panel.
     if (!exact_proof_dispatch_armed_ && exact_proof_frame_id_ == 0 &&
-        !scheduler_->anything_inflight() && !scheduler_->user_work_pending() &&
-        scheduler_->discard_pending_maintenance_for_handoff() &&
+        !scheduler_->anything_inflight() && scheduler_->discard_pending() &&
         scheduler_->idle()) {
       const PlutoRect full{0, 0, static_cast<int32_t>(width_),
                            static_cast<int32_t>(height_)};
@@ -2918,12 +2919,9 @@ void FrameRenderer::tick_locked(uint64_t now_us) {
   }
   if (exact_proof_active_) {
     // The proof worker owns dispatch ordering until its dedicated Full frame
-    // completes. Keep older app work moving, but do not create maintenance
-    // that could race or masquerade as the proof request.
-    if (scheduler_ != nullptr) {
-      scheduler_->tick(now_us, /*maintenance_allowed=*/false,
-                       /*intrusive_maintenance_allowed=*/false);
-    }
+    // completes. Work already accepted by the presenter progresses
+    // independently and is retired above; do not dispatch queued intermediate
+    // Flutter frames that the proof will replace from the retained surface.
     presentation_completion_cv_.notify_all();
     return;
   }
