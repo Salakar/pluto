@@ -251,8 +251,8 @@ logical state is committed. Focused host coverage now exercises all 16 vendor
 state strings, unreadable attributes, stable historical state, pre-drive loss,
 faults injected only after real phase activity, post-blank decay, and retained
 powered safe-HOLD handoff; 79/79 RM2 native tests pass. This is development
-evidence until the corrected frozen
-release repeats the physical switch and soak.
+evidence until the corrected frozen release repeats the physical switch and
+soak.
 
 ### RM2 round 6: post-blank rail decay
 
@@ -296,6 +296,48 @@ transition still fails closed. Host coverage includes transient `ON, ON, OFF`,
 persistent `ON` without a handoff, retained-powered valid HOLD, tampered HOLD,
 and unreadable sequences; all 79 RM2 native tests pass. Physical acceptance
 must repeat on the next frozen release.
+
+### RM2 round 7: warm switcher acceptance and Ink proof timing
+
+Exact candidate `1693a187b94eda8940974f79a3d0a5e6f323b121` and universal
+manifest SHA-256
+`0829aaa4aecf0f4755e90ae56c9dd77b88733e06f6fd26c8ca3a5b70875f1149`
+provisioned through the common CLI and rendered camera-visible Pluto Home.
+Counter, Motion Lab, Ink Lab, Validation Lab, and Ink then launched and
+presented consecutively on RM2 without a deadline miss, underflow, presenter
+loss, or stock fallback.
+
+The first formal run stopped at the switcher even though the camera and native
+state showed the real switcher, a healthy launcher, and a selectable Validation
+Lab card. The acceptance predicate required
+`--dart-entrypoint-args=--switcher` in the immutable launcher command line.
+That is correct for a cold switcher host but impossible when the supervisor
+reuses the normal warm Home process and routes it in place. The gate now accepts
+exactly two release-launcher identities: the cold process with the switcher
+entrypoint, or a hibernating launcher whose PID matches the supervisor's warm
+registry. Both paths additionally require the exact live PID, ready file,
+health receipt, switcher origin, and live warm origin app. Selection still goes
+through the real Flutter center tap and must foreground the deterministic
+Validation Lab process.
+
+The no-flag path was recreated physically: normal Home PID `17291` was
+cold-launched, hibernated behind Ink, resumed as the switcher host with the same
+PID, and selected Validation Lab through the action-bound control receipt. The
+following warm Ink exact-Full proof completed in 1.93 s.
+
+One earlier post-switch Ink proof exceeded its strict four-second bound. A
+retry on the same healthy PID completed in 2.49 s. Follow-up sampling retained
+the four-second bound and produced:
+
+- 10/10 quiescent exact-Full proofs in 1.92--1.96 s;
+- 8/8 receipt-gated Validation Lab to warm Ink resumes, seven in
+  1.93--1.95 s and one in 3.01 s;
+- 6/6 switcher-selected Validation Lab to Ink cycles in 1.94--2.53 s; and
+- the recreated no-flag warm-launcher cycle in 1.93 s.
+
+The candidate is not final because its host acceptance predicate changed after
+assembly. The replacement exact release must repeat the complete camera and
+metrics gate from fresh evidence directories.
 
 ### Lifecycle acceptance: reject early external wakes
 

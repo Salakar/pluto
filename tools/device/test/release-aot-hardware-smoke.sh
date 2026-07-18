@@ -614,28 +614,51 @@ while [ \"\$i\" -lt 30 ]; do
   active=\$(sed -n '1p' /run/pluto/switcher-active 2>/dev/null || true)
   pid=\$(cat /run/pluto/embedder.pid 2>/dev/null || true)
   cmd=''
+  host_mode=''
   case \"\$pid\" in
     ''|*[!0-9]*) ;;
     *)
       if kill -0 \"\$pid\" 2>/dev/null; then
         cmd=\$(tr '\\000' ' ' < \"/proc/\$pid/cmdline\")
+        case \"\$cmd\" in
+          *--release*--bundle=/home/root/pluto/launcher/bundle*--dart-entrypoint-args=--switcher*)
+            host_mode=cold
+            ;;
+          *--release*--bundle=/home/root/pluto/launcher/bundle*--hibernate*)
+            warm_launcher_pid=\$(cat \
+              /run/pluto/warm-apps/dev.pluto.launcher.pid 2>/dev/null || true)
+            [ \"\$warm_launcher_pid\" = \"\$pid\" ] && host_mode=warm
+            ;;
+        esac
       fi
       ;;
   esac
-  case \"\$active:\$cmd\" in
-    '$origin':*--release*--bundle=/home/root/pluto/launcher/bundle*--dart-entrypoint-args=--switcher*)
-      origin_pid=\$(cat '/run/pluto/warm-apps/$origin.pid' 2>/dev/null || true)
-      case \"\$origin_pid\" in
-        ''|*[!0-9]*) ;;
-        *)
-          kill -0 \"\$origin_pid\" 2>/dev/null && {
-            echo \"release AOT smoke: PASS switcher origin=$origin host=\$pid\"
-            exit 0
-          }
-          ;;
+  if [ \"\$active\" = '$origin' ] && [ -n \"\$host_mode\" ]; then
+    ready_file=''
+    health_file=''
+    for arg in \$(tr '\\000' '\\n' < \"/proc/\$pid/cmdline\"); do
+      case \"\$arg\" in
+        --ready-file=*) ready_file=\${arg#*=} ;;
+        --health-file=*) health_file=\${arg#*=} ;;
       esac
-      ;;
-  esac
+    done
+    if [ -n \"\$ready_file\" ] && [ -n \"\$health_file\" ] &&
+       [ \"\$(cat \"\$ready_file\" 2>/dev/null || true)\" = ready ]; then
+      set -- \$(cat \"\$health_file\" 2>/dev/null || true)
+      if [ \"\$#\" -eq 3 ] && [ \"\$1\" = \"pid=\$pid\" ]; then
+        origin_pid=\$(cat '/run/pluto/warm-apps/$origin.pid' 2>/dev/null || true)
+        case \"\$origin_pid\" in
+          ''|*[!0-9]*) ;;
+          *)
+            kill -0 \"\$origin_pid\" 2>/dev/null && {
+              echo \"release AOT smoke: PASS switcher origin=$origin host=\$pid mode=\$host_mode\"
+              exit 0
+            }
+            ;;
+        esac
+      fi
+    fi
+  fi
   sleep 1
   i=\$((i + 1))
 done
@@ -660,10 +683,21 @@ target='$target'
 launcher_pid=\$(cat /run/pluto/embedder.pid 2>/dev/null || true)
 case \"\$launcher_pid\" in ''|*[!0-9]*) exit 89 ;; esac
 launcher_cmd=\$(tr '\\000' ' ' < \"/proc/\$launcher_pid/cmdline\")
+host_mode=''
 case \"\$launcher_cmd\" in
-  *--release*--bundle=/home/root/pluto/launcher/bundle*--dart-entrypoint-args=--switcher*) ;;
-  *) echo \"release AOT smoke: switcher host is not the release launcher\" >&2; exit 90 ;;
+  *--release*--bundle=/home/root/pluto/launcher/bundle*--dart-entrypoint-args=--switcher*)
+    host_mode=cold
+    ;;
+  *--release*--bundle=/home/root/pluto/launcher/bundle*--hibernate*)
+    warm_launcher_pid=\$(cat \
+      /run/pluto/warm-apps/dev.pluto.launcher.pid 2>/dev/null || true)
+    [ \"\$warm_launcher_pid\" = \"\$launcher_pid\" ] && host_mode=warm
+    ;;
 esac
+[ -n \"\$host_mode\" ] || {
+  echo \"release AOT smoke: switcher host is not the exact cold or warm release launcher\" >&2
+  exit 90
+}
 response=\$(/home/root/pluto/bin/pluto-controlctl \\
   --socket /run/pluto/embedder-control.sock \\
   --request '{\"requestId\":\"release-aot-switch\",\"action\":\"tap-switcher-preview\",\"appId\":\"dev.pluto.launcher\"}')

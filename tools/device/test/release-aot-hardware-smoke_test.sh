@@ -170,9 +170,19 @@ case "$command" in
     printf 'release AOT smoke: PASS common supervisor unit=xochitl.service pid=100\n'
     ;;
   *'switcher never became ready'*)
+    [[ "$command" == *'host_mode=cold'* &&
+      "$command" == *'host_mode=warm'* &&
+      "$command" == *'/run/pluto/warm-apps/dev.pluto.launcher.pid'* &&
+      "$command" == *'--ready-file='* &&
+      "$command" == *'--health-file='* ]] ||
+      exit 66
     printf 'release AOT smoke: PASS switcher origin=dev.pluto.ink host=200\n'
     ;;
   *'switcher UI did not foreground'*)
+    [[ "$command" == *'host_mode=cold'* &&
+      "$command" == *'host_mode=warm'* &&
+      "$command" == *'/run/pluto/warm-apps/dev.pluto.launcher.pid'* ]] ||
+      exit 66
     printf 'release AOT smoke: PASS switcher UI selected dev.pluto.validation_lab pid=201\n'
     ;;
   *'release-aot-prepare-ink'*)
