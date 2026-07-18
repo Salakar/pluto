@@ -192,6 +192,9 @@ case "$command" in
       wrong-start)
         receipt='{"requestId":"release-aot-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"processStartTicks":405,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":17}}'
         ;;
+      presentation-timeout)
+        receipt='{"requestId":"release-aot-prepare-ink","ok":false,"error":{"code":"presentation-timeout","message":"Ink canvas did not complete its exact Full panel proof"}}'
+        ;;
       *) exit 64 ;;
     esac
     printf 'pid=202\nstart_ticks=404\nresponse=%s\n' "$receipt"
@@ -583,6 +586,18 @@ if env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
 fi
 grep -q 'invalid presentation receipt' "$TMP/missing-present.out" ||
   fail 'missing Ink presentation receipt was rejected for the wrong reason'
+
+if env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
+  PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 \
+  PREPARE_RECEIPT_MODE=presentation-timeout \
+  "$SMOKE" root@fixture-device >"$TMP/presentation-timeout.out" 2>&1; then
+  fail 'failed Ink presentation proof passed'
+fi
+grep -q 'prepare request failed: presentation-timeout: Ink canvas did not complete its exact Full panel proof' \
+  "$TMP/presentation-timeout.out" ||
+  fail 'failed Ink presentation proof did not preserve the remote diagnosis'
 
 for invalid_receipt_mode in extra-field wrong-start; do
   if env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \

@@ -42,6 +42,12 @@ fail() {
   exit 74
 }
 
+TEST_ROOT_REAL=
+if [ -n "$TEST_ROOT" ]; then
+  TEST_ROOT_REAL=$(CDPATH= cd -P "$TEST_ROOT" 2>/dev/null && pwd -P) ||
+    fail 'cannot resolve the fixture root'
+fi
+
 # Prefix an absolute device path only in the host-side fixture seam. Production
 # never sets TEST_ROOT and therefore reads the real immutable runtime paths.
 real_path() {
@@ -55,7 +61,14 @@ logical_path() {
   case "$TEST_ROOT:$1" in
     :*) printf '%s\n' "$1" ;;
     ?*:"$TEST_ROOT"/*) printf '/%s\n' "${1#"$TEST_ROOT"/}" ;;
-    *) printf '%s\n' "$1" ;;
+    *)
+      case "$TEST_ROOT_REAL:$1" in
+        ?*:"$TEST_ROOT_REAL"/*)
+          printf '/%s\n' "${1#"$TEST_ROOT_REAL"/}"
+          ;;
+        *) printf '%s\n' "$1" ;;
+      esac
+      ;;
   esac
 }
 
@@ -202,7 +215,7 @@ validate_embedder_cmdline() {
   [ "$app_id" = dev.pluto.launcher ] && expected_bundle="$ROOT/launcher/bundle"
   proc_has_arg "$pid" "$ROOT/bin/pluto-embedder" || return 1
   executable=$(proc_executable "$pid") || return 1
-  [ "$executable" = "$ROOT/bin/pluto-embedder" ] || return 1
+  [ "$executable" = "$ACTIVE_RELEASE_ROOT/bin/pluto-embedder" ] || return 1
   proc_has_arg "$pid" --release || return 1
   proc_has_arg "$pid" --presenter=native || return 1
   proc_has_arg "$pid" "--engine=$ROOT/engine/release/libflutter_engine.so" || return 1
@@ -449,6 +462,26 @@ emit_process_sample() {
 }
 
 trace 'validate installed device profile and immutable runtime identity'
+ACTIVE_RELEASE_REAL=$(
+  active_root=$(real_path "$ROOT")
+  CDPATH= cd -P "$active_root" 2>/dev/null && pwd -P
+) || fail 'cannot resolve the active transactional release root'
+[ -d "$ACTIVE_RELEASE_REAL" ] && [ ! -L "$ACTIVE_RELEASE_REAL" ] ||
+  fail 'active transactional release root is not a real directory'
+ACTIVE_RELEASE_ROOT=$(logical_path "$ACTIVE_RELEASE_REAL")
+if [ -z "$TEST_ROOT" ]; then
+  case "$ACTIVE_RELEASE_ROOT" in
+    /home/root/pluto.releases/*)
+      release_leaf=${ACTIVE_RELEASE_ROOT#/home/root/pluto.releases/}
+      case "$release_leaf" in
+        ''|*/*|*[!A-Za-z0-9_.-]*)
+          fail 'active transactional release root has an unsafe name'
+          ;;
+      esac
+      ;;
+    *) fail 'active runtime does not resolve inside /home/root/pluto.releases' ;;
+  esac
+fi
 PROFILE_SCRIPT=$(real_path "$ROOT/share/device-profiles.sh")
 require_regular "$PROFILE_SCRIPT"
 # shellcheck disable=SC1090
@@ -499,6 +532,7 @@ printf 'identity.boot_id=%s\n' "$BOOT_ID"
 printf 'identity.machine=%s\n' "$MACHINE"
 printf 'identity.model=%s\n' "$MODEL"
 printf 'release.git_revision=%s\n' "$RELEASE_REVISION"
+printf 'release.active_root=%s\n' "$ACTIVE_RELEASE_ROOT"
 
 trace 'locate and prove the common Pluto supervisor service process'
 SELECTED_UNIT=

@@ -141,14 +141,17 @@ underflow, rail, or phase fault stops the sequence and reports unhealthy state;
 it does not fall through to another waveform or panel path.
 
 The SY7636A exposes live power-good separately from a historical fault-event
-latch. Pluto records the exact latch while LCDIF is synchronously powered down,
-then requires live power-good and the unchanged latch before and after the
-powered temperature read, immediately before phase zero, and after the final
-safe-idle pan. A stable pre-existing latch is retained as telemetry; an
-unreadable attribute, lost power-good, or any latch transition fails closed.
-Cold INIT has the same post-drive gate. Software optical state and completion
-callbacks advance only after that final check, so a fault caused during a
-waveform cannot be reported as a successful frame.
+latch. `FBIOBLANK(POWERDOWN)` can complete shortly before the live power-good
+bit falls, so startup polls only that expected `ON` to `OFF` decay at 2 ms
+intervals for at most 250 ms before recording the exact fault latch. An
+unreadable or malformed attribute fails immediately, and power-good remaining
+`ON` at the deadline fails closed. Pluto then requires live power-good and the
+unchanged latch before and after the powered temperature read, immediately
+before phase zero, and after the final safe-idle pan. A stable pre-existing
+latch is retained as telemetry; lost power-good or any latch transition fails
+closed. Cold INIT has the same post-drive gate. Software optical state and
+completion callbacks advance only after that final check, so a fault caused
+during a waveform cannot be reported as a successful frame.
 
 ### Paper Pro Move
 

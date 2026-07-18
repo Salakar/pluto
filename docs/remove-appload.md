@@ -522,7 +522,8 @@ Add focused modules behind the common native interfaces:
   immutable control templates;
 - `MxsLcdifDevice`: mode validation, bounded mapping, slot ownership,
   pan/current-frame completion, VSYNC, blank/unblank, temperature/power-good,
-  and fault handling through kernel APIs;
+  bounded post-blank rail-settle observation, and fault handling through kernel
+  APIs;
 - `Rm2ScanLoop`: never overwrites an in-flight slot, advances one phase exactly
   once, rearms the safe hold, and turns any missed deadline or hardware fault
   into a supervisor-visible fatal error;
@@ -542,8 +543,9 @@ Each rung must pass and produce evidence before the next is attempted:
 2. read-only stock observer with no display writes;
 3. persistent SSH, dead-man recovery, untouched stock peer root, boot counter,
    and tested restore path;
-4. while blanked and rails safe, program the exact framebuffer mode with all
-   slots containing the byte-exact safe hold;
+4. issue framebuffer powerdown, wait within a fixed bound for live power-good
+   to fall, then while blanked and rails safe program the exact framebuffer
+   mode with all slots containing the byte-exact safe hold;
 5. validate power-good, temperature, VCOM, profile, pan completion, and safe-hold
    rearming without an active waveform;
 6. one initialisation sequence, then white, black, restore, and optical check;

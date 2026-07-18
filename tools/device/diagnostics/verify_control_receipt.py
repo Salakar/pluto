@@ -41,6 +41,23 @@ def verify_prepare_ink(args: argparse.Namespace) -> None:
         value = json.loads(args.response, object_pairs_hook=unique_object)
     except (json.JSONDecodeError, UnicodeError) as error:
         fail(f"response is not valid JSON: {error}")
+    if (
+        isinstance(value, dict)
+        and set(value) == {"requestId", "ok", "error"}
+        and value["requestId"] == args.request_id
+        and value["ok"] is False
+    ):
+        error = value["error"]
+        if (
+            isinstance(error, dict)
+            and set(error) == {"code", "message"}
+            and isinstance(error["code"], str)
+            and isinstance(error["message"], str)
+        ):
+            fail(
+                "prepare request failed: "
+                f"{error['code']}: {error['message']}"
+            )
     if not isinstance(value, dict) or set(value) != {"requestId", "ok", "result"}:
         fail("response envelope does not have the exact prepare receipt fields")
     if value["requestId"] != args.request_id or value["ok"] is not True:

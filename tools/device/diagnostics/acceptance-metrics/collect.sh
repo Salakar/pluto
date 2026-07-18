@@ -337,6 +337,9 @@ fi
 set -e
 transcript "END remote collector rc=$RC"
 if [[ $RC -ne 0 ]]; then
+  while IFS= read -r line; do
+    printf '%s\n' "$line" >&2
+  done < "$TRANSCRIPT"
   echo "acceptance metrics: remote collection failed for $DEVICE (rc=$RC)" >&2
   exit "$RC"
 fi

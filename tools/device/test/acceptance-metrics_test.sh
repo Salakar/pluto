@@ -157,6 +157,20 @@ printf 'mxcfb: damage telemetry updates=7 requested_px=1000 driven_px=1200 ampli
 printf 'swtcon stats: builds=9 build_p50_us=10 build_p95_us=20 build_max_us=30 completions=9 dropped=0 color_fault=0 hold_rescans=2 neutral_frames=3\n' \
   >> "$FIXTURE/home/root/pluto/logs/dev.pluto.ink.log"
 
+# Production activates an immutable release by repointing /home/root/pluto.
+# /proc/PID/exe exposes the resolved transactional path even though argv keeps
+# the stable public path. Make the default fixture reproduce that distinction.
+mkdir -p "$FIXTURE/home/root/pluto.releases"
+mv "$FIXTURE/home/root/pluto" \
+  "$FIXTURE/home/root/pluto.releases/accepted-release"
+ln -s pluto.releases/accepted-release "$FIXTURE/home/root/pluto"
+for pid in 200 201; do
+  rm "$FIXTURE/proc/$pid/exe"
+  ln -s \
+    "$FIXTURE/home/root/pluto.releases/accepted-release/bin/pluto-embedder" \
+    "$FIXTURE/proc/$pid/exe"
+done
+
 cat > "$FIXTURE/bin/uname" <<'EOF'
 #!/bin/sh
 mode=$(cat "$FIXTURE_ROOT/profile-mode" 2>/dev/null || echo rm1)

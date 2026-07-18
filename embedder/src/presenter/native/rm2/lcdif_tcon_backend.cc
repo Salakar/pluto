@@ -501,6 +501,12 @@ public:
         cpu_thermal_retry_delay_(
             std::max(handoff.cpu_thermal_retry_delay_for_testing,
                      std::chrono::milliseconds(1))),
+        panel_powerdown_settle_timeout_(std::clamp(
+            handoff.panel_powerdown_settle_timeout_for_testing,
+            std::chrono::milliseconds(1), std::chrono::milliseconds(1000))),
+        panel_powerdown_poll_interval_(std::clamp(
+            handoff.panel_powerdown_poll_interval_for_testing,
+            std::chrono::milliseconds(1), panel_powerdown_settle_timeout_)),
         phase_encode_delay_for_testing_(handoff.phase_encode_delay_for_testing),
         handoff_path_(std::move(handoff.path)),
         handoff_now_(handoff.now_for_testing == nullptr
@@ -1332,35 +1338,57 @@ private:
     panel_fault_baseline_captured_ = false;
     panel_fault_baseline_.clear();
     last_latched_fault_event_.clear();
-    std::string error;
-    const Rm2PanelPowerState baseline = power_state_reader_(&error);
     // This sample is deliberately taken after framebuffer initialization has
-    // powered the panel down. PG=OFF is therefore expected and is not a failed
-    // powered check; the sysfs attributes themselves must still be readable.
-    if (!baseline.attributes_readable) {
-      const std::string_view reason =
-          error.empty() ? std::string_view("panel power state is unavailable")
-                        : std::string_view(error);
-      report_startup_failure("start.panel-fault-baseline",
-                             kPlutoStatusDeviceLost, reason);
-      return false;
+    // powered the panel down. The vendor FBIOBLANK ioctl can return shortly
+    // before the PMIC's live PG bit falls, so poll only that expected ON->OFF
+    // decay. Unreadable or malformed attributes still fail immediately, and a
+    // rail that remains ON past the fixed bound fails closed.
+    const auto settle_begin = std::chrono::steady_clock::now();
+    const auto settle_deadline = settle_begin + panel_powerdown_settle_timeout_;
+    std::size_t samples = 0;
+    for (;;) {
+      std::string error;
+      const Rm2PanelPowerState baseline = power_state_reader_(&error);
+      ++samples;
+      if (!baseline.attributes_readable) {
+        const std::string_view reason =
+            error.empty() ? std::string_view("panel power state is unavailable")
+                          : std::string_view(error);
+        report_startup_failure("start.panel-fault-baseline",
+                               kPlutoStatusDeviceLost, reason);
+        return false;
+      }
+      if (!baseline.power_good) {
+        panel_fault_baseline_ = baseline.latched_fault_event;
+        panel_fault_baseline_captured_ = true;
+        if (samples > 1) {
+          const auto settle_us =
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - settle_begin);
+          std::fprintf(stderr,
+                       "lcdif_tcon: RM2 panel powerdown settled "
+                       "samples=%zu elapsed_us=%lld\n",
+                       samples, static_cast<long long>(settle_us.count()));
+        }
+        if (!panel_fault_baseline_.empty()) {
+          std::fprintf(stderr,
+                       "lcdif_tcon: RM2 panel fault baseline power_good=OFF "
+                       "state=\"%s\"\n",
+                       panel_fault_baseline_.c_str());
+        }
+        return true;
+      }
+      if (std::chrono::steady_clock::now() >= settle_deadline) {
+        const std::string reason =
+            "SY7636A panel power-good remained 'ON' after " +
+            std::to_string(panel_powerdown_settle_timeout_.count()) +
+            " ms framebuffer powerdown settle";
+        report_startup_failure("start.panel-fault-baseline",
+                               kPlutoStatusDeviceLost, reason);
+        return false;
+      }
+      std::this_thread::sleep_for(panel_powerdown_poll_interval_);
     }
-    if (baseline.power_good) {
-      report_startup_failure(
-          "start.panel-fault-baseline", kPlutoStatusDeviceLost,
-          "SY7636A panel power-good='ON' while framebuffer is powered down");
-      return false;
-    }
-    panel_fault_baseline_ = baseline.latched_fault_event;
-    panel_fault_baseline_captured_ = true;
-    if (!panel_fault_baseline_.empty()) {
-      std::fprintf(stderr,
-                   "lcdif_tcon: RM2 panel fault baseline power_good=%s "
-                   "state=\"%s\"\n",
-                   baseline.power_good ? "ON" : "OFF",
-                   panel_fault_baseline_.c_str());
-    }
-    return true;
   }
 
   std::optional<int>
@@ -2526,6 +2554,8 @@ private:
   Rm2CpuFrequencyBurstLease cpu_frequency_lease_;
   std::chrono::milliseconds cpu_frequency_debounce_{50};
   std::chrono::milliseconds cpu_thermal_retry_delay_{1000};
+  std::chrono::milliseconds panel_powerdown_settle_timeout_{250};
+  std::chrono::milliseconds panel_powerdown_poll_interval_{2};
   std::chrono::nanoseconds phase_encode_delay_for_testing_{};
   std::string handoff_path_;
   GlassHandoffClock (*handoff_now_)() = glass_handoff_now;

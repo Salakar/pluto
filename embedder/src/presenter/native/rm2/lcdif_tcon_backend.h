@@ -45,6 +45,11 @@ struct Rm2HandoffOptions {
   // this also bounds the one local startup retry after exhausted EAGAIN.
   // Tests may shorten (but not disable) the delay.
   std::chrono::milliseconds cpu_thermal_retry_delay_for_testing{1000};
+  // FBIOBLANK(POWERDOWN) may return just before the SY7636A power-good bit
+  // falls. Production polls for at most 250 ms at 2 ms intervals before
+  // capturing the fail-closed fault baseline. Tests may shorten these bounds.
+  std::chrono::milliseconds panel_powerdown_settle_timeout_for_testing{250};
+  std::chrono::milliseconds panel_powerdown_poll_interval_for_testing{2};
 };
 
 // Exact union area used as the denominator for damage-amplification

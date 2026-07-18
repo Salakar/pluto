@@ -1638,7 +1638,13 @@ TEST(LcdifTconBackend,
         ++power_samples;
         return Rm2PanelPowerState{true, true, {}};
       },
-      Rm2HandoffOptions{.path = ""});
+      Rm2HandoffOptions{
+          .path = "",
+          .panel_powerdown_settle_timeout_for_testing =
+              std::chrono::milliseconds(2),
+          .panel_powerdown_poll_interval_for_testing =
+              std::chrono::milliseconds(1),
+      });
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -1650,7 +1656,7 @@ TEST(LcdifTconBackend,
   ScopedStderrCapture capture;
   ASSERT_TRUE(capture.valid());
   EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
-  EXPECT_EQ(power_samples, 1);
+  EXPECT_GE(power_samples, 1);
   ASSERT_TRUE(!syscalls.blank_values.empty());
   EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
   const std::string diagnostics = capture.finish();
@@ -1658,8 +1664,49 @@ TEST(LcdifTconBackend,
   EXPECT_TRUE(diagnostics.find("stage=start.panel-fault-baseline status=4") !=
               std::string::npos);
   EXPECT_TRUE(diagnostics.find(
-                  "reason=\"SY7636A panel power-good='ON' while framebuffer "
-                  "is powered down\"") != std::string::npos);
+                  "reason=\"SY7636A panel power-good remained 'ON' after 2 ms "
+                  "framebuffer powerdown settle\"") != std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     BlankedPanelPowerGoodDecaySettlesBeforeFaultBaselineCapture) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  int power_samples = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        if (power_samples <= 2) {
+          return Rm2PanelPowerState{true, true, {}};
+        }
+        return Rm2PanelPowerState{true, power_samples != 3, {}};
+      },
+      Rm2HandoffOptions{
+          .path = "",
+          .panel_powerdown_settle_timeout_for_testing =
+              std::chrono::milliseconds(10),
+          .panel_powerdown_poll_interval_for_testing =
+              std::chrono::milliseconds(1),
+      });
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  EXPECT_GE(power_samples, 7);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  backend.stop();
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(diagnostics.find("RM2 panel powerdown settled samples=3") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("stage=start.panel-fault-baseline status=") ==
+              std::string::npos);
 }
 
 TEST(LcdifTconBackend,

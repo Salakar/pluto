@@ -237,11 +237,10 @@ subsequent healthy power-up inadmissible.
 
 The vendor MFD and regulator contracts expose two different facts: power-good
 is live, while the fault-event code persists until a physical PMIC-enable
-reset. Pluto now captures the exact event code after synchronous LCDIF
-powerdown, requires power-good on every powered check, and permits only that
-unchanged baseline as diagnostic telemetry. An unreadable value, unknown vendor
-string, power-good loss, latch creation, latch clearing, or code-to-code change
-fails closed.
+reset. Pluto captures the exact event code after LCDIF powerdown, requires
+power-good on every powered check, and permits only that unchanged baseline as
+diagnostic telemetry. An unreadable value, unknown vendor string, power-good
+loss, latch creation, latch clearing, or code-to-code change fails closed.
 
 The checks enclose the actual drive, not only admission. They run around the
 powered temperature read, on the worker immediately before phase zero, and
@@ -250,9 +249,34 @@ committed, or a completion callback is issued. Cold INIT has both an immediate
 pre-drive gate after its three safe fills and a post-drive gate before blank or
 logical state is committed. Focused host coverage now exercises all 16 vendor
 state strings, unreadable attributes, stable historical state, pre-drive loss,
-and faults injected only after real phase activity; 76/76 RM2 native tests
-pass. This is development evidence until the corrected frozen release repeats
-the physical switch and soak.
+faults injected only after real phase activity, and post-blank decay; 77/77 RM2
+native tests pass. This is development evidence until the corrected frozen
+release repeats the physical switch and soak.
+
+### RM2 round 6: post-blank rail decay
+
+The first universal-release candidate
+`22e26a0673b1a623225d93715cae7e84fd82f7e7` presented Home, Counter, and
+Motion Lab on the physical RM2, then rejected Ink Lab startup at
+`start.panel-fault-baseline`: the framebuffer was logically blanked while the
+SY7636A still reported live `power_good=ON`. The supervisor recovered to Pluto
+Home, so the tablet was not left UI-less, but the candidate correctly failed
+final acceptance.
+
+A read-only sysfs sampler around a later successful app switch observed the
+real rail cycle at monotonic times `331551.35 ON`, `331553.38 OFF`, and
+`331555.11 ON`. This does not measure the ioctl-to-rail delay by itself, but it
+proves that `FBIOBLANK(POWERDOWN)` completion and the PMIC's settled `OFF` state
+are separate lifecycle boundaries. Treating the first post-ioctl `ON` sample
+as a permanent contradiction created an app-switch race.
+
+The retained startup gate now polls only the expected post-blank `ON` to `OFF`
+decay at 2 ms intervals for at most 250 ms. It captures the fault baseline only
+after `OFF`; unreadable or malformed attributes fail immediately, and a rail
+remaining `ON` at the deadline still fails closed. Host coverage now includes
+transient `ON, ON, OFF`, persistent `ON`, and unreadable sequences; all 77 RM2
+native tests pass. The exact settled time is emitted as telemetry and remains
+to be recorded from the replacement frozen release on the physical tablet.
 
 ### Lifecycle acceptance: reject early external wakes
 
