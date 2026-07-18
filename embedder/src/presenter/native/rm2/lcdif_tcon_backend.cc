@@ -158,6 +158,12 @@ enum class InitClearOutcome : std::uint8_t {
   kPowerStateFailure,
 };
 
+enum class PanelFaultBaselineOutcome : std::uint8_t {
+  kFailed,
+  kPoweredDown,
+  kPoweredSafeHold,
+};
+
 constexpr std::string_view
 powered_temperature_stage(PoweredTemperatureContext context,
                           PoweredTemperatureFailure failure) {
@@ -662,23 +668,32 @@ public:
       observe_fault(status);
       return status;
     }
-    if (!capture_panel_fault_baseline()) {
+    bool handoff_pending = false;
+    const PlutoStatus handoff_status =
+        prepare_incoming_handoff(&handoff_pending);
+    if (handoff_status != kPlutoStatusOk) {
+      return fail_powered_start("start.handoff-prepare",
+                                kPlutoStatusDeviceLost);
+    }
+    const PanelFaultBaselineOutcome baseline_outcome =
+        capture_panel_fault_baseline(handoff_pending);
+    if (baseline_outcome == PanelFaultBaselineOutcome::kFailed) {
       return rollback_powered_start(kPlutoStatusDeviceLost);
     }
-    for (std::uint32_t slot = 0; slot < kRm2MappedSlots; ++slot) {
+    // A retained-powered handoff is already scanning the validated final HOLD
+    // slot. Do not rewrite that live slot; every active slot is still replaced
+    // with the canonical HOLD template before it can be selected.
+    const std::uint32_t slots_to_fill =
+        baseline_outcome == PanelFaultBaselineOutcome::kPoweredSafeHold
+            ? kRm2ActiveSlots
+            : kRm2MappedSlots;
+    for (std::uint32_t slot = 0; slot < slots_to_fill; ++slot) {
       if (!fill_rm2_scan_slot(device_->slot(slot), 0)) {
         return fail_powered_start("start.safe-idle-fill", kPlutoStatusInternal);
       }
     }
     if (device_->validate_safe_idle_scan() != kPlutoStatusOk) {
       return fail_powered_start("start.safe-idle-validate",
-                                kPlutoStatusDeviceLost);
-    }
-    bool handoff_pending = false;
-    const PlutoStatus handoff_status =
-        prepare_incoming_handoff(&handoff_pending);
-    if (handoff_status != kPlutoStatusOk) {
-      return fail_powered_start("start.handoff-prepare",
                                 kPlutoStatusDeviceLost);
     }
     if (!handoff_pending && cold_initialize() != kPlutoStatusOk) {
@@ -1334,7 +1349,8 @@ private:
     return true;
   }
 
-  bool capture_panel_fault_baseline() {
+  PanelFaultBaselineOutcome
+  capture_panel_fault_baseline(bool allow_powered_safe_hold) {
     panel_fault_baseline_captured_ = false;
     panel_fault_baseline_.clear();
     last_latched_fault_event_.clear();
@@ -1356,7 +1372,7 @@ private:
                           : std::string_view(error);
         report_startup_failure("start.panel-fault-baseline",
                                kPlutoStatusDeviceLost, reason);
-        return false;
+        return PanelFaultBaselineOutcome::kFailed;
       }
       if (!baseline.power_good) {
         panel_fault_baseline_ = baseline.latched_fault_event;
@@ -1376,16 +1392,47 @@ private:
                        "state=\"%s\"\n",
                        panel_fault_baseline_.c_str());
         }
-        return true;
+        return PanelFaultBaselineOutcome::kPoweredDown;
       }
       if (std::chrono::steady_clock::now() >= settle_deadline) {
+        if (allow_powered_safe_hold) {
+          // A successful outgoing handoff is written only after the prior
+          // presenter has parked LCDIF on the canonical HOLD slot. The
+          // supervisor does not start this process until that owner reports
+          // native-resource quiescence. Revalidate the untouched live slot
+          // before accepting the regulated-but-not-yet-off rail state.
+          if (device_->validate_safe_idle_scan() != kPlutoStatusOk) {
+            report_startup_failure("start.powered-handoff-safe-idle",
+                                   kPlutoStatusDeviceLost,
+                                   "retained-powered handoff is not on the "
+                                   "canonical safe HOLD slot");
+            return PanelFaultBaselineOutcome::kFailed;
+          }
+          panel_fault_baseline_ = baseline.latched_fault_event;
+          panel_fault_baseline_captured_ = true;
+          const auto settle_us =
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - settle_begin);
+          const std::string_view state =
+              panel_fault_baseline_.empty()
+                  ? std::string_view("no fault event")
+                  : std::string_view(panel_fault_baseline_);
+          std::fprintf(
+              stderr,
+              "lcdif_tcon: RM2 retained-powered safe-HOLD baseline "
+              "samples=%zu elapsed_us=%lld power_good=ON state=\"%.*s\""
+              "\n",
+              samples, static_cast<long long>(settle_us.count()),
+              static_cast<int>(state.size()), state.data());
+          return PanelFaultBaselineOutcome::kPoweredSafeHold;
+        }
         const std::string reason =
             "SY7636A panel power-good remained 'ON' after " +
             std::to_string(panel_powerdown_settle_timeout_.count()) +
             " ms framebuffer powerdown settle";
         report_startup_failure("start.panel-fault-baseline",
                                kPlutoStatusDeviceLost, reason);
-        return false;
+        return PanelFaultBaselineOutcome::kFailed;
       }
       std::this_thread::sleep_for(panel_powerdown_poll_interval_);
     }

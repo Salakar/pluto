@@ -249,8 +249,9 @@ committed, or a completion callback is issued. Cold INIT has both an immediate
 pre-drive gate after its three safe fills and a post-drive gate before blank or
 logical state is committed. Focused host coverage now exercises all 16 vendor
 state strings, unreadable attributes, stable historical state, pre-drive loss,
-faults injected only after real phase activity, and post-blank decay; 77/77 RM2
-native tests pass. This is development evidence until the corrected frozen
+faults injected only after real phase activity, post-blank decay, and retained
+powered safe-HOLD handoff; 79/79 RM2 native tests pass. This is development
+evidence until the corrected frozen
 release repeats the physical switch and soak.
 
 ### RM2 round 6: post-blank rail decay
@@ -270,13 +271,31 @@ proves that `FBIOBLANK(POWERDOWN)` completion and the PMIC's settled `OFF` state
 are separate lifecycle boundaries. Treating the first post-ioctl `ON` sample
 as a permanent contradiction created an app-switch race.
 
-The retained startup gate now polls only the expected post-blank `ON` to `OFF`
-decay at 2 ms intervals for at most 250 ms. It captures the fault baseline only
-after `OFF`; unreadable or malformed attributes fail immediately, and a rail
-remaining `ON` at the deadline still fails closed. Host coverage now includes
-transient `ON, ON, OFF`, persistent `ON`, and unreadable sequences; all 77 RM2
-native tests pass. The exact settled time is emitted as telemetry and remains
-to be recorded from the replacement frozen release on the physical tablet.
+The next exact release candidate,
+`d9b2f479b4083a7160c7b8e05b8521bef6d86aa6`, retained that bounded wait. It
+passed provisioning and camera-visible Home, but its first formal Counter
+switch encountered the intermittent state again: an exact warm-handoff bundle
+and safe idle existed while power-good remained `ON` for the entire 250 ms
+window. Counter failed closed and the supervisor resumed Home, so this
+candidate is also rejected.
+
+An instrumented follow-up switched successfully through Validation Lab,
+Counter, Motion Lab, Ink Lab, Ink, and the warm pool while sampling kernel
+regulator counts. Normal shutdown removed the VCOM consumer, then SDOE, with
+power-good falling roughly 50--100 ms later. The failing state is therefore not
+ordinary slow rail decay and must not be hidden behind a longer sleep.
+
+The retained startup contract polls the expected post-blank `ON` to `OFF`
+decay at 2 ms intervals for at most 250 ms. At the deadline, `ON` is admissible
+only when the strict incoming handoff is valid and the untouched live LCDIF
+offset and bytes revalidate as the canonical safe-HOLD slot. Pluto records that
+powered-safe-HOLD fault baseline, fills only inactive slots, and never rewrites
+the scanned HOLD slot. A cold start, invalid or missing handoff, noncanonical
+live slot, unreadable attribute, unknown state, later power loss, or latch
+transition still fails closed. Host coverage includes transient `ON, ON, OFF`,
+persistent `ON` without a handoff, retained-powered valid HOLD, tampered HOLD,
+and unreadable sequences; all 79 RM2 native tests pass. Physical acceptance
+must repeat on the next frozen release.
 
 ### Lifecycle acceptance: reject early external wakes
 

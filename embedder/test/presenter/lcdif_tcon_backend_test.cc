@@ -1710,6 +1710,106 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
+     ValidWarmHandoffMayRetainPoweredCanonicalSafeHoldAtBaseline) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload payload;
+  stage_candidate(fixture, path.get(), &payload);
+
+  BackendFakeLcdifSyscalls incoming_syscalls;
+  ASSERT_TRUE(
+      fill_rm2_scan_slot(std::span<std::byte>(incoming_syscalls.storage.data() +
+                                                  kRm2IdleSlot * kRm2SlotBytes,
+                                              kRm2SlotBytes),
+                         0));
+  int power_samples = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&incoming_syscalls);
+  LcdifTconDisplayBackend incoming(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        return Rm2PanelPowerState{true, true, "UVP at VNEG rail"};
+      },
+      Rm2HandoffOptions{
+          .path = path.get(),
+          .allow_insecure_path_for_testing = true,
+          .panel_powerdown_settle_timeout_for_testing =
+              std::chrono::milliseconds(2),
+          .panel_powerdown_poll_interval_for_testing =
+              std::chrono::milliseconds(1),
+      });
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_TRUE(probe_and_start(&incoming, fixture));
+  EXPECT_FALSE(incoming.ready(kPlutoRefreshFast));
+  EXPECT_GE(power_samples, 1);
+  EXPECT_TRUE(incoming_syscalls.panned_offsets.empty());
+  PlutoHandoffPayload received{.struct_size = sizeof(PlutoHandoffPayload)};
+  ASSERT_EQ(incoming.get_handoff(&received), kPlutoStatusOk);
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshFast));
+  incoming.stop();
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find("RM2 retained-powered safe-HOLD baseline samples=") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find("power_good=ON state=\"UVP at VNEG rail\"") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("RM2 startup failure") == std::string::npos);
+}
+
+TEST(LcdifTconBackend, PoweredWarmHandoffStillRejectsNoncanonicalLiveIdleSlot) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload payload;
+  stage_candidate(fixture, path.get(), &payload);
+
+  BackendFakeLcdifSyscalls incoming_syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&incoming_syscalls);
+  LcdifTconDisplayBackend incoming(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [](std::string *) { return Rm2PanelPowerState{true, true, {}}; },
+      Rm2HandoffOptions{
+          .path = path.get(),
+          .allow_insecure_path_for_testing = true,
+          .panel_powerdown_settle_timeout_for_testing =
+              std::chrono::milliseconds(2),
+          .panel_powerdown_poll_interval_for_testing =
+              std::chrono::milliseconds(1),
+      });
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_EQ(incoming.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+  EXPECT_EQ(incoming.start(config), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(incoming_syscalls.panned_offsets.empty());
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find("stage=start.powered-handoff-safe-idle status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find("retained-powered handoff is not on the "
+                               "canonical safe HOLD slot") !=
+              std::string::npos);
+}
+
+TEST(LcdifTconBackend,
      UnreadablePanelFaultBaselineFailsExactStageBeforeAnyPan) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
@@ -2425,7 +2525,6 @@ TEST(LcdifTconBackend,
   LocalRm2Profile fixture;
   ASSERT_TRUE(fixture.valid());
   BackendFakeLcdifSyscalls syscalls;
-  syscalls.pan_delay = std::chrono::milliseconds(8);
   syscalls.capture_phase_cells = true;
   const std::size_t sampled_cell =
       phase_cell_offset_for_user(32U, kRm2PanelHeight / 2U);
@@ -2441,6 +2540,7 @@ TEST(LcdifTconBackend,
       [](std::string *) -> std::optional<int> { return 24000; },
       blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_TRUE(probe_and_start(&backend, fixture));
+  syscalls.pan_delay = std::chrono::milliseconds(8);
   syscalls.panned_phase_cells.clear();
   syscalls.latched_slot_mutations = 0;
 
