@@ -22,7 +22,7 @@ gcc_machine="$("$CROSS_ROOT-gcc" -dumpmachine)"
 # Hash the complete read-only SDK tree while normalizing archive metadata.
 # File contents, modes, names, and symlink targets remain part of the digest;
 # host ownership and timestamps do not. This must run with GNU tar, which is
-# supplied by both pinned linux/amd64 build containers.
+# supplied by the pinned device build containers.
 sdk_sha256="$({
   tar \
     --sort=name \

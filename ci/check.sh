@@ -26,10 +26,10 @@ dart tools/codegen/generate_device_profiles_test.dart
 dart tools/codegen/generate_device_profiles.dart --check
 dart tools/codegen/generate_rm1_rgb565_optical_lut_test.dart
 dart tools/codegen/generate_rm1_rgb565_optical_lut.dart --check
-bash -n tools/setup/camera/capture.sh
+/bin/bash -p -n tools/setup/camera/capture.sh
 python3 -m unittest discover -s tools/setup/camera/test -p 'test_*.py'
 python3 -m unittest discover -s tools/device/diagnostics/test -p 'test_*.py'
-bash tools/setup/camera/test/capture_acceptance_stage_test.sh
+/bin/bash -p tools/setup/camera/test/capture_acceptance_stage_test.sh
 for script in tools/device/*.sh tools/device/test/*.sh; do
   if [[ "$(head -n 1 "$script")" == *bash* ]]; then
     bash -n "$script"
@@ -38,7 +38,7 @@ for script in tools/device/*.sh tools/device/test/*.sh; do
   fi
 done
 bash tools/build/test/embedder-build-workflow-test.sh
-bash tools/build/test/codex-armv7-build-recipe-test.sh
+bash tools/build/test/native-cutover-residue-test.sh
 bash tools/device/test/pluto-power-key-watch_test.sh
 bash tools/device/test/pluto-session-standby_test.sh
 bash tools/device/test/pluto-session-debug-authorization_test.sh
@@ -49,9 +49,10 @@ bash tools/device/test/pluto-session-warm-resume_test.sh
 bash tools/device/test/pluto-session-switcher_test.sh
 bash tools/device/test/pluto-session-power-menu_test.sh
 bash tools/device/test/pluto-release-activate_test.sh
-bash tools/device/test/acceptance-metrics_test.sh
-bash tools/device/test/release-aot-hardware-smoke_test.sh
-bash tools/device/test/release-lifecycle-hardware-smoke_test.sh
+/bin/bash -p tools/device/test/acceptance-metrics_test.sh
+/bin/bash -p tools/device/test/acceptance-loader-env_test.sh
+/bin/bash -p tools/device/test/release-aot-hardware-smoke_test.sh
+/bin/bash -p tools/device/test/release-lifecycle-hardware-smoke_test.sh
 bash tools/device/test/pluto-boot-install_test.sh
 bash tools/device/test/pluto-uninstall_test.sh
 sh tools/device/test/device-profiles_test.sh

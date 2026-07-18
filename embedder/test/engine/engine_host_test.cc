@@ -398,6 +398,84 @@ TEST(DirectInkCanvasPreparation, MissingOrRejectedTransitionFailsClosed) {
   EXPECT_EQ(action_count, 0u);
 }
 
+TEST(DirectInkCanvasPresentationReceipt,
+     ActionWithoutExactFullPresenterProofFailsWithExactTimeout) {
+  pluto::DirectInkSemanticsState state;
+  const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    if (enabled) {
+      publish_semantics(&state, {{80, "create"}});
+    }
+    return true;
+  };
+  const pluto::DirectInkSemanticsTap tap =
+      [&](const pluto::DirectInkSemanticsNode &node) {
+        EXPECT_EQ(node.node_id, 80u);
+        publish_semantics(&state, {{81, "Back to gallery"}});
+        return true;
+      };
+  int proofs = 0;
+  const pluto::DirectInkPresentationTracker presentation{
+      .prove =
+          [&](std::chrono::milliseconds timeout,
+              pluto::DirectInkPresentationProof *proof) {
+            ++proofs;
+            EXPECT_EQ(timeout, std::chrono::milliseconds(19));
+            *proof = {};
+            return false;
+          },
+  };
+  std::size_t action_count = 99;
+  pluto::DirectInkPresentationProof proof{UINT64_MAX, UINT64_MAX};
+  pluto::DirectControlFailure failure;
+
+  EXPECT_FALSE(pluto::prepare_direct_ink_canvas_with_presentation_receipt(
+      &state, toggle, tap, presentation, std::chrono::milliseconds(50),
+      std::chrono::milliseconds(19), &action_count, &proof, &failure));
+  EXPECT_EQ(action_count, 1u);
+  EXPECT_EQ(proof.surface_generation, 0u);
+  EXPECT_EQ(proof.frame_id, 0u);
+  EXPECT_EQ(proofs, 1);
+  EXPECT_EQ(failure.code, "presentation-timeout");
+  EXPECT_EQ(failure.message,
+            "Ink canvas did not complete its exact Full panel proof");
+}
+
+TEST(DirectInkCanvasPresentationReceipt,
+     MountedEditorStillRequiresFreshExactFullPresenterProof) {
+  pluto::DirectInkSemanticsState state;
+  const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    if (enabled) {
+      publish_semantics(&state, {{90, "Back to gallery"}});
+    }
+    return true;
+  };
+  int proofs = 0;
+  const pluto::DirectInkPresentationTracker presentation{
+      .prove =
+          [&](std::chrono::milliseconds timeout,
+              pluto::DirectInkPresentationProof *proof) {
+            ++proofs;
+            EXPECT_EQ(timeout, std::chrono::milliseconds(19));
+            *proof = {.surface_generation = 73, .frame_id = 811};
+            return true;
+          },
+  };
+  std::size_t action_count = 99;
+  pluto::DirectInkPresentationProof proof;
+  pluto::DirectControlFailure failure;
+
+  ASSERT_TRUE(pluto::prepare_direct_ink_canvas_with_presentation_receipt(
+      &state, toggle,
+      [](const pluto::DirectInkSemanticsNode &) { return true; }, presentation,
+      std::chrono::milliseconds(50), std::chrono::milliseconds(19),
+      &action_count, &proof, &failure));
+  EXPECT_EQ(action_count, 0u);
+  EXPECT_EQ(proof.surface_generation, 73u);
+  EXPECT_EQ(proof.frame_id, 811u);
+  EXPECT_EQ(proofs, 1);
+  EXPECT_TRUE(failure.code.empty());
+}
+
 TEST(EngineHostPenInput, PreservesEachKernelMonotonicTimestamp) {
   // Buffered SYN frames may be dispatched together much later. Their original
   // spacing must survive so Flutter/Dart velocity filters see the digitizer's

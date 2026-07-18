@@ -3,7 +3,7 @@
 
 The camera helper produces an upright, perspective-corrected view of the panel,
 but intentionally retains a narrow physical guard around it.  This verifier
-therefore estimates one bounded axis-aligned crop for the whole 11-frame run,
+therefore estimates one bounded axis-aligned crop for the whole 10-frame run,
 then compares exposure-invariant edge maps against the native post-dither
 screenshots.  A separate signed-difference check proves that the deterministic
 Ink S-curve appeared in both modalities at the same panel-relative location.
@@ -20,7 +20,6 @@ import json
 import math
 import os
 from pathlib import Path
-import shutil
 import statistics
 import subprocess
 import sys
@@ -33,10 +32,9 @@ EXPECTED_LABELS = (
     "app-dev.pluto.examples.motion_lab",
     "app-dev.pluto.examples.ink_lab",
     "app-dev.pluto.validation_lab",
-    "app-dev.pluto.codex",
     "app-dev.pluto.ink-before-switcher",
     "switcher-dev.pluto.ink",
-    "switcher-selected-dev.pluto.codex",
+    "switcher-selected-dev.pluto.validation_lab",
     "ink-canvas-before-stroke",
     "ink-stroke",
     "app-dev.pluto.launcher",
@@ -48,9 +46,9 @@ PROFILE_DIMENSIONS = {
     "move": (954, 1696),
 }
 
-CODEX_EQUIVALENT = frozenset((4, 7))
-INK_BEFORE_INDEX = 8
-INK_AFTER_INDEX = 9
+VALIDATION_EQUIVALENT = frozenset((3, 6))
+INK_BEFORE_INDEX = 7
+INK_AFTER_INDEX = 8
 WORK_HEIGHT = 192
 
 # Threshold calibration, 2026-07-15: the only truthful cross-modal development
@@ -129,7 +127,7 @@ def _parse_camera_manifest(directory: Path) -> list[Path]:
     _require_regular(manifest, "camera stage manifest")
     rows = manifest.read_text(encoding="utf-8").splitlines()
     if len(rows) != len(EXPECTED_LABELS):
-        _fail("camera manifest must contain exactly 11 rows")
+        _fail("camera manifest must contain exactly 10 rows")
     images: list[Path] = []
     for index, (row, label) in enumerate(zip(rows, EXPECTED_LABELS), start=1):
         fields = row.split("\t")
@@ -145,7 +143,7 @@ def _parse_camera_manifest(directory: Path) -> list[Path]:
         images.append(image)
     extras = tuple(directory.glob("*.jpg"))
     if len(extras) != len(EXPECTED_LABELS):
-        _fail("camera directory must contain exactly 11 stage JPEGs")
+        _fail("camera directory must contain exactly 10 stage JPEGs")
     return images
 
 
@@ -154,7 +152,7 @@ def _parse_screenshot_manifest(directory: Path) -> list[Path]:
     _require_regular(manifest, "screenshot stage manifest")
     rows = manifest.read_text(encoding="utf-8").splitlines()
     if len(rows) != len(EXPECTED_LABELS):
-        _fail("screenshot manifest must contain exactly 11 rows")
+        _fail("screenshot manifest must contain exactly 10 rows")
     images: list[Path] = []
     for index, (row, label) in enumerate(zip(rows, EXPECTED_LABELS), start=1):
         fields = row.split("\t")
@@ -172,7 +170,7 @@ def _parse_screenshot_manifest(directory: Path) -> list[Path]:
         images.append(image)
     extras = tuple(directory.glob("*.png"))
     if len(extras) != len(EXPECTED_LABELS):
-        _fail("screenshot directory must contain exactly 11 stage PNGs")
+        _fail("screenshot directory must contain exactly 10 stage PNGs")
     return images
 
 
@@ -366,7 +364,11 @@ def _candidate_values(center: float, radius: float, step: float, low: float, hig
 
 def _find_alignment(native: Sequence[EdgeFrame], camera: Sequence[EdgeFrame]) -> Alignment:
     ranked = sorted(
-        (index for index in range(len(EXPECTED_LABELS)) if index not in (8, 9)),
+        (
+            index
+            for index in range(len(EXPECTED_LABELS))
+            if index not in (INK_BEFORE_INDEX, INK_AFTER_INDEX)
+        ),
         key=lambda index: native[index].energy,
         reverse=True,
     )[:4]
@@ -499,7 +501,11 @@ def _find_alignment(native: Sequence[EdgeFrame], camera: Sequence[EdgeFrame]) ->
 
 
 def _allowed_indices(index: int) -> frozenset[int]:
-    return CODEX_EQUIVALENT if index in CODEX_EQUIVALENT else frozenset((index,))
+    return (
+        VALIDATION_EQUIVALENT
+        if index in VALIDATION_EQUIVALENT
+        else frozenset((index,))
+    )
 
 
 def _verify_stage_matching(
@@ -702,17 +708,33 @@ def _verify_stroke_overlap(
     return native_overlap, camera_overlap, centroid_overlap
 
 
-def verify(camera_dir: Path, screenshot_dir: Path, profile: str) -> dict[str, object]:
+def _validated_executable(path: Path, label: str) -> str:
+    if (
+        not path.is_absolute()
+        or path.is_symlink()
+        or not path.is_file()
+        or not os.access(path, os.X_OK)
+    ):
+        _fail(f"{label} must be an absolute executable non-symlink file")
+    return os.fspath(path)
+
+
+def verify(
+    camera_dir: Path,
+    screenshot_dir: Path,
+    profile: str,
+    *,
+    ffmpeg_path: Path,
+    ffprobe_path: Path,
+) -> dict[str, object]:
     if profile not in PROFILE_DIMENSIONS:
         _fail(f"unsupported profile: {profile}")
     if camera_dir.is_symlink() or not camera_dir.is_dir():
         _fail("camera directory is missing or is a symlink")
     if screenshot_dir.is_symlink() or not screenshot_dir.is_dir():
         _fail("screenshot directory is missing or is a symlink")
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
-    if ffmpeg is None or ffprobe is None:
-        _fail("ffmpeg and ffprobe are required")
+    ffmpeg = _validated_executable(ffmpeg_path, "ffmpeg")
+    ffprobe = _validated_executable(ffprobe_path, "ffprobe")
     camera_paths = _parse_camera_manifest(camera_dir)
     screenshot_paths = _parse_screenshot_manifest(screenshot_dir)
     native_dimensions = PROFILE_DIMENSIONS[profile]
@@ -817,6 +839,8 @@ def _arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--camera-dir", type=Path, required=True)
     parser.add_argument("--screenshot-dir", type=Path, required=True)
     parser.add_argument("--profile", choices=tuple(PROFILE_DIMENSIONS), required=True)
+    parser.add_argument("--ffmpeg", type=Path, required=True)
+    parser.add_argument("--ffprobe", type=Path, required=True)
     parser.add_argument("--json", action="store_true", help="emit the complete result as JSON")
     return parser.parse_args(argv)
 
@@ -824,7 +848,13 @@ def _arguments(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _arguments(sys.argv[1:] if argv is None else argv)
     try:
-        result = verify(arguments.camera_dir, arguments.screenshot_dir, arguments.profile)
+        result = verify(
+            arguments.camera_dir,
+            arguments.screenshot_dir,
+            arguments.profile,
+            ffmpeg_path=arguments.ffmpeg,
+            ffprobe_path=arguments.ffprobe,
+        )
     except VerificationError as error:
         print(f"visual pixel verifier: FAIL: {error}", file=sys.stderr)
         return 1
@@ -839,7 +869,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         assert isinstance(ink, dict)
         print(
             "visual pixel verifier: PASS "
-            f"stages=11 profile={result['profile']} "
+            f"stages={len(EXPECTED_LABELS)} profile={result['profile']} "
             f"alignment={alignment['score']:.4f} "
             f"pair_min={matching['minimum_score']:.4f} "
             f"pair_gap={matching['minimum_discrimination']:.4f} "

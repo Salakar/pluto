@@ -1,5 +1,32 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+[[ "$-" == *p* ]] || {
+  echo "visual review recorder: execute this entrypoint directly or with /bin/bash -p" >&2
+  exit 64
+}
+
+LOADER_ENV_NAMES=()
+while IFS= read -r loader_name; do
+  case "$loader_name" in
+    LD_* | DYLD_* | GLIBC_TUNABLES) LOADER_ENV_NAMES+=("$loader_name") ;;
+  esac
+done < <(compgen -e)
+if ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    [[ -z "${!loader_name:-}" ]] || {
+      echo "visual review recorder: $loader_name is forbidden" >&2
+      exit 64
+    }
+  done
+fi
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+if ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    unset "$loader_name"
+  done
+fi
+PATH=/usr/bin:/bin
+export PATH
 
 CAMERA_DIR=""
 SCREENSHOT_DIR=""
@@ -32,10 +59,14 @@ die() {
 }
 
 sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+  if [[ -x /usr/bin/sha256sum ]]; then
+    /usr/bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  elif [[ -x /bin/sha256sum ]]; then
+    /bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  elif [[ -x /usr/bin/shasum ]]; then
+    LC_ALL=C LANG=C /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
   else
-    shasum -a 256 "$1" | awk '{print $1}'
+    die "pinned SHA-256 tool is unavailable"
   fi
 }
 
@@ -66,10 +97,9 @@ expected_labels=(
   app-dev.pluto.examples.motion_lab
   app-dev.pluto.examples.ink_lab
   app-dev.pluto.validation_lab
-  app-dev.pluto.codex
   app-dev.pluto.ink-before-switcher
   switcher-dev.pluto.ink
-  switcher-selected-dev.pluto.codex
+  switcher-selected-dev.pluto.validation_lab
   ink-canvas-before-stroke
   ink-stroke
   app-dev.pluto.launcher
@@ -90,7 +120,7 @@ while IFS=$'\t' read -r sequence label digest filename extra; do
     die "camera image or digest is invalid: $filename"
   camera_digests+=("$digest")
 done < "$camera_manifest"
-[[ "$camera_index" == 11 ]] || die "camera manifest must contain exactly 11 rows"
+[[ "$camera_index" == 10 ]] || die "camera manifest must contain exactly 10 rows"
 
 screenshot_digests=()
 screenshot_index=0
@@ -106,7 +136,7 @@ while IFS=$'\t' read -r label digest filename app_id extra; do
     die "native screenshot or digest is invalid: $filename"
   screenshot_digests+=("$digest")
 done < "$screenshot_manifest"
-[[ "$screenshot_index" == 11 ]] || die "screenshot manifest must contain exactly 11 rows"
+[[ "$screenshot_index" == 10 ]] || die "screenshot manifest must contain exactly 10 rows"
 
 metadata_digest="$(sha256_file "$metadata_manifest")"
 metrics_digest="$(sha256_file "$metrics_sums")"
@@ -114,7 +144,7 @@ camera_provenance_digest="$(sha256_file "$camera_provenance")"
 temporary="$CAMERA_DIR/.review.tsv.$$"
 trap 'rm -f "$temporary"' EXIT
 : > "$temporary"
-for ((index = 0; index < 11; index += 1)); do
+for ((index = 0; index < 10; index += 1)); do
   printf '%s\t%s\t%s\tpass\t%s\t%s\t%s\t%s\n' \
     "${expected_labels[$index]}" "${camera_digests[$index]}" \
     "${screenshot_digests[$index]}" "$REVIEWER" "$metadata_digest" \
@@ -124,4 +154,4 @@ done
 mv "$temporary" "$review_manifest"
 trap - EXIT
 
-echo "visual review recorder: RECORDED reviewer=$REVIEWER stages=11 receipt=$review_manifest"
+echo "visual review recorder: RECORDED reviewer=$REVIEWER stages=10 receipt=$review_manifest"

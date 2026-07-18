@@ -808,6 +808,7 @@ bool FrameRenderer::submit_frame_locked(const PlutoFramePacket &packet) {
     ++idle_frames_;
     last_damage_count_ = 0;
     maybe_resume_presentation_locked();
+    note_accepted_flutter_frame_locked();
     return true;
   }
   if (packet.width != width_ || packet.height != height_ ||
@@ -876,6 +877,7 @@ bool FrameRenderer::submit_frame_locked(const PlutoFramePacket &packet) {
   seeded_physical_baseline_valid_ = false;
   if (count == 0) {
     maybe_resume_presentation_locked();
+    note_accepted_flutter_frame_locked();
     return true;
   }
   ++diffed_frames_;
@@ -909,6 +911,7 @@ bool FrameRenderer::submit_frame_locked(const PlutoFramePacket &packet) {
     tick_locked(now_us);
     wake_.store(true, std::memory_order_release);
     cv_.notify_one();
+    note_accepted_flutter_frame_locked();
     return true;
   }
 
@@ -935,6 +938,7 @@ bool FrameRenderer::submit_frame_locked(const PlutoFramePacket &packet) {
   maybe_resume_presentation_locked();
   wake_.store(true, std::memory_order_release);
   cv_.notify_one();
+  note_accepted_flutter_frame_locked();
   return true;
 }
 
@@ -1141,6 +1145,9 @@ void FrameRenderer::notify_idle_frame() {
   ++idle_frames_;
   last_damage_count_ = 0;
   maybe_resume_presentation_locked();
+  if (valid_ && retained_content_ready_) {
+    note_accepted_flutter_frame_locked();
+  }
 }
 
 bool FrameRenderer::set_rotation(uint32_t rotation, uint32_t logical_width,
@@ -1149,7 +1156,7 @@ bool FrameRenderer::set_rotation(uint32_t rotation, uint32_t logical_width,
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  if (pixel_reset_phase_ != PixelResetPhase::kIdle) {
+  if (pixel_reset_phase_ != PixelResetPhase::kIdle || exact_proof_active_) {
     std::fprintf(stderr,
                  "pluto: rotation deferred until optical restore completes\n");
     return false;
@@ -1200,7 +1207,7 @@ bool FrameRenderer::set_rotation(uint32_t rotation, uint32_t logical_width,
 bool FrameRenderer::request_full_refresh() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!valid_ || scheduler_ == nullptr || !retained_content_ready_ ||
-      width_ == 0 || height_ == 0) {
+      width_ == 0 || height_ == 0 || exact_proof_active_) {
     return false;
   }
   const PlutoRect full{0, 0, static_cast<int32_t>(width_),
@@ -1308,7 +1315,8 @@ void FrameRenderer::set_auto_maintenance_allowed(bool allowed) {
 bool FrameRenderer::request_ghost_control(GhostControlMode mode) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!valid_ || scheduler_ == nullptr || !retained_content_ready_ ||
-      width_ == 0 || height_ == 0 || presentation_suspended_) {
+      width_ == 0 || height_ == 0 || presentation_suspended_ ||
+      exact_proof_active_) {
     return false;
   }
   if (pixel_reset_phase_ != PixelResetPhase::kIdle) {
@@ -2561,6 +2569,124 @@ void FrameRenderer::notify_present_complete(uint64_t frame_id) {
   }
   wake_.store(true, std::memory_order_release);
   cv_.notify_one();
+  presentation_completion_cv_.notify_all();
+}
+
+void FrameRenderer::note_accepted_flutter_frame_locked() {
+  if (flutter_surface_generation_ != UINT64_MAX) {
+    ++flutter_surface_generation_;
+  }
+  flutter_surface_cv_.notify_all();
+  // A proof worker may be waiting for older user work to become quiescent.
+  presentation_completion_cv_.notify_all();
+}
+
+uint64_t FrameRenderer::flutter_surface_generation() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return flutter_surface_generation_;
+}
+
+bool FrameRenderer::wait_for_flutter_surface_after(
+    uint64_t baseline, std::chrono::milliseconds timeout,
+    uint64_t *surface_generation) {
+  if (surface_generation == nullptr ||
+      timeout <= std::chrono::milliseconds::zero()) {
+    return false;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(mutex_);
+  const auto completed = [this, baseline, surface_generation] {
+    *surface_generation = flutter_surface_generation_;
+    return flutter_surface_generation_ > baseline;
+  };
+  if (completed()) {
+    return true;
+  }
+  while (!stop_) {
+    if (flutter_surface_cv_.wait_until(lock, deadline) ==
+        std::cv_status::timeout) {
+      return completed();
+    }
+    if (completed()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool FrameRenderer::present_retained_surface_full(
+    std::chrono::milliseconds timeout, ExactPresentationReceipt *receipt) {
+  if (receipt == nullptr || timeout <= std::chrono::milliseconds::zero()) {
+    return false;
+  }
+  *receipt = {};
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (!valid_ || stop_ || scheduler_ == nullptr || !retained_content_ready_ ||
+      width_ == 0 || height_ == 0 || !presenter_supports_health_contract_ ||
+      presentation_suspended_ || exact_proof_active_) {
+    return false;
+  }
+
+  exact_proof_active_ = true;
+  exact_proof_dispatch_armed_ = false;
+  exact_proof_present_accepted_ = false;
+  exact_proof_failed_ = false;
+  exact_proof_completed_ = false;
+  exact_proof_frame_id_ = 0;
+  exact_proof_surface_generation_ = 0;
+  const auto finish = [this] {
+    exact_proof_active_ = false;
+    exact_proof_dispatch_armed_ = false;
+    presentation_completion_cv_.notify_all();
+  };
+
+  while (!stop_ && std::chrono::steady_clock::now() < deadline) {
+    const uint64_t now_us = decision_now_us();
+    drain_completions_locked();
+    scheduler_->poll_completions(now_us);
+    if (!valid_ || health_file_failed_ ||
+        scheduler_->real_completion_overdue() || exact_proof_failed_ ||
+        presenter_device_lost_notified_.load(std::memory_order_acquire)) {
+      finish();
+      return false;
+    }
+    if (exact_proof_completed_) {
+      receipt->surface_generation = exact_proof_surface_generation_;
+      receipt->frame_id = exact_proof_frame_id_;
+      const bool valid_receipt = receipt->surface_generation != 0 &&
+                                 receipt->frame_id != 0 &&
+                                 exact_proof_present_accepted_;
+      finish();
+      return valid_receipt;
+    }
+
+    // Drain all older app-owned work while the proof gate suppresses new
+    // settle/Sparkle/automatic maintenance dispatch. Once no user request or
+    // presenter fence remains, queued maintenance can be dropped without
+    // forgiving its ledgers; the dedicated Full below repays the whole panel.
+    scheduler_->tick(now_us, /*maintenance_allowed=*/false,
+                     /*intrusive_maintenance_allowed=*/false);
+    if (!exact_proof_dispatch_armed_ && exact_proof_frame_id_ == 0 &&
+        !scheduler_->anything_inflight() && !scheduler_->user_work_pending() &&
+        scheduler_->discard_pending_maintenance_for_handoff() &&
+        scheduler_->idle()) {
+      const PlutoRect full{0, 0, static_cast<int32_t>(width_),
+                           static_cast<int32_t>(height_)};
+      const PlutoRefreshClass quality = kPlutoRefreshFull;
+      exact_proof_dispatch_armed_ = true;
+      scheduler_->submit_damage(&full, &quality, 1, now_us);
+      scheduler_->tick(now_us, /*maintenance_allowed=*/false,
+                       /*intrusive_maintenance_allowed=*/false);
+    }
+
+    const auto poll_deadline =
+        std::min(deadline, std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(4));
+    presentation_completion_cv_.wait_until(lock, poll_deadline);
+  }
+  finish();
+  return false;
 }
 
 size_t FrameRenderer::queued_present_completions_for_testing() const {
@@ -2788,6 +2914,17 @@ void FrameRenderer::tick_locked(uint64_t now_us) {
     return;
   }
   if (advance_pixel_reset_locked(now_us)) {
+    return;
+  }
+  if (exact_proof_active_) {
+    // The proof worker owns dispatch ordering until its dedicated Full frame
+    // completes. Keep older app work moving, but do not create maintenance
+    // that could race or masquerade as the proof request.
+    if (scheduler_ != nullptr) {
+      scheduler_->tick(now_us, /*maintenance_allowed=*/false,
+                       /*intrusive_maintenance_allowed=*/false);
+    }
+    presentation_completion_cv_.notify_all();
     return;
   }
   const bool automatic_policy_enabled =
@@ -3092,6 +3229,7 @@ bool FrameRenderer::advance_pixel_reset_locked(uint64_t now_us) {
 
 void FrameRenderer::drain_completions_locked() {
   uint64_t frame_id = 0;
+  bool progressed = false;
   while (completion_queue_.pop(&frame_id)) {
     if (scheduler_ != nullptr && scheduler_->notify_completion(frame_id)) {
       // A callback is only health evidence when it names a present that this
@@ -3099,6 +3237,11 @@ void FrameRenderer::drain_completions_locked() {
       // supervisor record.
       if (presenter_completion_count_ != UINT64_MAX) {
         ++presenter_completion_count_;
+        progressed = true;
+      }
+      if (exact_proof_active_ && exact_proof_present_accepted_ &&
+          frame_id == exact_proof_frame_id_) {
+        exact_proof_completed_ = true;
       }
     }
   }
@@ -3109,6 +3252,9 @@ void FrameRenderer::drain_completions_locked() {
                  "pluto: completion queue overflow; dropped %zu "
                  "completions\n",
                  dropped);
+  }
+  if (progressed) {
+    presentation_completion_cv_.notify_all();
   }
 }
 
@@ -3205,6 +3351,8 @@ void FrameRenderer::shutdown() {
     wake_.store(true, std::memory_order_release);
   }
   cv_.notify_all();
+  presentation_completion_cv_.notify_all();
+  flutter_surface_cv_.notify_all();
   if (thread_.joinable()) {
     thread_.join();
   }
@@ -3263,6 +3411,27 @@ bool FrameRenderer::presenter_present(void *user_data,
       self->config_.presenter == nullptr) {
     return true;
   }
+  if (self->exact_proof_dispatch_armed_) {
+    const bool exact_full =
+        request != nullptr && request->refresh_class == kPlutoRefreshFull &&
+        request->flags == kPlutoPresentFlagNone && request->damage_count == 1 &&
+        request->damage != nullptr && request->damage[0].x == 0 &&
+        request->damage[0].y == 0 &&
+        request->damage[0].width == static_cast<int32_t>(self->width_) &&
+        request->damage[0].height == static_cast<int32_t>(self->height_) &&
+        request->frame_id != 0;
+    self->exact_proof_dispatch_armed_ = false;
+    if (!exact_full) {
+      self->exact_proof_failed_ = true;
+      self->presentation_completion_cv_.notify_all();
+      return false;
+    }
+    // Capture before the presenter call. A synchronous completion can now be
+    // enqueued safely and will still name this exact provisional scheduler
+    // frame when it is reconciled after present() returns.
+    self->exact_proof_frame_id_ = request->frame_id;
+    self->exact_proof_surface_generation_ = self->flutter_surface_generation_;
+  }
   // Final edge check at the irreversible presenter boundary. The planner
   // and scheduler already sample the same gate, but touch/pen publication is
   // lock-free and may race that sample. Refusal leaves SETTLE work queued;
@@ -3315,6 +3484,12 @@ bool FrameRenderer::presenter_present(void *user_data,
       self->notify_presenter_device_lost();
     }
     const bool ok = status == kPlutoStatusOk;
+    if (self->exact_proof_active_ && request != nullptr &&
+        request->frame_id == self->exact_proof_frame_id_) {
+      self->exact_proof_present_accepted_ = ok;
+      self->exact_proof_failed_ = !ok;
+      self->presentation_completion_cv_.notify_all();
+    }
     if (ok) {
       self->mark_ready_after_present_locked();
       note_auto_accepted();
@@ -3332,6 +3507,12 @@ bool FrameRenderer::presenter_present(void *user_data,
     self->notify_presenter_device_lost();
   }
   const bool ok = status == kPlutoStatusOk;
+  if (self->exact_proof_active_ && request != nullptr &&
+      request->frame_id == self->exact_proof_frame_id_) {
+    self->exact_proof_present_accepted_ = ok;
+    self->exact_proof_failed_ = !ok;
+    self->presentation_completion_cv_.notify_all();
+  }
   if (ok) {
     self->mark_ready_after_present_locked();
     note_auto_accepted();

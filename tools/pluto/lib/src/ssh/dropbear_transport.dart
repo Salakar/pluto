@@ -18,11 +18,21 @@ Map<String, String> directoryUploadTarEnvironment(
 /// OpenSSH-client transport tuned for Dropbear devices.
 final class DropbearTransport implements DeviceTransport {
   /// Creates a Dropbear transport.
-  const DropbearTransport({
+  DropbearTransport({
     required this.endpoint,
     this.controlPath = '~/.pluto/cm-%r@%h:%p',
     this.preferScp = false,
-  });
+    this.sshExecutable = 'ssh',
+    this.acceptanceStrict = false,
+  }) {
+    if (acceptanceStrict && !File(sshExecutable).isAbsolute) {
+      throw ArgumentError.value(
+        sshExecutable,
+        'sshExecutable',
+        'must be absolute in acceptance-strict mode',
+      );
+    }
+  }
 
   @override
   final DeviceEndpoint endpoint;
@@ -32,6 +42,15 @@ final class DropbearTransport implements DeviceTransport {
 
   /// Whether single-file uploads should try scp before `cat >`.
   final bool preferScp;
+
+  /// OpenSSH client executable.
+  ///
+  /// Normal interactive CLI operation intentionally retains PATH lookup.
+  /// Acceptance mode pins this to an absolute executable.
+  final String sshExecutable;
+
+  /// Whether to isolate SSH from ambient configuration and multiplexing.
+  final bool acceptanceStrict;
 
   @override
   Future<bool> canConnect({
@@ -57,7 +76,7 @@ final class DropbearTransport implements DeviceTransport {
     ];
     try {
       final ProcessResult result = await Process.run(
-        'ssh',
+        sshExecutable,
         args,
       ).timeout(timeout + const Duration(seconds: 1));
       return CommandResult(
@@ -84,7 +103,7 @@ final class DropbearTransport implements DeviceTransport {
     required String remotePath,
     bool executable = false,
   }) async {
-    if (preferScp) {
+    if (preferScp && !acceptanceStrict) {
       final bool uploaded = await _tryScpUpload(
         bytes: bytes,
         remotePath: remotePath,
@@ -114,7 +133,7 @@ final class DropbearTransport implements DeviceTransport {
     }
     try {
       final ProcessResult result = await Process.run(
-        'ssh',
+        sshExecutable,
         <String>[
           ..._baseSshArgs(timeout),
           endpoint.sshTarget,
@@ -164,7 +183,7 @@ final class DropbearTransport implements DeviceTransport {
       '-',
       '.',
     ], environment: directoryUploadTarEnvironment(Platform.environment));
-    final Process ssh = await Process.start('ssh', <String>[
+    final Process ssh = await Process.start(sshExecutable, <String>[
       ..._baseSshArgs(const Duration(seconds: 30)),
       endpoint.sshTarget,
       'mkdir -p ${shellQuote(remotePath)} && '
@@ -190,7 +209,7 @@ final class DropbearTransport implements DeviceTransport {
     RegExp? successPattern,
     Duration timeout = const Duration(seconds: 5),
   }) async {
-    final Process process = await Process.start('ssh', <String>[
+    final Process process = await Process.start(sshExecutable, <String>[
       ..._baseSshArgs(timeout),
       '-o',
       'ExitOnForwardFailure=yes',
@@ -249,6 +268,34 @@ final class DropbearTransport implements DeviceTransport {
   }
 
   List<String> _baseSshArgs(Duration timeout) {
+    if (acceptanceStrict) {
+      return <String>[
+        '-F',
+        '/dev/null',
+        '-p',
+        endpoint.port.toString(),
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'ConnectTimeout=${timeout.inSeconds.clamp(1, 60)}',
+        '-o',
+        'StrictHostKeyChecking=yes',
+        '-o',
+        'ProxyCommand=none',
+        '-o',
+        'CanonicalizeHostname=no',
+        '-o',
+        'ControlMaster=no',
+        '-o',
+        'ControlPath=none',
+        '-o',
+        'ControlPersist=no',
+        if (endpoint.identityFile != null) ...<String>[
+          '-i',
+          endpoint.identityFile!,
+        ],
+      ];
+    }
     return <String>[
       '-p',
       endpoint.port.toString(),
@@ -305,7 +352,7 @@ final class DropbearTransport implements DeviceTransport {
     required bool executable,
   }) async {
     final String parent = remoteDirname(remotePath);
-    final Process process = await Process.start('ssh', <String>[
+    final Process process = await Process.start(sshExecutable, <String>[
       ..._baseSshArgs(const Duration(seconds: 30)),
       endpoint.sshTarget,
       'mkdir -p ${shellQuote(parent)} && cat > ${shellQuote(remotePath)}'

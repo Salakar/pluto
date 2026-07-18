@@ -73,8 +73,14 @@ using DirectInkStrokeHandler = std::function<bool(
 struct DirectInkCanvasResult {
   std::string app_id;
   std::int64_t pid = 0;
+  std::uint64_t process_start_ticks = 0;
   std::size_t action_count = 0;
   bool canvas_ready = false;
+  // The retained Flutter surface generation and exact Full presenter frame
+  // completed after the final canvas-ready semantics generation. Both are
+  // mandatory even when the editor was already mounted and action_count is 0.
+  std::uint64_t surface_generation = 0;
+  std::uint64_t proof_frame_id = 0;
 };
 
 using DirectInkCanvasHandler = std::function<bool(

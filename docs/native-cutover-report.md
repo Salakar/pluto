@@ -34,8 +34,11 @@ The completed source cut has these boundaries:
   switcher, control socket, stock rescue, restore, and uninstall path;
 - release AOT by default on both target slices, with ARMv7 intentionally
   release-only;
-- target-native ARMv7 engine, embedder, control client, and real Codex CLI kept
-  as first-class build inputs;
+- target-native ARMv7 engine, embedder, and control client kept as first-class
+  build inputs;
+- Paper Codex declared `linux-arm64` only; the abandoned custom ARMv7 source
+  recipe, patches, pin, artifacts, materializer, packaging/provisioning hooks,
+  tests, documentation, and caches are removed;
 - no compatibility reader, alias, migration, alternate provisioner, or second
   runtime flow for the device, package, presenter, handoff, or supervisor
   contracts replaced by this cutover.
@@ -149,8 +152,10 @@ failures.
 The benchmark deliberately made no framebuffer mapping, pan ioctl, display
 service stop, or panel write. It exercised the production encoder and scan
 cadence against an exact mock transport while stock Xochitl remained active.
-The first RM2 panel write remains reserved for the frozen same-revision release
-acceptance below.
+A later intermediate release rendered Pluto Home and Ink on the physical RM2;
+that run exposed the retained-power-fault interpretation described in round 5
+and is development evidence only. The corrected implementation still requires
+the frozen same-revision physical rerun below.
 
 Meeting the phase deadline requires a bounded `1.2 GHz` RM2 frequency lease.
 Twenty acquire/release cycles measured `595.5 us` p50 and `7025.5 us` p99 to
@@ -221,6 +226,34 @@ same PID. The fixed attempt count still bounds sysfs work, with at most 127 ms
 of explicit retry delay per sample. Final release standby and render acceptance
 remains part of the same-revision table below.
 
+### RM2 round 5: live power versus retained fault state
+
+A physical multi-app run rendered Pluto Home and Ink, then failed closed during
+a later switch. After stock recovery the SY7636A reported live
+`power_good=OFF` with retained state `UVP at VN rail`; during the failed Pluto
+start, the live rails had reached power-good while the same state remained
+latched. Treating that historical event as a current rail failure made every
+subsequent healthy power-up inadmissible.
+
+The vendor MFD and regulator contracts expose two different facts: power-good
+is live, while the fault-event code persists until a physical PMIC-enable
+reset. Pluto now captures the exact event code after synchronous LCDIF
+powerdown, requires power-good on every powered check, and permits only that
+unchanged baseline as diagnostic telemetry. An unreadable value, unknown vendor
+string, power-good loss, latch creation, latch clearing, or code-to-code change
+fails closed.
+
+The checks enclose the actual drive, not only admission. They run around the
+powered temperature read, on the worker immediately before phase zero, and
+after the final safe-idle pan before phase cells are cleared, logical state is
+committed, or a completion callback is issued. Cold INIT has both an immediate
+pre-drive gate after its three safe fills and a post-drive gate before blank or
+logical state is committed. Focused host coverage now exercises all 16 vendor
+state strings, unreadable attributes, stable historical state, pre-drive loss,
+and faults injected only after real phase activity; 76/76 RM2 native tests
+pass. This is development evidence until the corrected frozen release repeats
+the physical switch and soak.
+
 ### Lifecycle acceptance: reject early external wakes
 
 An intermediate RM1 soak entered deep suspend but woke early on later cycles.
@@ -275,12 +308,12 @@ previous e-ink image does not pass.
 | common supervisor healthy | pending | pending | pending |
 | release/AOT process identity | pending | pending | pending |
 | Pluto Home visible | pending | pending | pending |
-| all standard apps launch and present | pending | pending | pending |
+| all target-supported apps launch and present | pending | pending | pending |
 | switcher visible | pending | pending | pending |
 | another app selected and visible | pending | pending | pending |
 | Ink visible with deterministic pointer stroke | pending | pending | pending |
 | Home return visible | pending | pending | pending |
-| Codex binary/auth/real request | pending | pending | pending |
+| native Paper Codex capability | not applicable | not applicable | pending |
 | screenshot, logs, and health agree with glass | pending | pending | pending |
 | CPU, RSS, latency, thermal, and fault counters | pending | pending | pending |
 | final residue audit | pending | pending | pending |

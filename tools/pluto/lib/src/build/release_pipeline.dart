@@ -482,6 +482,7 @@ final class LiveFlutterToolsBuildAdapter implements FlutterBuildAdapter {
       output: output,
       mode: request.mode,
       pins: pins,
+      targetPlatform: request.targetPlatform,
     );
 
     await _buildAssets(
@@ -893,6 +894,7 @@ final class LiveFlutterToolsBuildAdapter implements FlutterBuildAdapter {
     required String output,
     required PlutoBuildMode mode,
     required PlutoPins pins,
+    required PlutoTargetPlatform targetPlatform,
   }) {
     final File authored = File('$project/pluto.yaml');
     _requireFile(authored.path, 'pluto.yaml');
@@ -915,6 +917,17 @@ final class LiveFlutterToolsBuildAdapter implements FlutterBuildAdapter {
       throw ArtifactVerificationException(
         message: 'pluto.yaml is invalid: ${decoded.errorOrNull!.message}',
         remediation: 'Fix the authored app manifest and rebuild.',
+      );
+    }
+    final AppTargetPlatform manifestTarget = AppTargetPlatform.fromWireName(
+      targetPlatform.cliName,
+    )!;
+    if (!manifest.targets.contains(manifestTarget)) {
+      throw ArtifactVerificationException(
+        message: '${manifest.name} does not support ${targetPlatform.cliName}.',
+        remediation:
+            'Build it for one of the declared targets: '
+            '${manifest.targets.map((AppTargetPlatform target) => target.wireName).join(', ')}.',
       );
     }
     File('$output/manifest.json').writeAsStringSync('${manifest.encode()}\n');

@@ -65,5 +65,5 @@ Profile telemetry is fail-closed:
 Run the host/fixture contract without a device:
 
 ```bash
-bash tools/device/test/acceptance-metrics_test.sh
+/bin/bash -p tools/device/test/acceptance-metrics_test.sh
 ```

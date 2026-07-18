@@ -26,14 +26,6 @@ gcc_version=11.5.0
 gcc_machine=arm-remarkable-linux-gnueabi
 regular_files=1
 ''');
-    File('${pins.path}/codex-armv7.json').writeAsStringSync(
-      jsonEncode(<String, Object?>{
-        'schema': 1,
-        'version': '0.144.1',
-        'target': 'linux-arm',
-        'sha256': 'a' * 64,
-      }),
-    );
     for (final String target in ReleaseSetManifest.requiredTargets) {
       File('${release.path}/targets/$target/bin/pluto-embedder')
         ..createSync(recursive: true)

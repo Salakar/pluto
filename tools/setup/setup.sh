@@ -281,8 +281,8 @@ usage() {
 Usage: tools/setup/setup.sh [--verify]
 
 Without arguments, validate the committed AArch64 release/profile and ARMv7
-release AOT runtimes, validate the authoritative ARM compiler-SDK pin, install
-the pinned Flutter SDK when absent, and bootstrap Dart/Flutter dependencies.
+release AOT runtimes plus the authoritative ARM compiler-SDK pin; install the
+pinned Flutter SDK when absent, then bootstrap Dart/Flutter dependencies.
 
   --verify  Validate existing SDK and committed artifacts without downloads.
 
@@ -337,7 +337,6 @@ main() {
   printf 'Validating authoritative ARM compiler SDK pin: %s\n' "$arm_sdk_pin"
   PLUTO_ARM_SDK_PIN="$arm_sdk_pin" \
     bash "$root/tools/build/verify-arm-sdk.sh" --pin-only
-
   if [[ ! -e "$sdk_dir" ]]; then
     [[ "$verify_only" -eq 0 ]] || fail \
       "pinned Flutter SDK is absent: $sdk_dir (run setup without --verify to install it)"

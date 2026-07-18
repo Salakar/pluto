@@ -164,6 +164,33 @@ public:
   int close_count = 0;
 };
 
+std::size_t active_pan_count(const BackendFakeLcdifSyscalls &syscalls) {
+  return static_cast<std::size_t>(
+      std::count_if(syscalls.panned_offsets.begin(),
+                    syscalls.panned_offsets.end(), [](std::uint32_t offset) {
+                      return offset < kRm2ActiveSlots * kRm2ScanoutHeight;
+                    }));
+}
+
+std::optional<std::uint16_t> snapshot_pixel(LcdifTconDisplayBackend *backend,
+                                            std::uint32_t x, std::uint32_t y) {
+  if (backend == nullptr || x >= kRm2PanelWidth || y >= kRm2PanelHeight) {
+    return std::nullopt;
+  }
+  std::vector<std::uint16_t> pixels(kRm2PanelWidth * kRm2PanelHeight);
+  PlutoSurface snapshot{
+      .pixels = reinterpret_cast<const std::uint8_t *>(pixels.data()),
+      .stride_bytes = kRm2PanelWidth * sizeof(std::uint16_t),
+      .width = static_cast<std::int32_t>(kRm2PanelWidth),
+      .height = static_cast<std::int32_t>(kRm2PanelHeight),
+      .format = kPlutoPixelFormatRgb565,
+  };
+  if (backend->snapshot(&snapshot) != kPlutoStatusOk) {
+    return std::nullopt;
+  }
+  return pixels[static_cast<std::size_t>(y) * kRm2PanelWidth + x];
+}
+
 class ScopedStderrCapture final {
 public:
   ScopedStderrCapture() {
@@ -425,6 +452,13 @@ Rm2HandoffOptions handoff_options(const std::string &path,
   };
 }
 
+Rm2PanelPowerStateReader blanked_baseline_then_power_good_reader() {
+  return [sample = 0](std::string *) mutable {
+    ++sample;
+    return Rm2PanelPowerState{true, sample != 1, {}};
+  };
+}
+
 GlassHandoffClock handoff_clock_100() {
   return {
       .realtime_sec = 100,
@@ -629,7 +663,8 @@ void stage_candidate(const LocalRm2Profile &fixture,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, handoff_options(handoff_path, now));
+      blanked_baseline_then_power_good_reader(),
+      handoff_options(handoff_path, now));
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   draw_fast_pixel(&backend, 17, 29, 0x7befU, 81);
   ASSERT_EQ(backend.stage_handoff(&payload->payload, 3000), kPlutoStatusOk);
@@ -674,7 +709,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -713,7 +748,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -749,7 +784,7 @@ TEST(LcdifTconBackend, ColdInitializationPansRunOnDedicatedPanWorker) {
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
 
   const std::thread::id caller = std::this_thread::get_id();
   ASSERT_TRUE(probe_and_start(&backend, fixture));
@@ -782,7 +817,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
 
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   ASSERT_EQ(policy.read("scaling_min_freq"), "1200000\n");
@@ -818,7 +853,7 @@ TEST(LcdifTconBackend, Rm2FrequencyBurstLeaseRestoresAfterIdleDebounce) {
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
 
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   ASSERT_TRUE(
@@ -847,7 +882,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
 
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
@@ -881,7 +916,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   ASSERT_TRUE(
       wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
@@ -915,7 +950,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -953,7 +988,7 @@ TEST(LcdifTconBackend, Rm2UnavailableCpuTemperatureFailsStartupClosed) {
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -991,7 +1026,7 @@ TEST(LcdifTconBackend, Rm2TransientCpuTemperatureEagainDuringStartupRecovers) {
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -1032,7 +1067,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -1080,7 +1115,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
   const std::string config_options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -1121,7 +1156,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   ASSERT_TRUE(
       wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
@@ -1183,7 +1218,7 @@ TEST(LcdifTconBackend, Rm2CpuThermalHoldBackpressuresAdmissionAndRecovers) {
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   ASSERT_TRUE(
       wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
@@ -1255,7 +1290,7 @@ TEST(LcdifTconBackend, Rm2FrequencyBurstRejectsPanelTemperatureAt45C) {
       [&](std::string *) -> std::optional<int> {
         return ++temperature_reads == 1 ? 24000 : 45000;
       },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   ASSERT_TRUE(
       wait_for_cpu_policy(policy, "792000\n", false, std::chrono::seconds(1)));
@@ -1302,6 +1337,7 @@ TEST(LcdifTconBackend, PreflightsThenInitScansAndCompletesOnlyOnFinalIdlePage) {
   BackendFakeLcdifSyscalls fake;
   int power_checks = 0;
   int temperature_reads = 0;
+  int power_checks_at_last_temperature = 0;
   bool power_checks_follow_safe_hold = true;
   bool temperature_reads_follow_power_check = true;
   auto device = std::make_unique<MxsLcdifDevice>(&fake);
@@ -1310,22 +1346,26 @@ TEST(LcdifTconBackend, PreflightsThenInitScansAndCompletesOnlyOnFinalIdlePage) {
       [&](std::string *) -> std::optional<int> {
         ++temperature_reads;
         temperature_reads_follow_power_check &=
-            power_checks == temperature_reads * 2 - 1 &&
+            power_checks > power_checks_at_last_temperature &&
             !fake.blank_values.empty() &&
             fake.blank_values.back() == uapi::kBlankUnblank &&
             !fake.panned_offsets.empty() &&
             fake.panned_offsets.back() == kRm2IdleSlot * kRm2ScanoutHeight;
+        power_checks_at_last_temperature = power_checks;
         return 24000;
       },
       [&](std::string *) {
         ++power_checks;
+        if (power_checks == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
         const bool follows_safe_hold =
             !fake.blank_values.empty() &&
             fake.blank_values.back() == uapi::kBlankUnblank &&
             !fake.panned_offsets.empty() &&
             fake.panned_offsets.back() == kRm2IdleSlot * kRm2ScanoutHeight;
         power_checks_follow_safe_hold &= follows_safe_hold;
-        return follows_safe_hold;
+        return Rm2PanelPowerState{follows_safe_hold};
       });
   ASSERT_EQ(backend.probe(profile), kPlutoStatusOk);
   EXPECT_TRUE(fake.blank_values.empty());
@@ -1346,7 +1386,7 @@ TEST(LcdifTconBackend, PreflightsThenInitScansAndCompletesOnlyOnFinalIdlePage) {
   EXPECT_EQ(fake.blank_values[fake.blank_values.size() - 2U],
             uapi::kBlankUnblank);
   EXPECT_EQ(fake.blank_values.back(), uapi::kBlankPowerdown);
-  EXPECT_EQ(power_checks, 2);
+  EXPECT_EQ(power_checks, 5);
   EXPECT_EQ(temperature_reads, 1);
   EXPECT_TRUE(power_checks_follow_safe_hold);
   EXPECT_TRUE(temperature_reads_follow_power_check);
@@ -1391,7 +1431,7 @@ TEST(LcdifTconBackend, PreflightsThenInitScansAndCompletesOnlyOnFinalIdlePage) {
   EXPECT_EQ(completion.frame_id.load(std::memory_order_relaxed), 73U);
   EXPECT_TRUE(backend.ready(kPlutoRefreshFast));
   EXPECT_EQ(backend.health().completed_jobs, 2U);
-  EXPECT_EQ(power_checks, 4);
+  EXPECT_EQ(power_checks, 9);
   EXPECT_EQ(temperature_reads, 2);
   EXPECT_TRUE(power_checks_follow_safe_hold);
   EXPECT_TRUE(temperature_reads_follow_power_check);
@@ -1482,11 +1522,14 @@ TEST(LcdifTconBackend,
         },
         [&](std::string *) {
           ++power_checks;
-          return power_checks == 1;
+          if (power_checks == 1) {
+            return Rm2PanelPowerState{true, false, {}};
+          }
+          return Rm2PanelPowerState{power_checks == 2};
         });
     ASSERT_EQ(backend.probe(profile), kPlutoStatusOk);
     EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
-    EXPECT_EQ(power_checks, 2);
+    EXPECT_EQ(power_checks, 3);
     EXPECT_EQ(temperature_reads, 1);
     ASSERT_TRUE(!fake.blank_values.empty());
     EXPECT_EQ(fake.blank_values.back(), uapi::kBlankPowerdown);
@@ -1508,11 +1551,11 @@ TEST(LcdifTconBackend,
         },
         [&](std::string *) {
           ++power_checks;
-          return true;
+          return Rm2PanelPowerState{true, power_checks != 1, {}};
         });
     ASSERT_EQ(backend.probe(profile), kPlutoStatusOk);
     EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
-    EXPECT_EQ(power_checks, 1);
+    EXPECT_EQ(power_checks, 2);
     EXPECT_EQ(temperature_reads, 1);
     ASSERT_TRUE(!fake.blank_values.empty());
     EXPECT_EQ(fake.blank_values.back(), uapi::kBlankPowerdown);
@@ -1522,6 +1565,715 @@ TEST(LcdifTconBackend,
   }
 
   fs::remove(local_path, filesystem_error);
+}
+
+TEST(LcdifTconBackend,
+     StablePreexistingPanelFaultLatchIsDiagnosticWhilePowerGood) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  CompletionState completion;
+  int power_samples = 0;
+  bool baseline_followed_powerdown = false;
+  bool baseline_preceded_any_pan = true;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        if (power_samples == 1) {
+          baseline_followed_powerdown =
+              syscalls.blank_values.size() == 1U &&
+              syscalls.blank_values.back() == uapi::kBlankPowerdown;
+          baseline_preceded_any_pan = !syscalls.panned_offsets.empty();
+        }
+        return Rm2PanelPowerState{true, power_samples != 1, "UVP at VNEG rail"};
+      },
+      Rm2HandoffOptions{.path = ""});
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_TRUE(probe_and_start(&backend, fixture, &completion));
+  draw_fast_pixel(&backend, 3, 5, 0, 201);
+  draw_fast_pixel(&backend, 4, 6, 0x7befU, 202);
+  draw_fast_pixel(&backend, 5, 7, 0, 203);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 3);
+  EXPECT_EQ(backend.health().completed_jobs, 3U);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  EXPECT_EQ(power_samples, 17);
+  EXPECT_TRUE(baseline_followed_powerdown);
+  EXPECT_FALSE(baseline_preceded_any_pan);
+  backend.stop();
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(diagnostics.find(
+                  "panel fault baseline power_good=OFF state=\"UVP at VNEG "
+                  "rail\"") != std::string::npos);
+  EXPECT_TRUE(
+      diagnostics.find("panel fault event remains latched "
+                       "stage=start.cold-initialize.powered-temperature-power-"
+                       "precheck power_good=ON state=\"UVP at VNEG rail\"") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find("latched_fault_observations=16") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("RM2 present failure") == std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     BlankedPanelPowerGoodContradictionFailsBaselineWithExactStage) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  int power_samples = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        return Rm2PanelPowerState{true, true, {}};
+      },
+      Rm2HandoffOptions{.path = ""});
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_EQ(power_samples, 1);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(diagnostics.find("stage=start.panel-fault-baseline status=4") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find(
+                  "reason=\"SY7636A panel power-good='ON' while framebuffer "
+                  "is powered down\"") != std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     UnreadablePanelFaultBaselineFailsExactStageBeforeAnyPan) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  int power_samples = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *error) {
+        ++power_samples;
+        if (error != nullptr) {
+          *error = "synthetic unreadable panel-fault baseline";
+        }
+        return Rm2PanelPowerState{};
+      },
+      Rm2HandoffOptions{.path = ""});
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_EQ(power_samples, 1);
+  EXPECT_TRUE(syscalls.panned_offsets.empty());
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(diagnostics.find("stage=start.panel-fault-baseline status=4") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find(
+                  "reason=\"synthetic unreadable panel-fault baseline\"") !=
+              std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     UnreadablePoweredPanelStateReportsExactPreAndPostStages) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  {
+    BackendFakeLcdifSyscalls syscalls;
+    int power_samples = 0;
+    auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+    LcdifTconDisplayBackend backend(
+        fixture.profile(), std::move(device),
+        [](std::string *) -> std::optional<int> { return 24000; },
+        [&](std::string *error) {
+          ++power_samples;
+          if (power_samples == 1) {
+            return Rm2PanelPowerState{true, false, {}};
+          }
+          if (error != nullptr) {
+            *error = "synthetic powered precheck unavailable";
+          }
+          return Rm2PanelPowerState{};
+        },
+        Rm2HandoffOptions{.path = ""});
+    ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+    ScopedStderrCapture capture;
+    ASSERT_TRUE(capture.valid());
+    EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+    EXPECT_EQ(power_samples, 2);
+    EXPECT_EQ(backend.health().hardware_faults, 1U);
+    const std::string diagnostics = capture.finish();
+    EXPECT_TRUE(
+        diagnostics.find(
+            "stage=start.cold-initialize.powered-temperature-power-precheck "
+            "status=4") != std::string::npos);
+    EXPECT_TRUE(
+        diagnostics.find("reason=\"synthetic powered precheck unavailable\"") !=
+        std::string::npos);
+  }
+
+  {
+    BackendFakeLcdifSyscalls syscalls;
+    int power_samples = 0;
+    auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+    LcdifTconDisplayBackend backend(
+        fixture.profile(), std::move(device),
+        [](std::string *) -> std::optional<int> { return 24000; },
+        [&](std::string *error) {
+          ++power_samples;
+          if (power_samples == 1) {
+            return Rm2PanelPowerState{true, false, {}};
+          }
+          if (power_samples == 2) {
+            return Rm2PanelPowerState{true, true, {}};
+          }
+          if (error != nullptr) {
+            *error = "synthetic powered postcheck unavailable";
+          }
+          return Rm2PanelPowerState{};
+        },
+        Rm2HandoffOptions{.path = ""});
+    ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+    ScopedStderrCapture capture;
+    ASSERT_TRUE(capture.valid());
+    EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+    EXPECT_EQ(power_samples, 3);
+    EXPECT_EQ(backend.health().hardware_faults, 1U);
+    const std::string diagnostics = capture.finish();
+    EXPECT_TRUE(
+        diagnostics.find(
+            "stage=start.cold-initialize.powered-temperature-power-postcheck "
+            "status=4") != std::string::npos);
+    EXPECT_TRUE(diagnostics.find(
+                    "reason=\"synthetic powered postcheck unavailable\"") !=
+                std::string::npos);
+  }
+}
+
+TEST(LcdifTconBackend,
+     NewPanelFaultTransitionOnThirdJobFailsClosedWithExactStage) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  CompletionState completion;
+  int power_samples = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        return Rm2PanelPowerState{true, true,
+                                  power_samples >= 14 ? "SCP at V COM rail"
+                                                      : std::string{}};
+      },
+      Rm2HandoffOptions{.path = ""});
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_TRUE(probe_and_start(&backend, fixture, &completion));
+  draw_fast_pixel(&backend, 3, 5, 0, 211);
+  draw_fast_pixel(&backend, 4, 6, 0x7befU, 212);
+  OwnedPixelRequest third(5, 7, 0, 213);
+  EXPECT_EQ(backend.submit(&third.request), kPlutoStatusDeviceLost);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(backend.health().completed_jobs, 2U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  EXPECT_EQ(power_samples, 14);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  backend.stop();
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find(
+          "RM2 present failure "
+          "stage=present.powered-temperature-power-precheck status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find(
+                  "reason=\"SY7636A fault-event transition during presenter "
+                  "ownership "
+                  "baseline='no fault event' observed='SCP at V COM rail'\"") !=
+              std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     PreexistingPanelFaultLatchClearingFailsClosedWithExactStage) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  int power_samples = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, "UVP at VNEG rail"};
+        }
+        return Rm2PanelPowerState{true, true, {}};
+      },
+      Rm2HandoffOptions{.path = ""});
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_EQ(power_samples, 2);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find("stage=start.cold-initialize.powered-temperature-power-"
+                       "precheck status=4") != std::string::npos);
+  EXPECT_TRUE(
+      diagnostics.find(
+          "reason=\"SY7636A fault-event transition during presenter ownership "
+          "baseline='UVP at VNEG rail' observed='no fault event'\"") !=
+      std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     LivePowerGoodLossOnThirdJobPostcheckFailsClosedWithExactStage) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  CompletionState completion;
+  int power_samples = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *error) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        if (power_samples == 15) {
+          if (error != nullptr) {
+            *error = "SY7636A panel power-good='OFF' state='no fault event'";
+          }
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        return Rm2PanelPowerState{true};
+      },
+      Rm2HandoffOptions{.path = ""});
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_TRUE(probe_and_start(&backend, fixture, &completion));
+  draw_fast_pixel(&backend, 3, 5, 0, 221);
+  draw_fast_pixel(&backend, 4, 6, 0x7befU, 222);
+  OwnedPixelRequest third(5, 7, 0, 223);
+  EXPECT_EQ(backend.submit(&third.request), kPlutoStatusDeviceLost);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 2);
+  EXPECT_EQ(backend.health().completed_jobs, 2U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  EXPECT_EQ(power_samples, 15);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  backend.stop();
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find(
+          "RM2 present failure "
+          "stage=present.powered-temperature-power-postcheck status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find("reason=\"SY7636A panel power-good='OFF' "
+                               "state='no fault event'\"") !=
+              std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     ColdInitPreDriveStateFailureStopsAfterSlotPreparationWithoutActivePan) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  constexpr std::size_t kDriveCellOffset =
+      3U * kRm2ScanoutStrideBytes + 26U * sizeof(std::uint32_t);
+  syscalls.phase_cell_offsets = {
+      kDriveCellOffset,
+      kDriveCellOffset,
+      kDriveCellOffset,
+  };
+  CompletionState completion;
+  int power_samples = 0;
+  bool armed_at_pre_drive_sample = false;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *error) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        const bool slots_prepared =
+            syscalls.sample_phase_cells(0)[0] == 0U &&
+            syscalls.sample_phase_cells(1)[0] == 0x5555U &&
+            syscalls.sample_phase_cells(2)[0] == 0xaaaaU;
+        if (slots_prepared && active_pan_count(syscalls) == 0U) {
+          armed_at_pre_drive_sample = true;
+          if (error != nullptr) {
+            *error = "synthetic cold INIT pre-drive state unavailable";
+          }
+          return Rm2PanelPowerState{};
+        }
+        return Rm2PanelPowerState{true, true, {}};
+      },
+      Rm2HandoffOptions{.path = ""});
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+      .on_complete = record_completion,
+      .user_data = &completion,
+  };
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(armed_at_pre_drive_sample);
+  EXPECT_EQ(power_samples, 4);
+  EXPECT_EQ(active_pan_count(syscalls), 0U);
+  EXPECT_EQ(syscalls.sample_phase_cells(0)[0], 0U);
+  EXPECT_EQ(syscalls.sample_phase_cells(1)[0], 0x5555U);
+  EXPECT_EQ(syscalls.sample_phase_cells(2)[0], 0xaaaaU);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 0);
+  EXPECT_FALSE(snapshot_pixel(&backend, 0, 0).has_value());
+  EXPECT_EQ(backend.health().completed_jobs, 0U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find(
+          "stage=start.cold-initialize.pre-drive-power-state status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(
+      diagnostics.find(
+          "reason=\"synthetic cold INIT pre-drive state unavailable\"") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find("stage=start.cold-initialize.init-clear") ==
+              std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     ColdInitPostDriveTransitionFailsBeforeStateCommitAndLogsBlankFailure) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  int power_samples = 0;
+  bool injected_after_drive = false;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        const bool final_idle_after_drive =
+            active_pan_count(syscalls) != 0 &&
+            !syscalls.panned_offsets.empty() &&
+            syscalls.panned_offsets.back() == kRm2IdleSlot * kRm2ScanoutHeight;
+        if (final_idle_after_drive) {
+          injected_after_drive = true;
+          syscalls.fail_blank_on_call = syscalls.blank_count + 1;
+          return Rm2PanelPowerState{true, true, "SCP at VPOS rail"};
+        }
+        return Rm2PanelPowerState{true, true, {}};
+      },
+      Rm2HandoffOptions{.path = ""});
+  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
+  const std::string config_options = "wbf=" + fixture.waveform_path();
+  const PlutoPresenterConfig config{
+      .struct_size = sizeof(PlutoPresenterConfig),
+      .backend_name = "native",
+      .options = config_options.c_str(),
+  };
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(injected_after_drive);
+  EXPECT_EQ(power_samples, 5);
+  EXPECT_GT(active_pan_count(syscalls), 0U);
+  ASSERT_TRUE(!syscalls.panned_offsets.empty());
+  EXPECT_EQ(syscalls.panned_offsets.back(), kRm2IdleSlot * kRm2ScanoutHeight);
+  EXPECT_FALSE(snapshot_pixel(&backend, 0, 0).has_value());
+  EXPECT_EQ(backend.health().completed_jobs, 0U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find(
+          "stage=start.cold-initialize.post-drive-power-state status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(
+      diagnostics.find(
+          "reason=\"SY7636A fault-event transition during presenter ownership "
+          "baseline='no fault event' observed='SCP at VPOS rail'\"") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find(
+                  "fail-safe blank failure "
+                  "source_stage=start.cold-initialize.post-drive-power-state "
+                  "status=4") != std::string::npos);
+}
+
+TEST(LcdifTconBackend, WorkerPreDriveUnavailableStateFailsBeforePhaseOrCommit) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  CompletionState completion;
+  int power_samples = 0;
+  std::atomic<bool> armed{false};
+  std::atomic<int> armed_samples{0};
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *error) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        if (armed.load(std::memory_order_acquire) &&
+            armed_samples.fetch_add(1, std::memory_order_acq_rel) == 2) {
+          if (error != nullptr) {
+            *error = "synthetic worker pre-drive state unavailable";
+          }
+          return Rm2PanelPowerState{};
+        }
+        return Rm2PanelPowerState{true, true, {}};
+      },
+      Rm2HandoffOptions{.path = ""});
+
+  ASSERT_TRUE(probe_and_start(&backend, fixture, &completion));
+  const std::size_t active_pans_before = active_pan_count(syscalls);
+  armed.store(true, std::memory_order_release);
+  OwnedPixelRequest request(9, 11, 0, 301);
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_EQ(backend.submit(&request.request), kPlutoStatusOk);
+  EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusDeviceLost);
+  EXPECT_EQ(active_pan_count(syscalls), active_pans_before);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(backend.health().completed_jobs, 0U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  const std::optional<std::uint16_t> pixel = snapshot_pixel(&backend, 9, 11);
+  ASSERT_TRUE(pixel.has_value());
+  EXPECT_EQ(*pixel, 0xffffU);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find("stage=present.pre-drive-power-state status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find(
+                  "reason=\"synthetic worker pre-drive state unavailable\"") !=
+              std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     WorkerPostDriveFaultTransitionRunsPhasesButDoesNotCommitOrComplete) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  CompletionState completion;
+  int power_samples = 0;
+  std::atomic<bool> armed{false};
+  std::size_t active_pans_before = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        const bool final_idle_after_new_drive =
+            armed.load(std::memory_order_acquire) &&
+            active_pan_count(syscalls) > active_pans_before &&
+            !syscalls.panned_offsets.empty() &&
+            syscalls.panned_offsets.back() == kRm2IdleSlot * kRm2ScanoutHeight;
+        return Rm2PanelPowerState{
+            true, true,
+            final_idle_after_new_drive ? "SCP at V COM rail" : std::string{}};
+      },
+      Rm2HandoffOptions{.path = ""});
+
+  ASSERT_TRUE(probe_and_start(&backend, fixture, &completion));
+  active_pans_before = active_pan_count(syscalls);
+  armed.store(true, std::memory_order_release);
+  OwnedPixelRequest request(13, 17, 0, 302);
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_EQ(backend.submit(&request.request), kPlutoStatusOk);
+  EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusDeviceLost);
+  EXPECT_GT(active_pan_count(syscalls), active_pans_before);
+  ASSERT_TRUE(!syscalls.panned_offsets.empty());
+  EXPECT_EQ(syscalls.panned_offsets.back(), kRm2IdleSlot * kRm2ScanoutHeight);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(backend.health().completed_jobs, 0U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  const std::optional<std::uint16_t> pixel = snapshot_pixel(&backend, 13, 17);
+  ASSERT_TRUE(pixel.has_value());
+  EXPECT_EQ(*pixel, 0xffffU);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find("stage=present.post-drive-power-state status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(
+      diagnostics.find(
+          "reason=\"SY7636A fault-event transition during presenter ownership "
+          "baseline='no fault event' observed='SCP at V COM rail'\"") !=
+      std::string::npos);
+}
+
+TEST(LcdifTconBackend,
+     WorkerPostDrivePowerGoodLossRunsPhasesButDoesNotCommitOrComplete) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  BackendFakeLcdifSyscalls syscalls;
+  CompletionState completion;
+  int power_samples = 0;
+  std::atomic<bool> armed{false};
+  std::size_t active_pans_before = 0;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      [&](std::string *error) {
+        ++power_samples;
+        if (power_samples == 1) {
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        const bool final_idle_after_new_drive =
+            armed.load(std::memory_order_acquire) &&
+            active_pan_count(syscalls) > active_pans_before &&
+            !syscalls.panned_offsets.empty() &&
+            syscalls.panned_offsets.back() == kRm2IdleSlot * kRm2ScanoutHeight;
+        if (final_idle_after_new_drive) {
+          if (error != nullptr) {
+            *error = "SY7636A panel power-good='OFF' state='no fault event'";
+          }
+          return Rm2PanelPowerState{true, false, {}};
+        }
+        return Rm2PanelPowerState{true, true, {}};
+      },
+      Rm2HandoffOptions{.path = ""});
+
+  ASSERT_TRUE(probe_and_start(&backend, fixture, &completion));
+  active_pans_before = active_pan_count(syscalls);
+  armed.store(true, std::memory_order_release);
+  OwnedPixelRequest request(19, 23, 0, 303);
+
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_EQ(backend.submit(&request.request), kPlutoStatusOk);
+  EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusDeviceLost);
+  EXPECT_GT(active_pan_count(syscalls), active_pans_before);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 0);
+  EXPECT_EQ(backend.health().completed_jobs, 0U);
+  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  const std::optional<std::uint16_t> pixel = snapshot_pixel(&backend, 19, 23);
+  ASSERT_TRUE(pixel.has_value());
+  EXPECT_EQ(*pixel, 0xffffU);
+  ASSERT_TRUE(!syscalls.blank_values.empty());
+  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  const std::string diagnostics = capture.finish();
+
+  EXPECT_TRUE(
+      diagnostics.find("stage=present.post-drive-power-state status=4") !=
+      std::string::npos);
+  EXPECT_TRUE(diagnostics.find("reason=\"SY7636A panel power-good='OFF' "
+                               "state='no fault event'\"") !=
+              std::string::npos);
 }
 
 TEST(LcdifTconBackend,
@@ -1547,7 +2299,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; });
+      blanked_baseline_then_power_good_reader());
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   syscalls.panned_phase_cells.clear();
   syscalls.latched_slot_mutations = 0;
@@ -1640,7 +2392,7 @@ TEST(LcdifTconBackend,
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, std::move(options));
+      blanked_baseline_then_power_good_reader(), std::move(options));
   ASSERT_TRUE(probe_and_start(&backend, fixture));
   syscalls.panned_phase_cells.clear();
   syscalls.latched_slot_mutations = 0;
@@ -1688,7 +2440,7 @@ TEST(LcdifTconBackend, PhysicalPanOverrunStillFailsClosed) {
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, {});
+      blanked_baseline_then_power_good_reader(), {});
   ASSERT_TRUE(probe_and_start(&backend, fixture));
 
   // Delivery jitter after CUR_FRAME_DONE is harmless, but a physical latch
@@ -1723,7 +2475,7 @@ TEST(LcdifTconBackend,
     LcdifTconDisplayBackend outgoing(
         fixture.profile(), std::move(device),
         [](std::string *) -> std::optional<int> { return 24000; },
-        [](std::string *) { return true; },
+        blanked_baseline_then_power_good_reader(),
         handoff_options(handoff_path.get()));
     ASSERT_TRUE(probe_and_start(&outgoing, fixture));
     draw_fast_pixel(&outgoing, kX, kY, kLogicalPixel, 101);
@@ -1787,13 +2539,13 @@ TEST(LcdifTconBackend,
       },
       [&](std::string *) {
         ++incoming_power_checks;
-        return true;
+        return Rm2PanelPowerState{true, incoming_power_checks != 1, {}};
       },
       handoff_options(handoff_path.get()));
   ASSERT_TRUE(probe_and_start(&incoming, fixture));
   EXPECT_FALSE(incoming.ready(kPlutoRefreshFast));
   EXPECT_EQ(incoming_temperature_reads, 0);
-  EXPECT_EQ(incoming_power_checks, 0);
+  EXPECT_EQ(incoming_power_checks, 1);
   EXPECT_TRUE(incoming_syscalls.panned_offsets.empty());
   ASSERT_EQ(incoming_syscalls.blank_values.size(), 1u);
   EXPECT_EQ(incoming_syscalls.blank_values.front(), uapi::kBlankPowerdown);
@@ -1807,7 +2559,7 @@ TEST(LcdifTconBackend,
   EXPECT_TRUE(incoming.ready(kPlutoRefreshFast));
   EXPECT_TRUE(incoming_syscalls.panned_offsets.empty());
   EXPECT_EQ(incoming_temperature_reads, 0);
-  EXPECT_EQ(incoming_power_checks, 0);
+  EXPECT_EQ(incoming_power_checks, 1);
   ASSERT_EQ(incoming_syscalls.blank_values.size(), 1u);
   EXPECT_EQ(incoming_syscalls.blank_values.front(), uapi::kBlankPowerdown);
 
@@ -1866,7 +2618,7 @@ TEST(LcdifTconBackend, RendererRejectionDiscardsCandidateAndRunsInit) {
       },
       [&](std::string *) {
         ++power_checks;
-        return true;
+        return Rm2PanelPowerState{true, power_checks != 1, {}};
       },
       handoff_options(path.get()));
   ASSERT_TRUE(probe_and_start(&incoming, fixture));
@@ -1875,7 +2627,7 @@ TEST(LcdifTconBackend, RendererRejectionDiscardsCandidateAndRunsInit) {
   ASSERT_EQ(incoming.confirm_handoff(false), kPlutoStatusOk);
   EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
   EXPECT_EQ(temperature_reads, 1);
-  EXPECT_EQ(power_checks, 2);
+  EXPECT_EQ(power_checks, 5);
   EXPECT_TRUE(!incoming_syscalls.panned_offsets.empty());
   ASSERT_TRUE(incoming_syscalls.blank_values.size() >= 3U);
   EXPECT_EQ(incoming_syscalls.blank_values.front(), uapi::kBlankPowerdown);
@@ -1905,7 +2657,7 @@ TEST(LcdifTconBackend, CorruptCandidateFallsBackColdAndCannotBeRead) {
         ++temperature_reads;
         return 24000;
       },
-      [](std::string *) { return true; }, handoff_options(path.get()));
+      blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
   ASSERT_TRUE(probe_and_start(&incoming, fixture));
   EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
   EXPECT_EQ(temperature_reads, 1);
@@ -1939,7 +2691,7 @@ TEST(LcdifTconBackend, ExpiredCandidateFallsBackCold) {
         ++temperature_reads;
         return 24000;
       },
-      [](std::string *) { return true; },
+      blanked_baseline_then_power_good_reader(),
       handoff_options(path.get(), handoff_clock_161));
   ASSERT_TRUE(probe_and_start(&incoming, fixture));
   EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
@@ -1967,7 +2719,7 @@ TEST(LcdifTconBackend, ExactPipelineIdentityMismatchFallsBackCold) {
         ++temperature_reads;
         return 24000;
       },
-      [](std::string *) { return true; }, handoff_options(path.get()));
+      blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
   ASSERT_EQ(incoming.probe(drifted_profile), kPlutoStatusOk);
   const std::string options = "wbf=" + fixture.waveform_path();
   const PlutoPresenterConfig config{
@@ -2000,7 +2752,7 @@ TEST(LcdifTconBackend, FirstSparkleClaimsBundleAndPreventsReplay) {
           ++consumer_temperature_reads;
           return 24000;
         },
-        [](std::string *) { return true; }, handoff_options(path.get()));
+        blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
     ASSERT_TRUE(probe_and_start(&consumer, fixture));
     ASSERT_EQ(consumer.confirm_handoff(true), kPlutoStatusOk);
     OwnedPixelRequest sparkle(0, 0, 0xffffU, 111);
@@ -2023,7 +2775,7 @@ TEST(LcdifTconBackend, FirstSparkleClaimsBundleAndPreventsReplay) {
         ++replay_temperature_reads;
         return 24000;
       },
-      [](std::string *) { return true; }, handoff_options(path.get()));
+      blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
   ASSERT_TRUE(probe_and_start(&replay, fixture));
   EXPECT_TRUE(replay.ready(kPlutoRefreshUi));
   EXPECT_EQ(replay_temperature_reads, 1);
@@ -2050,7 +2802,7 @@ TEST(LcdifTconBackend, LiveIdlePageTamperFailsClosedBeforeInitSkip) {
         ++temperature_reads;
         return 24000;
       },
-      [](std::string *) { return true; }, handoff_options(path.get()));
+      blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
   ASSERT_TRUE(probe_and_start(&incoming, fixture));
   const std::size_t idle_cell = kRm2IdleSlot * kRm2SlotBytes +
                                 4u * kRm2ScanoutStrideBytes +
@@ -2082,7 +2834,7 @@ TEST(LcdifTconBackend, LiveIdleOffsetDriftFailsClosedBeforeInitSkip) {
         ++temperature_reads;
         return 24000;
       },
-      [](std::string *) { return true; }, handoff_options(path.get()));
+      blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
   ASSERT_TRUE(probe_and_start(&incoming, fixture));
   EXPECT_TRUE(incoming_syscalls.panned_offsets.empty());
   incoming_syscalls.variable.yoffset = 0;
@@ -2112,7 +2864,7 @@ TEST(LcdifTconBackend, LostFirstAdmissionClaimFailsBeforeAnyDrive) {
         ++temperature_reads;
         return 24000;
       },
-      [](std::string *) { return true; }, handoff_options(path.get()));
+      blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
   ASSERT_TRUE(probe_and_start(&incoming, fixture));
   ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
   ASSERT_EQ(std::remove(path.get().c_str()), 0);
@@ -2135,13 +2887,13 @@ TEST(LcdifTconBackend, LeaseExcludesCompetingBackendBeforeFramebufferOpen) {
   auto second = std::make_unique<LcdifTconDisplayBackend>(
       fixture.profile(), std::make_unique<MxsLcdifDevice>(&second_syscalls),
       [](std::string *) -> std::optional<int> { return 24000; },
-      [](std::string *) { return true; }, handoff_options(path.get()));
+      blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
   {
     BackendFakeLcdifSyscalls first_syscalls;
     LcdifTconDisplayBackend first(
         fixture.profile(), std::make_unique<MxsLcdifDevice>(&first_syscalls),
         [](std::string *) -> std::optional<int> { return 24000; },
-        [](std::string *) { return true; }, handoff_options(path.get()));
+        blanked_baseline_then_power_good_reader(), handoff_options(path.get()));
     ASSERT_EQ(first.probe(fixture.profile()), kPlutoStatusOk);
     EXPECT_EQ(second->probe(fixture.profile()), kPlutoStatusAgain);
     EXPECT_EQ(second_syscalls.open_count, 0);

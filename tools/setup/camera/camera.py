@@ -71,6 +71,8 @@ CODEX_DISABLED_FEATURES = (
 )
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = REPO_ROOT / ".pluto-devices.json"
+FFMPEG_BIN = os.environ.get("PLUTO_CAMERA_FFMPEG_BIN", "ffmpeg")
+FFPROBE_BIN = os.environ.get("PLUTO_CAMERA_FFPROBE_BIN", "ffprobe")
 
 
 class CameraError(RuntimeError):
@@ -294,7 +296,7 @@ def enumerate_cameras(*, include_virtual: bool, timeout: float) -> list[dict[str
     if sys.platform == "darwin":
         result = run_process(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-hide_banner",
                 "-f",
                 "avfoundation",
@@ -420,7 +422,7 @@ def camera_input_args(
     framerate: int,
     pixel_format: str | None,
 ) -> list[str]:
-    command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"]
+    command = [FFMPEG_BIN, "-nostdin", "-hide_banner", "-loglevel", "error"]
     backend = camera.get("backend")
     if backend == "avfoundation":
         command.extend(["-f", "avfoundation"])
@@ -563,7 +565,7 @@ def identify_command(
 def probe_dimensions(path: Path, *, timeout: float) -> tuple[int, int]:
     result = run_process(
         [
-            "ffprobe",
+            FFPROBE_BIN,
             "-v",
             "error",
             "-select_streams",
@@ -1602,7 +1604,7 @@ def render_crop(
 ) -> None:
     result = run_process(
         [
-            "ffmpeg",
+            FFMPEG_BIN,
             "-nostdin",
             "-hide_banner",
             "-loglevel",
@@ -1647,7 +1649,7 @@ def render_identify_preview(
     """Render the same red-device/green-capture overlay used by ``identify``."""
     result = run_process(
         [
-            "ffmpeg",
+            FFMPEG_BIN,
             "-nostdin",
             "-hide_banner",
             "-loglevel",
@@ -1689,7 +1691,7 @@ def decode_grayscale_preview(
     try:
         result = subprocess.run(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-nostdin",
                 "-hide_banner",
                 "-loglevel",
@@ -1779,7 +1781,7 @@ def decode_rgb_preview(
     try:
         result = subprocess.run(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-nostdin",
                 "-hide_banner",
                 "-loglevel",
@@ -3678,7 +3680,7 @@ def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
 
 
 def configure(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg", "ffprobe", "codex"))
+    require_commands((FFMPEG_BIN, FFPROBE_BIN, "codex"))
     config_path = config_path_from_args(args)
     requested_device_profiles = list(args.device_profile)
     if not requested_device_profiles and config_path.is_file():
@@ -4614,7 +4616,7 @@ def config_camera_capture_values(config: dict[str, Any]) -> tuple[dict[str, Any]
 
 
 def capture_image(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg",))
+    require_commands((FFMPEG_BIN,))
     config_path = config_path_from_args(args)
     output = absolute_path(args.output)
     config = load_config(config_path)
@@ -4639,7 +4641,7 @@ def capture_image(args: argparse.Namespace) -> None:
 
 
 def capture_video(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg",))
+    require_commands((FFMPEG_BIN,))
     config_path = config_path_from_args(args)
     output = absolute_path(args.output)
     config = load_config(config_path)
@@ -4762,7 +4764,7 @@ def identify_filter(config: dict[str, Any]) -> str:
 
 
 def identify(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg",))
+    require_commands((FFMPEG_BIN,))
     config_path = config_path_from_args(args)
     output = absolute_path(args.output)
     config = load_config(config_path)

@@ -199,6 +199,30 @@ enum AppRuntimeKind {
   }
 }
 
+/// Device build targets an application can run on.
+enum AppTargetPlatform {
+  /// ARMv7 EABI5 hard-float used by reMarkable 1 and 2.
+  linuxArm('linux-arm'),
+
+  /// AArch64 used by Paper Pro Move.
+  linuxArm64('linux-arm64');
+
+  const AppTargetPlatform(this.wireName);
+
+  /// Canonical manifest spelling.
+  final String wireName;
+
+  /// Parses the canonical manifest spelling.
+  static AppTargetPlatform? fromWireName(String name) {
+    for (final AppTargetPlatform target in values) {
+      if (target.wireName == name) {
+        return target;
+      }
+    }
+    return null;
+  }
+}
+
 /// Runtime layout for launching a Pluto app.
 sealed class AppRuntime {
   const AppRuntime({required this.assets});
@@ -413,6 +437,10 @@ final class AppManifest {
     this.author,
     this.icon = 'icon.png',
     this.iconMono,
+    this.targets = const <AppTargetPlatform>{
+      AppTargetPlatform.linuxArm,
+      AppTargetPlatform.linuxArm64,
+    },
     this.permissions = const <AppPermission>{},
     this.display = const DisplayPrefs(),
     this.launch = const LaunchPrefs(),
@@ -465,6 +493,7 @@ final class AppManifest {
           'author',
           'icon',
           'iconMono',
+          'targets',
           'permissions',
           'display',
           'launch',
@@ -516,6 +545,7 @@ final class AppManifest {
               'name',
               'version',
               'icon',
+              'targets',
               'runtime',
               'engine',
               'permissions',
@@ -530,6 +560,7 @@ final class AppManifest {
               'author',
               'icon',
               'iconMono',
+              'targets',
               'permissions',
               'display',
               'launch',
@@ -591,6 +622,7 @@ final class AppManifest {
       author: _optional<String>(root, 'author', 'author'),
       icon: icon,
       iconMono: iconMono,
+      targets: _parseTargets(root, canonical: canonical),
       runtime: _parseRuntime(_requiredMap(root, 'runtime', 'runtime')),
       engine: _parseEngine(_requiredMap(root, 'engine', 'engine')),
       permissions: _parsePermissions(root, canonical: canonical),
@@ -630,6 +662,9 @@ final class AppManifest {
   /// Optional relative monochrome icon path.
   final String? iconMono;
 
+  /// Exact device targets supported by this application.
+  final Set<AppTargetPlatform> targets;
+
   /// Runtime launch layout.
   final AppRuntime runtime;
 
@@ -667,6 +702,10 @@ final class AppManifest {
     if (iconMono != null) {
       result['iconMono'] = iconMono;
     }
+    result['targets'] = <String>[
+      for (final AppTargetPlatform target in AppTargetPlatform.values)
+        if (targets.contains(target)) target.wireName,
+    ];
     result['runtime'] = runtime._toJson();
     result['engine'] = engine._toJson();
     result['permissions'] = <String>[
@@ -925,6 +964,55 @@ EngineRequirement _parseEngine(Map<String, Object?> map) {
     ),
     engineCommit: commit,
   );
+}
+
+Set<AppTargetPlatform> _parseTargets(
+  Map<String, Object?> root, {
+  required bool canonical,
+}) {
+  if (canonical && !root.containsKey('targets')) {
+    throw const ManifestFieldError(path: 'targets', reason: 'is required');
+  }
+  final Object? raw = root['targets'];
+  if (raw == null) {
+    if (root.containsKey('targets')) {
+      throw const ManifestFieldError(path: 'targets', reason: 'must be a list');
+    }
+    return const <AppTargetPlatform>{
+      AppTargetPlatform.linuxArm,
+      AppTargetPlatform.linuxArm64,
+    };
+  }
+  if (raw is! List<Object?> || raw.isEmpty) {
+    throw const ManifestFieldError(
+      path: 'targets',
+      reason: 'must be a non-empty list',
+    );
+  }
+  final Set<AppTargetPlatform> result = <AppTargetPlatform>{};
+  for (var index = 0; index < raw.length; index++) {
+    final Object? value = raw[index];
+    if (value is! String) {
+      throw ManifestFieldError(
+        path: 'targets[$index]',
+        reason: 'must be a string',
+      );
+    }
+    final AppTargetPlatform? target = AppTargetPlatform.fromWireName(value);
+    if (target == null) {
+      throw ManifestFieldError(
+        path: 'targets[$index]',
+        reason: 'unknown device target',
+      );
+    }
+    if (!result.add(target)) {
+      throw ManifestFieldError(
+        path: 'targets[$index]',
+        reason: 'duplicate device target',
+      );
+    }
+  }
+  return Set<AppTargetPlatform>.unmodifiable(result);
 }
 
 Set<AppPermission> _parsePermissions(

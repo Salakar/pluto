@@ -149,13 +149,29 @@ or foreground/PID change. Success is returned only after a fresh semantic tree
 exposes the editor's exact tappable `Back to gallery` action:
 
 ```json
-{"requestId":"prepare-1","ok":true,"result":{"appId":"dev.pluto.ink","pid":4242,"canvasReady":true,"actionCount":2}}
+{"requestId":"prepare-1","ok":true,"result":{"appId":"dev.pluto.ink","pid":4242,"processStartTicks":91827,"canvasReady":true,"actionCount":2,"surfaceGeneration":381,"proofFrameId":947}}
 ```
 
-`actionCount` is exactly 0, 1, or 2. The acceptance harness rechecks the same
-foreground PID, captures the empty canvas's post-dither framebuffer, injects
-the stroke, checks the response PID again, and requires a material decoded-pixel
-change inside the deterministic stroke corridor before optical review.
+`actionCount` is exactly 0, 1, or 2. After the final canvas-ready semantics
+generation, the embedder schedules and observes two sequential Flutter frames
+on the platform thread; the first may close a frame that was already in flight,
+while the second is therefore a fresh post-semantics raster fence. It then
+waits for older user presentation to quiesce, suppresses unrelated maintenance,
+and dispatches one dedicated full-screen `Full` refresh from the retained
+surface. `surfaceGeneration` identifies that retained Flutter surface and
+`proofFrameId` is captured before the presenter call; success requires the real
+completion callback for that exact frame ID. Stale, future, unrelated,
+out-of-order, and late pre-action completions cannot satisfy the proof, while a
+synchronous exact completion is safe. The same nonzero proof is mandatory when
+the editor was already mounted (`actionCount: 0`). `processStartTicks` binds it
+to the same Linux process lifetime as `pid`. Any bounded fence, quiescence, or
+exact-completion failure returns `presentation-timeout` instead of stale
+evidence.
+
+The acceptance harness rechecks the same foreground PID, captures the empty
+canvas's post-dither framebuffer, injects the stroke, checks the response PID
+again, and requires a material decoded-pixel change inside the deterministic
+stroke corridor before optical review.
 
 ### `tap-switcher-preview`
 

@@ -637,6 +637,7 @@ const String _canonicalManifest = '''
     "flutterVersion": "3.44.4",
     "engineCommit": "a10d8ac38de835021c8d2f920dbf50a920ccc030"
   },
+  "targets": ["linux-arm", "linux-arm64"],
   "permissions": [],
   "display": {
     "orientations": ["portrait"],

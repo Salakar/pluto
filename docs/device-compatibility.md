@@ -21,13 +21,13 @@ to another firmware without validation.
 
 The two newly brought-up devices are not marked complete merely because the
 embedder starts. Their final acceptance requires the normal CLI workflow,
-visible Home and Ink behavior, a real authenticated Codex request, launch and
-return behavior, logs, screenshots, and measured responsiveness on the
-physical panel. A fake Codex backend does not satisfy that bar.
+visible Home and supported-app behavior, app switching, a deterministic Ink
+stroke, launch and return behavior, logs, screenshots, and measured
+responsiveness on the physical panel.
 
 ## One responsive application surface
 
-Home, Ink, Codex, and third-party Pluto applications are not device-specific
+Home, Ink, and target-compatible Pluto applications are not device-specific
 ports. Every backend reports its actual surface dimensions and device pixel
 ratio to Flutter. App manifests keep `display.scale: auto` (also the default
 when omitted), and widgets lay out from live `MediaQuery` and parent
@@ -41,9 +41,9 @@ Compatibility acceptance therefore checks full-surface use, reflow, reachable
 controls, pen/touch coordinate mapping, and screenshots at the native metrics
 of each tested device.
 
-The generated exact-device profiles define these presenter metrics. Move and
-RM1 have also reported their rows from a running native embedder; RM2 remains a
-layout/input contract until its first safe physical-panel run is completed:
+The generated exact-device profiles define these presenter metrics. Move, RM1,
+and RM2 have reported their rows from a running native embedder. RM2's run was
+an intermediate bring-up, not final compatibility acceptance:
 
 | Device | Native panel surface | Flutter device pixel ratio |
 | --- | ---: | ---: |
@@ -52,9 +52,11 @@ layout/input contract until its first safe physical-panel run is completed:
 | reMarkable 1 | 1404 x 1872 | 1.4125 |
 
 Those are inputs to Flutter's normal logical-pixel model, not three separately
-authored app canvases. The same release Home, Ink, and Codex layouts reflow from
-the resulting constraints. The RM2 row is not evidence that Pluto has rendered
-to its glass.
+authored app canvases. The same release Home, shared application, and Ink
+layouts reflow from the resulting constraints. An intermediate release
+rendered Home and Ink on the physical RM2 before a later switch failed closed
+on retained PMIC fault telemetry. The corrected frozen release must repeat the
+complete optical and lifecycle gate.
 
 ## One public workflow
 
@@ -100,7 +102,7 @@ The common CLI and on-device supervisor are shared by every supported tablet.
 After exact profile matching, the embedder selects only the hardware-specific
 panel implementation: Gallery3/DRM on Move, LCDIF/TCON on reMarkable 2, or
 MXCFB/EPDC on reMarkable 1. Applications use the same Flutter engine pin,
-manifest, package integrity contract, Home, Ink, Codex UI, lifecycle markers,
+manifest, package integrity contract, responsive UI rules, lifecycle markers,
 and device commands. There is no stock-UI child launcher or alternate install
 flow.
 
@@ -108,6 +110,14 @@ The `linux-arm` runtime is currently release AOT only. The `linux-arm64`
 runtime additionally supports profile AOT and explicitly requested debug/JIT.
 An unavailable development mode is rejected as a capability mismatch; normal
 release install, launch, inspection, and removal remain the same workflow.
+
+Application availability is also declared, not inferred from a model name.
+Home, Counter, Motion Lab, Ink Lab, Validation Lab, and Ink support both
+targets. Paper Codex declares `linux-arm64` only because upstream Codex has no
+native ARMv7 release. Pluto does not build or ship a custom ARMv7 Codex port;
+the ARM standard release omits it and an explicit ARM build request fails
+before compilation. This is one target-capability branch inside the same
+manifest, build, release, provision, launcher, and documentation flow.
 
 ## Release artifact targeting
 
@@ -154,7 +164,8 @@ A firmware update must repeat at least:
 2. target and ABI validation of every native binary;
 3. native panel initialization, waveform/LUT, input, and control checks;
 4. transactional boot activation with stock fallback available;
-5. Home, Ink, and real Codex runs through the public CLI;
+5. Home, switching, the target-supported app set, and deterministic Ink runs
+   through the public CLI; additionally test native Codex on `linux-arm64`;
 6. logs, screenshots, camera evidence, and responsiveness measurements;
 7. restore and full-uninstall recovery checks.
 

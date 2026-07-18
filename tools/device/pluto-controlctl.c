@@ -13,7 +13,18 @@
 #include <unistd.h>
 
 #define MAX_PACKET 32768
-#define TIMEOUT_MS 5000
+#define CONTROL_SEND_TIMEOUT_MS 5000
+#define PREPARE_SEMANTICS_TIMEOUT_MS 4200
+#define PREPARE_PRESENTATION_TIMEOUT_MS 4000
+#define CONTROL_RESPONSE_MARGIN_MS 1800
+// prepare-ink-canvas may consume both bounded native waits. Keep the client
+// response fence derived from that protocol maximum, with scheduling margin,
+// so it does not abandon a request before the embedder can return a receipt.
+#define CONTROL_RESPONSE_TIMEOUT_MS                                            \
+  (PREPARE_SEMANTICS_TIMEOUT_MS + PREPARE_PRESENTATION_TIMEOUT_MS +            \
+   CONTROL_RESPONSE_MARGIN_MS)
+_Static_assert(CONTROL_RESPONSE_TIMEOUT_MS == 10000,
+               "control response timeout must match the Ink receipt budget");
 
 static void usage(FILE *stream) {
   fprintf(stream, "usage: pluto-controlctl --socket PATH --request JSON\n");
@@ -89,7 +100,7 @@ int main(int argc, char **argv) {
   }
 
   struct pollfd poll_fd = {.fd = fd, .events = POLLOUT, .revents = 0};
-  if (poll(&poll_fd, 1, TIMEOUT_MS) != 1) {
+  if (poll(&poll_fd, 1, CONTROL_SEND_TIMEOUT_MS) != 1) {
     const int saved = errno == 0 ? ETIMEDOUT : errno;
     close(fd);
     errno = saved;
@@ -105,7 +116,7 @@ int main(int argc, char **argv) {
 
   poll_fd.events = POLLIN;
   poll_fd.revents = 0;
-  if (poll(&poll_fd, 1, TIMEOUT_MS) != 1) {
+  if (poll(&poll_fd, 1, CONTROL_RESPONSE_TIMEOUT_MS) != 1) {
     const int saved = errno == 0 ? ETIMEDOUT : errno;
     close(fd);
     errno = saved;

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -72,9 +72,9 @@ grep -Eq '^01[[:space:]]+app-dev\.pluto\.launcher[[:space:]]+[0-9a-f]{64}[[:spac
 TEST_PROVENANCE="$TMP/test-evidence/camera-provenance.tsv"
 [[ -f "$TEST_PROVENANCE" && ! -L "$TEST_PROVENANCE" ]] ||
   fail "test capture provenance was not recorded as a regular file"
-[[ "$(wc -l < "$TEST_PROVENANCE" | tr -d '[:space:]')" = 16 ]] ||
+[[ "$(wc -l < "$TEST_PROVENANCE" | tr -d '[:space:]')" = 22 ]] ||
   fail "camera provenance does not contain the exact ordered rows"
-[[ "$(cut -f1 "$TEST_PROVENANCE" | sort -u | wc -l | tr -d '[:space:]')" = 16 ]] ||
+[[ "$(cut -f1 "$TEST_PROVENANCE" | sort -u | wc -l | tr -d '[:space:]')" = 22 ]] ||
   fail "camera provenance contains duplicate keys"
 assert_provenance_value "$TEST_PROVENANCE" test_seam 1
 assert_provenance_value "$TEST_PROVENANCE" capture_mode test-override
@@ -86,6 +86,12 @@ assert_provenance_value "$TEST_PROVENANCE" camera_capture_sha256 \
   "$(sha256_file "$TMP/fake-capture")"
 assert_provenance_value "$TEST_PROVENANCE" camera_driver_path not-applicable
 assert_provenance_value "$TEST_PROVENANCE" camera_driver_sha256 not-applicable
+assert_provenance_value "$TEST_PROVENANCE" camera_python_binary not-applicable
+assert_provenance_value "$TEST_PROVENANCE" camera_python_sha256 not-applicable
+assert_provenance_value "$TEST_PROVENANCE" camera_ffmpeg_binary not-applicable
+assert_provenance_value "$TEST_PROVENANCE" camera_ffmpeg_sha256 not-applicable
+assert_provenance_value "$TEST_PROVENANCE" camera_ffprobe_binary not-applicable
+assert_provenance_value "$TEST_PROVENANCE" camera_ffprobe_sha256 not-applicable
 assert_provenance_value "$TEST_PROVENANCE" camera_config_path not-applicable
 assert_provenance_value "$TEST_PROVENANCE" camera_config_sha256 not-applicable
 assert_provenance_value "$TEST_PROVENANCE" camera_config_snapshot not-applicable
@@ -164,6 +170,24 @@ assert_provenance_value "$REPOSITORY_PROVENANCE" camera_capture_sha256 \
   "$(sha256_file "$FIXTURE_CAMERA/capture.sh")"
 assert_provenance_value "$REPOSITORY_PROVENANCE" camera_driver_sha256 \
   "$(sha256_file "$FIXTURE_CAMERA/camera.py")"
+TOOLCHAIN_ROWS="$("$FIXTURE_CAMERA/capture.sh" --acceptance-toolchain)"
+toolchain_value() {
+  local key="$1"
+  printf '%s\n' "$TOOLCHAIN_ROWS" | awk -F '\t' -v key="$key" \
+    '$1 == key {print $2}'
+}
+assert_provenance_value "$REPOSITORY_PROVENANCE" camera_python_binary \
+  "$(toolchain_value camera_python_binary)"
+assert_provenance_value "$REPOSITORY_PROVENANCE" camera_python_sha256 \
+  "$(toolchain_value camera_python_sha256)"
+assert_provenance_value "$REPOSITORY_PROVENANCE" camera_ffmpeg_binary \
+  "$(toolchain_value camera_ffmpeg_binary)"
+assert_provenance_value "$REPOSITORY_PROVENANCE" camera_ffmpeg_sha256 \
+  "$(toolchain_value camera_ffmpeg_sha256)"
+assert_provenance_value "$REPOSITORY_PROVENANCE" camera_ffprobe_binary \
+  "$(toolchain_value camera_ffprobe_binary)"
+assert_provenance_value "$REPOSITORY_PROVENANCE" camera_ffprobe_sha256 \
+  "$(toolchain_value camera_ffprobe_sha256)"
 assert_provenance_value "$REPOSITORY_PROVENANCE" camera_config_sha256 \
   "$(sha256_file "$FIXTURE_ROOT/.pluto-devices.json")"
 assert_provenance_value "$REPOSITORY_PROVENANCE" camera_config_snapshot \
@@ -173,6 +197,64 @@ assert_provenance_value "$REPOSITORY_PROVENANCE" camera_config_snapshot_sha256 \
 [[ "$(sha256_file "$TMP/repository-evidence/camera-config.json")" == \
   "$(sha256_file "$FIXTURE_ROOT/.pluto-devices.json")" ]] ||
   fail "frozen camera config does not match the captured config"
+
+# Production capture is entered through /bin/bash -p, clears loader controls,
+# fixes its PATH, and resolves Python/FFmpeg/FFprobe without command lookup.
+[[ "$(head -n 1 "$FIXTURE_STAGE")" == '#!/bin/bash -p' &&
+  "$(head -n 1 "$FIXTURE_CAMERA/capture.sh")" == '#!/bin/bash -p' ]] ||
+  fail "production camera entrypoints do not use privileged absolute Bash"
+if /bin/bash "$FIXTURE_STAGE" hardened-entry \
+  >"$TMP/unprivileged-stage.out" 2>&1; then
+  fail "camera stage accepted an unprivileged Bash invocation"
+fi
+grep -q 'directly or with /bin/bash -p' "$TMP/unprivileged-stage.out" ||
+  fail "camera stage did not diagnose an unprivileged Bash invocation"
+mkdir -p "$TMP/path-shims" "$TMP/loader-search"
+PATH_MARKER="$TMP/path-shim-used"
+for shim in bash python3 ffmpeg ffprobe dirname awk shasum sha256sum; do
+  cat > "$TMP/path-shims/$shim" <<EOF
+#!/bin/sh
+printf '%s\n' '$shim' >> '$PATH_MARKER'
+exit 91
+EOF
+  chmod 0755 "$TMP/path-shims/$shim"
+done
+cat > "$TMP/bash-env" <<EOF
+printf '%s\n' BASH_ENV >> '$PATH_MARKER'
+EOF
+(
+  dirname() {
+    printf '%s\n' exported-function >> "$PATH_MARKER"
+    /usr/bin/dirname "$@"
+  }
+  export -f dirname
+  PATH="$TMP/path-shims:$PATH" \
+    BASH_ENV="$TMP/bash-env" \
+    PLUTO_CAMERA_RIG=3 \
+    PLUTO_ACCEPTANCE_PROFILE_ID=rm2 \
+    PLUTO_CAMERA_ACCEPTANCE_DIR="$TMP/hardened-production-evidence" \
+    PLUTO_CAMERA_ACCEPTANCE_SETTLE=0 \
+    "$FIXTURE_STAGE" hardened-entry >/dev/null
+)
+[[ ! -e "$PATH_MARKER" ]] ||
+  fail "production camera capture executed a PATH/BASH_ENV/function shim"
+
+if LD_LIBRARY_PATH="$TMP/loader-search" \
+  PLUTO_CAMERA_RIG=3 \
+  PLUTO_ACCEPTANCE_PROFILE_ID=rm2 \
+  PLUTO_CAMERA_ACCEPTANCE_DIR="$TMP/loader-injected-evidence" \
+  PLUTO_CAMERA_ACCEPTANCE_SETTLE=0 \
+  "$FIXTURE_STAGE" loader-injected >/dev/null 2>&1; then
+  fail "production camera capture accepted loader-injection environment"
+fi
+if PLUTO_CAMERA_FFMPEG_BIN="$TMP/path-shims/ffmpeg" \
+  PLUTO_CAMERA_RIG=3 \
+  PLUTO_ACCEPTANCE_PROFILE_ID=rm2 \
+  PLUTO_CAMERA_ACCEPTANCE_DIR="$TMP/media-override-evidence" \
+  PLUTO_CAMERA_ACCEPTANCE_SETTLE=0 \
+  "$FIXTURE_STAGE" media-override >/dev/null 2>&1; then
+  fail "production camera capture accepted an unmarked FFmpeg override"
+fi
 
 # Enabling a test seam is itself evidence, even with the repository capture.
 PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \

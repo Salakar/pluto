@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -22,7 +22,32 @@ sha256_file() {
   fi
 }
 
+refresh_metrics_review_digest() {
+  local camera_dir="$1"
+  local summary_digest metrics_digest
+  summary_digest="$(sha256_file "$camera_dir/metrics/summary.txt")"
+  awk -v digest="$summary_digest" \
+    '$2 == "summary.txt" {$1 = digest} {print $1 "  " $2}' \
+    "$camera_dir/metrics/SHA256SUMS" > "$camera_dir/metrics/SHA256SUMS.new"
+  mv "$camera_dir/metrics/SHA256SUMS.new" "$camera_dir/metrics/SHA256SUMS"
+  metrics_digest="$(sha256_file "$camera_dir/metrics/SHA256SUMS")"
+  awk -F '\t' -v OFS='\t' -v digest="$metrics_digest" \
+    '{$7 = digest; print}' "$camera_dir/review.tsv" > "$camera_dir/review.new"
+  mv "$camera_dir/review.new" "$camera_dir/review.tsv"
+}
+
 command -v ffmpeg >/dev/null 2>&1 || fail 'ffmpeg is required for visual evidence tests'
+[[ "$(head -n 1 "$SMOKE")" == '#!/bin/bash -p' &&
+  "$(head -n 1 "$VERIFY")" == '#!/bin/bash -p' &&
+  "$(head -n 1 "$RECORD")" == '#!/bin/bash -p' ]] ||
+  fail 'visual acceptance entrypoints do not use privileged absolute Bash'
+for entrypoint in "$SMOKE" "$VERIFY" "$RECORD"; do
+  if /bin/bash "$entrypoint" >"$TMP/unprivileged-entry.out" 2>&1; then
+    fail "acceptance entrypoint accepted unprivileged Bash: $entrypoint"
+  fi
+  grep -q 'directly or with /bin/bash -p' "$TMP/unprivileged-entry.out" ||
+    fail "acceptance entrypoint did not diagnose unprivileged Bash: $entrypoint"
+done
 mkdir -p "$TMP/bin" "$TMP/png-fixtures" "$TMP/jpg-fixtures"
 cat > "$TMP/release-manifest.json" <<EOF
 {"gitRevision":"$REVISION","targets":{"linux-arm":{},"linux-arm64":{}}}
@@ -33,10 +58,9 @@ app-dev.pluto.examples.counter
 app-dev.pluto.examples.motion_lab
 app-dev.pluto.examples.ink_lab
 app-dev.pluto.validation_lab
-app-dev.pluto.codex
 app-dev.pluto.ink-before-switcher
 switcher-dev.pluto.ink
-switcher-selected-dev.pluto.codex
+switcher-selected-dev.pluto.validation_lab
 ink-canvas-before-stroke
 ink-stroke
 app-dev.pluto.launcher
@@ -45,12 +69,11 @@ EOF
 sources=(
   apps/launcher/test_goldens/goldens/s02_home_grid.png
   apps/launcher/test_goldens/goldens/s20_app_switcher_portrait.png
-  apps/codex/test_goldens/goldens/g01_empty_keyboard.png
-  apps/codex/test_goldens/goldens/g02_conversation_color.png
-  apps/codex/test_goldens/goldens/g03_handwriting_draft.png
+  apps/launcher/test_goldens/goldens/s01_welcome.png
+  apps/launcher/test_goldens/goldens/s15_about.png
   apps/launcher/test_goldens/goldens/s10_settings.png
   apps/launcher/test_goldens/goldens/s11_wifi_picker.png
-  apps/launcher/test_goldens/goldens/s01_welcome.png
+  apps/launcher/test_goldens/goldens/s15_about.png
   apps/ink/test_goldens/goldens/g04_editor_default.png
   apps/ink/test_goldens/goldens/g04_editor_default.png
   apps/launcher/test_goldens/goldens/s06_app_info.png
@@ -77,8 +100,13 @@ done < "$TMP/expected-labels"
 cat > "$TMP/bin/pluto" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${PLUTO_ACCEPTANCE_STRICT_SSH:-}" == 1 ]]
+[[ "${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-}" == 1 ]]
+[[ "${PLUTO_ACCEPTANCE_SSH_BIN:-}" == /* ]]
 if [[ -n "${PLUTO_FAKE_CALL_LOG:-}" ]]; then
-  printf '%s\n' "$*" >> "$PLUTO_FAKE_CALL_LOG"
+  printf 'strict_ssh=%s ssh_bin=%s command=%s\n' \
+    "$PLUTO_ACCEPTANCE_STRICT_SSH" "$PLUTO_ACCEPTANCE_SSH_BIN" "$*" \
+    >> "$PLUTO_FAKE_CALL_LOG"
 fi
 case "$1" in
   run)
@@ -101,7 +129,7 @@ case "$1" in
       app-dev.pluto.examples.motion_lab.png) expected=dev.pluto.examples.motion_lab ;;
       app-dev.pluto.examples.ink_lab.png) expected=dev.pluto.examples.ink_lab ;;
       app-dev.pluto.validation_lab.png) expected=dev.pluto.validation_lab ;;
-      app-dev.pluto.codex.png | switcher-selected-dev.pluto.codex.png) expected=dev.pluto.codex ;;
+      switcher-selected-dev.pluto.validation_lab.png) expected=dev.pluto.validation_lab ;;
       app-dev.pluto.ink-before-switcher.png | ink-canvas-before-stroke.png | ink-stroke.png) expected=dev.pluto.ink ;;
       switcher-dev.pluto.ink.png | app-dev.pluto.launcher.png) expected=dev.pluto.launcher ;;
       *) exit 65 ;;
@@ -119,6 +147,10 @@ chmod 0755 "$TMP/bin/pluto"
 cat > "$TMP/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${SSH_ARGV_LOG:-}" ]]; then
+  printf '%s\n' BEGIN >> "$SSH_ARGV_LOG"
+  printf 'arg=%s\n' "$@" >> "$SSH_ARGV_LOG"
+fi
 command=${!#}
 case "$command" in
   *'/home/root/pluto/share/release-revision'*)
@@ -128,7 +160,7 @@ case "$command" in
     exit 0
     ;;
   *"sed -n '2p' /run/pluto/switcher-active"*)
-    printf 'dev.pluto.codex\n'
+    printf 'dev.pluto.validation_lab\n'
     ;;
   *'expected exactly one common Pluto supervisor'*)
     if [[ "${SUPERVISOR_FAIL:-0}" == 1 ]]; then
@@ -141,28 +173,43 @@ case "$command" in
     printf 'release AOT smoke: PASS switcher origin=dev.pluto.ink host=200\n'
     ;;
   *'switcher UI did not foreground'*)
-    printf 'release AOT smoke: PASS switcher UI selected dev.pluto.codex pid=201\n'
+    printf 'release AOT smoke: PASS switcher UI selected dev.pluto.validation_lab pid=201\n'
     ;;
   *'release-aot-prepare-ink'*)
-    if ! printf '%s' "$command" | grep -F -- \
-      '"${expected_prefix}0}}" | "${expected_prefix}1}}" | "${expected_prefix}2}}")' \
-      >/dev/null; then
-      echo 'fake ssh: AOT prepare consumer did not require a complete exact JSON receipt' >&2
-      exit 66
+    case "${PREPARE_RECEIPT_MODE:-action}" in
+      action)
+        receipt='{"requestId":"release-aot-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"processStartTicks":404,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":17}}'
+        ;;
+      mounted)
+        receipt='{"requestId":"release-aot-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"processStartTicks":404,"canvasReady":true,"actionCount":0,"surfaceGeneration":24,"proofFrameId":19}}'
+        ;;
+      missing-present)
+        receipt='{"requestId":"release-aot-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"processStartTicks":404,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":0}}'
+        ;;
+      extra-field)
+        receipt='{"requestId":"release-aot-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"processStartTicks":404,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":17,"fixture":true}}'
+        ;;
+      wrong-start)
+        receipt='{"requestId":"release-aot-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"processStartTicks":405,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":17}}'
+        ;;
+      *) exit 64 ;;
+    esac
+    printf 'pid=202\nstart_ticks=404\nresponse=%s\n' "$receipt"
+    ;;
+  *'prepared Ink process identity changed'*)
+    if [[ "${INK_IDENTITY_FAIL:-0}" == 1 ]]; then
+      printf 'release AOT smoke: prepared Ink process identity changed\n' >&2
+      exit 92
     fi
-    printf 'release AOT smoke: PASS real Ink canvas pid=202 response={"ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"canvasReady":true,"actionCount":2}}\n'
     ;;
   *'Ink stroke produced no completion-backed present'*)
     printf 'release AOT smoke: PASS Ink stroke pid=202 response={"ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"eventCount":24}}\n'
-    ;;
-  *'Codex app cannot resolve a real binary'*)
-    printf 'release AOT smoke: PASS real authenticated Codex request response_sha256=fixture\n'
     ;;
   *'never published matching AOT receipts'*)
     printf 'release AOT smoke: PASS app pid=203 present_after=1s\n'
     ;;
   *'debug/JIT state absent'*)
-    printf 'release AOT smoke: all standard apps and switcher passed; Ink changed decoded post-dither pixels; debug/JIT state absent\n'
+    printf 'release AOT smoke: all supported apps and switcher passed; Ink changed decoded post-dither pixels; debug/JIT state absent\n'
     ;;
   *)
     echo "unexpected fake ssh command: $command" >&2
@@ -203,6 +250,12 @@ camera_capture_path	$capture_path
 camera_capture_sha256	$(sha256_file "$capture_path")
 camera_driver_path	not-applicable
 camera_driver_sha256	not-applicable
+camera_python_binary	not-applicable
+camera_python_sha256	not-applicable
+camera_ffmpeg_binary	not-applicable
+camera_ffmpeg_sha256	not-applicable
+camera_ffprobe_binary	not-applicable
+camera_ffprobe_sha256	not-applicable
 camera_config_path	not-applicable
 camera_config_sha256	not-applicable
 camera_config_snapshot	not-applicable
@@ -237,27 +290,58 @@ cat > "$TMP/metrics-collector" <<'EOF'
 set -euo pipefail
 manifest=''
 output=''
+device=''
+port=''
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --release-manifest) manifest=$2; shift 2 ;;
     --output) output=$2; shift 2 ;;
-    --device | --samples | --interval-seconds | --port) shift 2 ;;
+    --device) device=$2; shift 2 ;;
+    --port) port=$2; shift 2 ;;
+    --samples | --interval-seconds) shift 2 ;;
     *) exit 64 ;;
   esac
 done
-[[ -f "$manifest" && -n "$output" && ! -e "$output" ]]
+[[ -f "$manifest" && -n "$output" && ! -e "$output" &&
+  -n "$device" && "$port" =~ ^[1-9][0-9]{0,4}$ &&
+  -n "${FIXTURE_REPO_ROOT:-}" ]]
 mkdir -p "$output"
 revision=$(sed -n 's/^.*"gitRevision":"\([0-9a-f]\{40\}\)".*$/\1/p' "$manifest")
-if command -v sha256sum >/dev/null 2>&1; then
-  manifest_sha=$(sha256sum "$manifest" | awk '{print $1}')
-else
-  manifest_sha=$(shasum -a 256 "$manifest" | awk '{print $1}')
-fi
+fixture_sha() {
+  if [[ -x /usr/bin/sha256sum ]]; then
+    /usr/bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  elif [[ -x /bin/sha256sum ]]; then
+    /bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  else
+    LC_ALL=C LANG=C /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
+  fi
+}
+manifest_sha=$(fixture_sha "$manifest")
+identity_helper_sha=$(fixture_sha \
+  "$FIXTURE_REPO_ROOT/tools/device/diagnostics/acceptance_identity.py")
+remote_collector_sha=$(fixture_sha \
+  "$FIXTURE_REPO_ROOT/tools/device/diagnostics/acceptance-metrics/remote-collector.sh")
+manifest_verifier_sha=$(fixture_sha \
+  "$FIXTURE_REPO_ROOT/tools/device/diagnostics/acceptance-metrics/verify_manifest.dart")
+python_sha=$(fixture_sha /usr/bin/python3)
 printf 'fixture commands\n' > "$output/commands.log"
 printf 'format=pluto-acceptance-evidence\ncollection.status=PASS\n' > \
   "$output/device-evidence.txt"
 cat > "$output/summary.txt" <<SUMMARY
 format=pluto-acceptance-bundle
+device=$device
+port=$port
+transport=test-hook
+ssh_binary=not-used
+test_seam=1
+identity_helper_sha256=$identity_helper_sha
+remote_collector_sha256=$remote_collector_sha
+manifest_verifier_sha256=$manifest_verifier_sha
+python_binary=/usr/bin/python3
+python_sha256=$python_sha
+dart_binary=/fixture/dart
+dart_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+remote_shell=/bin/sh
 profile=move
 target=linux-arm64
 git_revision=$revision
@@ -289,12 +373,11 @@ chmod 0755 "$TMP/metrics-collector"
 
 common_env=(
   PATH="$TMP/bin:$PATH"
+  FIXTURE_REPO_ROOT="$ROOT"
   PNG_FIXTURE_DIR="$TMP/png-fixtures"
   JPG_FIXTURE_DIR="$TMP/jpg-fixtures"
-  PLUTO_CLI=pluto
   PLUTO_ACCEPTANCE_REQUIRE_VISUAL=1
   PLUTO_ACCEPTANCE_COLLECT_ONLY=1
-  PLUTO_ACCEPTANCE_CODEX_REQUEST=1
   PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0.001
   PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION"
   PLUTO_ACCEPTANCE_PROFILE_ID=move
@@ -305,11 +388,122 @@ common_env=(
   PLUTO_CAMERA_RIG=2
   PLUTO_ACCEPTANCE_STAGE_DELAY=0
 )
+fixture_transport_env=(
+  PLUTO_CLI="$TMP/bin/pluto"
+  PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh"
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1
+)
+
+if env PLUTO_ACCEPTANCE_REQUIRE_VISUAL=1 \
+  PLUTO_ACCEPTANCE_COLLECT_ONLY=1 \
+  PLUTO_ACCEPTANCE_TRANSPORT="$TMP/transport.sh" \
+  "$SMOKE" root@fixture-device >"$TMP/custom-transport.out" 2>&1; then
+  fail 'production visual smoke accepted a custom metrics transport'
+fi
+grep -q 'final visual acceptance forbids a custom metrics transport' \
+  "$TMP/custom-transport.out" ||
+  fail 'custom metrics transport did not fail during visual preflight'
+
+if PLUTO_CLI="$TMP/bin/pluto" \
+  "$SMOKE" root@fixture-device >"$TMP/cli-override.out" 2>&1; then
+  fail 'production smoke accepted a Pluto CLI override'
+fi
+grep -q 'PLUTO_CLI requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/cli-override.out" ||
+  fail 'Pluto CLI override did not require the explicit test seam'
+
+if PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  "$SMOKE" root@fixture-device >"$TMP/ssh-override.out" 2>&1; then
+  fail 'production smoke accepted an SSH binary override'
+fi
+grep -q \
+  'PLUTO_ACCEPTANCE_SSH_BIN requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/ssh-override.out" ||
+  fail 'SSH binary override did not require the explicit test seam'
+
+mkdir -p "$TMP/no-home" "$TMP/path-shims"
+cat > "$TMP/path-shims/pluto" <<EOF
+#!/bin/sh
+: > '$TMP/path-pluto-used'
+exit 0
+EOF
+cat > "$TMP/path-shims/ssh" <<EOF
+#!/bin/sh
+: > '$TMP/path-ssh-used'
+exit 0
+EOF
+cat > "$TMP/path-shims/python3" <<EOF
+#!/bin/sh
+: > '$TMP/path-python-used'
+exit 0
+EOF
+for shim in bash ffmpeg ffprobe dirname awk; do
+  cat > "$TMP/path-shims/$shim" <<EOF
+#!/bin/sh
+: > '$TMP/path-$shim-used'
+exit 0
+EOF
+done
+chmod 0755 "$TMP/path-shims/pluto" "$TMP/path-shims/ssh" \
+  "$TMP/path-shims/python3" "$TMP/path-shims/bash" \
+  "$TMP/path-shims/ffmpeg" "$TMP/path-shims/ffprobe" \
+  "$TMP/path-shims/dirname" "$TMP/path-shims/awk"
+cat > "$TMP/acceptance-bash-env" <<EOF
+: > '$TMP/path-bash-env-used'
+EOF
+if PATH="$TMP/path-shims:$PATH" BASH_ENV="$TMP/acceptance-bash-env" \
+  PLUTO_BIN_DIR="$TMP/path-shims" \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/path-pluto.out" 2>&1; then
+  fail 'production smoke unexpectedly reached a device on localhost:1'
+fi
+[[ ! -e "$TMP/path-pluto-used" ]] ||
+  fail 'production smoke executed a Pluto CLI shim from PATH or PLUTO_BIN_DIR'
+[[ ! -e "$TMP/path-python-used" ]] ||
+  fail 'production smoke executed a Python shim from PATH'
+for marker in bash ffmpeg ffprobe dirname awk bash-env; do
+  [[ ! -e "$TMP/path-$marker-used" ]] ||
+    fail "production smoke executed a $marker startup/PATH shim"
+done
+if (
+  dirname() {
+    : > "$TMP/path-exported-function-used"
+    /usr/bin/dirname "$@"
+  }
+  export -f dirname
+  PATH="$TMP/path-shims:$PATH" "$SMOKE" root@127.0.0.1:1 >/dev/null 2>&1
+); then
+  fail 'production smoke unexpectedly reached a device with an exported function'
+fi
+[[ ! -e "$TMP/path-exported-function-used" ]] ||
+  fail 'production smoke imported an exported shell function'
+
+if PATH="$TMP/path-shims:$PATH" \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/path-ssh.out" 2>&1; then
+  fail 'production smoke unexpectedly reached a device on localhost:1'
+fi
+[[ ! -e "$TMP/path-ssh-used" ]] ||
+  fail 'production smoke executed an SSH shim from PATH'
+
+if LD_LIBRARY_PATH="$TMP/path-shims" \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/loader-env.out" 2>&1; then
+  fail 'production smoke accepted loader-injection environment'
+fi
+grep -q 'LD_LIBRARY_PATH is forbidden for production acceptance' \
+  "$TMP/loader-env.out" ||
+  fail 'production smoke did not diagnose loader-injection environment'
+
+if PLUTO_ACCEPTANCE_FFMPEG_BIN="$TMP/path-shims/ffmpeg" \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/ffmpeg-override.out" 2>&1; then
+  fail 'production smoke accepted an FFmpeg override'
+fi
+grep -q 'PLUTO_ACCEPTANCE_FFMPEG_BIN requires' "$TMP/ffmpeg-override.out" ||
+  fail 'production smoke did not gate its FFmpeg override'
 
 : > "$TMP/preflight-calls"
 set +e
 env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
-  PLUTO_CLI=pluto PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
   PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 SUPERVISOR_FAIL=1 \
   PLUTO_FAKE_CALL_LOG="$TMP/preflight-calls" \
   "$SMOKE" root@fixture-device > "$TMP/preflight.out" 2>&1
@@ -331,7 +525,6 @@ for camera_mismatch in '2|move' '3|rm1'; do
   if env \
     PLUTO_ACCEPTANCE_REQUIRE_VISUAL=1 \
     PLUTO_ACCEPTANCE_COLLECT_ONLY=1 \
-    PLUTO_ACCEPTANCE_CODEX_REQUEST=1 \
     PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0.001 \
     PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
     PLUTO_ACCEPTANCE_PROFILE_ID="$camera_profile" \
@@ -357,15 +550,68 @@ if env "${common_env[@]}" PLUTO_ACCEPTANCE_COLLECT_ONLY=0 \
 fi
 
 env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
-  PLUTO_CLI=pluto PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
   PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 \
+  PLUTO_FAKE_CALL_LOG="$TMP/strict-cli-calls" \
+  SSH_ARGV_LOG="$TMP/strict-ssh-argv" \
+  PREPARE_RECEIPT_MODE=mounted \
   "$SMOKE" root@fixture-device > "$TMP/nonvisual.out" ||
-  fail 'ordinary hardware smoke did not require decoded post-dither Ink change'
+  fail 'ordinary hardware smoke rejected an already-mounted Ink canvas receipt'
 grep -q 'Ink changed decoded post-dither pixels' "$TMP/nonvisual.out" ||
   fail 'ordinary hardware smoke overstated dispatch as visual proof'
+grep -q 'action_count=0 surface_generation=24 proof_frame_id=19' \
+  "$TMP/nonvisual.out" ||
+  fail 'already-mounted Ink canvas did not require a fresh presentation receipt'
+grep -q "strict_ssh=1 ssh_bin=$TMP/bin/ssh" "$TMP/strict-cli-calls" ||
+  fail 'acceptance-strict SSH mode was not inherited by Pluto CLI commands'
+for strict_arg in \
+  '-F' '/dev/null' 'StrictHostKeyChecking=yes' 'ProxyCommand=none' \
+  'CanonicalizeHostname=no' 'ControlMaster=no' 'ControlPath=none' \
+  'ControlPersist=no'; do
+  grep -Fqx -- "arg=$strict_arg" "$TMP/strict-ssh-argv" ||
+    fail "raw SSH omitted strict argument: $strict_arg"
+done
+
+if env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
+  PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 \
+  PREPARE_RECEIPT_MODE=missing-present \
+  "$SMOKE" root@fixture-device >"$TMP/missing-present.out" 2>&1; then
+  fail 'mutating Ink preparation without a native presentation receipt passed'
+fi
+grep -q 'invalid presentation receipt' "$TMP/missing-present.out" ||
+  fail 'missing Ink presentation receipt was rejected for the wrong reason'
+
+for invalid_receipt_mode in extra-field wrong-start; do
+  if env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
+    PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+    PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+    PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 \
+    PREPARE_RECEIPT_MODE="$invalid_receipt_mode" \
+    "$SMOKE" root@fixture-device \
+    >"$TMP/invalid-receipt-$invalid_receipt_mode.out" 2>&1; then
+    fail "invalid Ink receipt passed: $invalid_receipt_mode"
+  fi
+  grep -q 'invalid presentation receipt' \
+    "$TMP/invalid-receipt-$invalid_receipt_mode.out" ||
+    fail "invalid Ink receipt was rejected for the wrong reason: $invalid_receipt_mode"
+done
+
+if env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
+  PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 INK_IDENTITY_FAIL=1 \
+  "$SMOKE" root@fixture-device >"$TMP/replaced-ink.out" 2>&1; then
+  fail 'hardware smoke accepted an Ink process replacement after preparation'
+fi
+grep -q 'prepared Ink process identity changed' "$TMP/replaced-ink.out" ||
+  fail 'replacement Ink process was rejected for the wrong reason'
 
 env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
-  PLUTO_CLI=pluto PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
   PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 \
   PLUTO_ACCEPTANCE_SSH_TARGET=root@127.0.0.1 \
   PLUTO_ACCEPTANCE_SSH_PORT=2222 \
@@ -373,7 +619,8 @@ env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
   fail 'equal explicit IPv4 CLI/SSH endpoints were rejected'
 
 env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
-  PLUTO_CLI=pluto PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
+  PLUTO_CLI="$TMP/bin/pluto" PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
   PLUTO_ACCEPTANCE_CAPTURE_SETTLE=0 \
   PLUTO_ACCEPTANCE_SSH_TARGET='root@fe80::1%en7' \
   "$SMOKE" 'root@[fe80::1%en7]' >/dev/null ||
@@ -385,20 +632,12 @@ for mismatch in \
   'root@device:2222|root@device|22'; do
   IFS='|' read -r cli_endpoint ssh_endpoint ssh_port <<< "$mismatch"
   if env PATH="$TMP/bin:$PATH" PNG_FIXTURE_DIR="$TMP/png-fixtures" \
-    PLUTO_CLI=pluto PLUTO_ACCEPTANCE_SSH_TARGET="$ssh_endpoint" \
+    PLUTO_ACCEPTANCE_SSH_TARGET="$ssh_endpoint" \
     PLUTO_ACCEPTANCE_SSH_PORT="$ssh_port" \
     "$SMOKE" "$cli_endpoint" >/dev/null 2>&1; then
     fail "production smoke accepted split endpoint identity: $mismatch"
   fi
 done
-
-if env "${common_env[@]}" PLUTO_ACCEPTANCE_CODEX_REQUEST=0 \
-  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
-  PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$TMP/missing-screenshots" \
-  PLUTO_CAMERA_ACCEPTANCE_DIR="$TMP/missing-camera" \
-  "$SMOKE" root@fixture-device >/dev/null 2>&1; then
-  fail 'strict visual mode accepted a skipped Codex request'
-fi
 
 if env "${common_env[@]}" \
   PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$TMP/unofficial-screenshots" \
@@ -417,7 +656,7 @@ if env "${common_env[@]}" \
 fi
 
 set +e
-env "${common_env[@]}" IDENTITY_FAIL=1 \
+env "${common_env[@]}" "${fixture_transport_env[@]}" IDENTITY_FAIL=1 \
   PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
   PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$TMP/rejected-screenshots" \
   PLUTO_CAMERA_ACCEPTANCE_DIR="$TMP/rejected-camera" \
@@ -427,7 +666,7 @@ set -e
 [[ "$identity_rc" != 0 ]] ||
   fail 'strict visual mode accepted a mismatched installed release identity'
 
-env "${common_env[@]}" WRITE_REVIEW=0 \
+env "${common_env[@]}" "${fixture_transport_env[@]}" WRITE_REVIEW=0 \
   PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
   PLUTO_ACCEPTANCE_COLLECT_ONLY=1 \
   PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$TMP/collect-screenshots" \
@@ -440,9 +679,9 @@ if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" --camera-dir "$TMP/collect-came
   fail 'unreviewed collect-only evidence passed the final verifier'
 fi
 
-env "${common_env[@]}" \
+env "${common_env[@]}" "${fixture_transport_env[@]}" \
   PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
-  PLUTO_ACCEPTANCE_SSH_TARGET=root@separate-test-fixture \
+  PLUTO_ACCEPTANCE_SSH_TARGET=root@fixture-device \
   PLUTO_ACCEPTANCE_COLLECT_ONLY=1 \
   PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$TMP/screenshots" \
   PLUTO_CAMERA_ACCEPTANCE_DIR="$TMP/camera" \
@@ -450,7 +689,11 @@ env "${common_env[@]}" \
 grep -q $'^device_endpoint\troot@fixture-device:22$' "$TMP/camera/metadata.tsv" ||
   fail 'visual metadata did not record one canonical CLI endpoint'
 grep -q $'^test_seam\t1$' "$TMP/camera/metadata.tsv" ||
-  fail 'split endpoint test evidence was not permanently marked'
+  fail 'test-hook evidence was not permanently marked'
+grep -q '^device=root@fixture-device$' "$TMP/camera/metrics/summary.txt" ||
+  fail 'metrics summary was not collected from the visual device endpoint'
+grep -q '^port=22$' "$TMP/camera/metrics/summary.txt" ||
+  fail 'metrics summary did not record the visual device port'
 
 cut -f2 "$TMP/camera/stages.tsv" > "$TMP/camera-labels"
 cut -f1 "$TMP/screenshots/stages.tsv" > "$TMP/screenshot-labels"
@@ -458,12 +701,12 @@ cmp -s "$TMP/expected-labels" "$TMP/camera-labels" ||
   fail 'camera stages are missing, duplicated, or out of order'
 cmp -s "$TMP/expected-labels" "$TMP/screenshot-labels" ||
   fail 'native screenshot stages do not match camera stages'
-[[ "$(sort "$TMP/camera-labels" | uniq | wc -l | tr -d '[:space:]')" == 11 ]] ||
+[[ "$(sort "$TMP/camera-labels" | uniq | wc -l | tr -d '[:space:]')" == 10 ]] ||
   fail 'stage labels are not unique'
-[[ "$(find "$TMP/camera" -maxdepth 1 -name '*.jpg' -type f | wc -l | tr -d '[:space:]')" == 11 ]] ||
-  fail 'camera evidence does not contain exactly 11 frames'
-[[ "$(find "$TMP/screenshots" -maxdepth 1 -name '*.png' -type f | wc -l | tr -d '[:space:]')" == 11 ]] ||
-  fail 'native evidence does not contain exactly 11 screenshots'
+[[ "$(find "$TMP/camera" -maxdepth 1 -name '*.jpg' -type f | wc -l | tr -d '[:space:]')" == 10 ]] ||
+  fail 'camera evidence does not contain exactly 10 frames'
+[[ "$(find "$TMP/screenshots" -maxdepth 1 -name '*.png' -type f | wc -l | tr -d '[:space:]')" == 10 ]] ||
+  fail 'native evidence does not contain exactly 10 screenshots'
 
 cp -R "$TMP/camera" "$TMP/noncanonical-endpoint-camera"
 awk -F '\t' -v OFS='\t' \
@@ -500,13 +743,145 @@ fi
 "$RECORD" --camera-dir "$TMP/camera" --screenshot-dir "$TMP/screenshots" \
   --reviewer fixture-reviewer --confirm-all-visible >/dev/null ||
   fail 'review recorder rejected the complete evidence set'
-PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" --camera-dir "$TMP/camera" \
-  --screenshot-dir "$TMP/screenshots" >/dev/null ||
+mkdir -p "$TMP/media-path-shims"
+for shim in bash python3 ffmpeg ffprobe; do
+  cat > "$TMP/media-path-shims/$shim" <<EOF
+#!/bin/sh
+: > '$TMP/verifier-$shim-shim-used'
+exit 0
+EOF
+  chmod 0755 "$TMP/media-path-shims/$shim"
+done
+PATH="$TMP/media-path-shims:/usr/bin:/bin" \
+  BASH_ENV="$TMP/acceptance-bash-env" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" \
+  --camera-dir "$TMP/camera" \
+  --screenshot-dir "$TMP/screenshots" >"$TMP/verify-pass.out" ||
   fail 'strict evidence verifier rejected complete decoded and reviewed evidence'
+for marker in bash python3 ffmpeg ffprobe; do
+  [[ ! -e "$TMP/verifier-$marker-shim-used" ]] ||
+    fail "visual verifier executed a $marker PATH shim"
+done
+[[ ! -e "$TMP/path-bash-env-used" ]] ||
+  fail 'visual verifier sourced BASH_ENV before isolating production tools'
+grep -Eq 'python_binary=/usr/bin/python3 python_sha256=[0-9a-f]{64}' \
+  "$TMP/verify-pass.out" || fail 'visual verifier omitted Python provenance'
+grep -Eq 'ffmpeg_binary=/[^ ]+ ffmpeg_sha256=[0-9a-f]{64}' \
+  "$TMP/verify-pass.out" || fail 'visual verifier omitted FFmpeg provenance'
+grep -Eq 'ffprobe_binary=/[^ ]+ ffprobe_sha256=[0-9a-f]{64}' \
+  "$TMP/verify-pass.out" || fail 'visual verifier omitted FFprobe provenance'
+grep -q ' test_seam=1 ' "$TMP/verify-pass.out" ||
+  fail 'visual verifier PASS omitted the exact test seam'
 if "$VERIFY" --camera-dir "$TMP/camera" --screenshot-dir "$TMP/screenshots" \
   >/dev/null 2>&1; then
   fail 'production verifier accepted evidence collected through test seams'
 fi
+
+# A leftover test-hook environment cannot relax verification of a bundle that
+# claims to be production evidence. The exact seam equality gate must fire
+# before any later provenance inconsistency in this adversarial copy.
+cp -R "$TMP/camera" "$TMP/production-metadata-with-test-hook"
+awk -F '\t' -v OFS='\t' \
+  '$1 == "test_seam" {$2 = "0"} {print}' \
+  "$TMP/production-metadata-with-test-hook/metadata.tsv" > \
+  "$TMP/production-metadata-with-test-hook/metadata.new"
+mv "$TMP/production-metadata-with-test-hook/metadata.new" \
+  "$TMP/production-metadata-with-test-hook/metadata.tsv"
+if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" \
+  --camera-dir "$TMP/production-metadata-with-test-hook" \
+  --screenshot-dir "$TMP/screenshots" \
+  >"$TMP/production-metadata-with-test-hook.out" 2>&1; then
+  fail 'leftover verifier test hook accepted production-marked metadata'
+fi
+grep -q 'verifier hook/evidence test seam mismatch' \
+  "$TMP/production-metadata-with-test-hook.out" ||
+  fail 'leftover verifier test hook did not fail at exact seam equality'
+
+if PLUTO_ACCEPTANCE_FFMPEG_BIN="$TMP/media-path-shims/ffmpeg" \
+  "$VERIFY" --camera-dir "$TMP/camera" --screenshot-dir "$TMP/screenshots" \
+  >"$TMP/verifier-media-override.out" 2>&1; then
+  fail 'production verifier accepted an FFmpeg override'
+fi
+grep -q 'ffmpeg override requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/verifier-media-override.out" ||
+  fail 'production verifier did not diagnose its FFmpeg override gate'
+if LD_LIBRARY_PATH="$TMP/media-path-shims" \
+  "$VERIFY" --camera-dir "$TMP/camera" --screenshot-dir "$TMP/screenshots" \
+  >"$TMP/verifier-loader.out" 2>&1; then
+  fail 'production verifier accepted loader-injection environment'
+fi
+grep -q 'LD_LIBRARY_PATH is forbidden for production verification' \
+  "$TMP/verifier-loader.out" ||
+  fail 'production verifier did not diagnose loader-injection environment'
+
+cp -R "$TMP/camera" "$TMP/split-device-metrics"
+awk -F '=' \
+  '$1 == "device" {$2 = "root@separate-test-fixture"} {print $1 "=" $2}' \
+  "$TMP/split-device-metrics/metrics/summary.txt" > \
+  "$TMP/split-device-metrics/metrics/summary.new"
+mv "$TMP/split-device-metrics/metrics/summary.new" \
+  "$TMP/split-device-metrics/metrics/summary.txt"
+refresh_metrics_review_digest "$TMP/split-device-metrics"
+if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" \
+  --camera-dir "$TMP/split-device-metrics" \
+  --screenshot-dir "$TMP/screenshots" >"$TMP/split-device-metrics.out" 2>&1; then
+  fail 'verifier accepted metrics collected from a different device endpoint'
+fi
+grep -q 'metrics SSH identity does not match the visual device endpoint' \
+  "$TMP/split-device-metrics.out" ||
+  fail 'split-device metrics were rejected for the wrong reason'
+
+cp -R "$TMP/camera" "$TMP/substituted-production-ssh"
+awk -F '=' \
+  '$1 == "transport" {$2 = "ssh"} $1 == "ssh_binary" {$2 = "/tmp/fake-ssh"} {print $1 "=" $2}' \
+  "$TMP/substituted-production-ssh/metrics/summary.txt" > \
+  "$TMP/substituted-production-ssh/metrics/summary.new"
+mv "$TMP/substituted-production-ssh/metrics/summary.new" \
+  "$TMP/substituted-production-ssh/metrics/summary.txt"
+refresh_metrics_review_digest "$TMP/substituted-production-ssh"
+if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" \
+  --camera-dir "$TMP/substituted-production-ssh" \
+  --screenshot-dir "$TMP/screenshots" \
+  >"$TMP/substituted-production-ssh.out" 2>&1; then
+  fail 'verifier accepted an SSH tuple with a substituted production binary'
+fi
+grep -q 'production SSH metrics did not use the pinned /usr/bin/ssh binary' \
+  "$TMP/substituted-production-ssh.out" ||
+  fail 'substituted production SSH binary was rejected for the wrong reason'
+
+cp -R "$TMP/camera" "$TMP/inconsistent-metrics-provenance"
+awk -F '=' \
+  '$1 == "transport" {$2 = "ssh"} $1 == "test_seam" {$2 = "0"} \
+   {print $1 "=" $2}' \
+  "$TMP/inconsistent-metrics-provenance/metrics/summary.txt" > \
+  "$TMP/inconsistent-metrics-provenance/metrics/summary.new"
+mv "$TMP/inconsistent-metrics-provenance/metrics/summary.new" \
+  "$TMP/inconsistent-metrics-provenance/metrics/summary.txt"
+summary_digest="$(sha256_file \
+  "$TMP/inconsistent-metrics-provenance/metrics/summary.txt")"
+awk -v digest="$summary_digest" \
+  '$2 == "summary.txt" {$1 = digest} {print $1 "  " $2}' \
+  "$TMP/inconsistent-metrics-provenance/metrics/SHA256SUMS" > \
+  "$TMP/inconsistent-metrics-provenance/metrics/SHA256SUMS.new"
+mv "$TMP/inconsistent-metrics-provenance/metrics/SHA256SUMS.new" \
+  "$TMP/inconsistent-metrics-provenance/metrics/SHA256SUMS"
+metrics_digest="$(sha256_file \
+  "$TMP/inconsistent-metrics-provenance/metrics/SHA256SUMS")"
+awk -F '\t' -v OFS='\t' -v digest="$metrics_digest" \
+  '{$7 = digest; print}' \
+  "$TMP/inconsistent-metrics-provenance/review.tsv" > \
+  "$TMP/inconsistent-metrics-provenance/review.new"
+mv "$TMP/inconsistent-metrics-provenance/review.new" \
+  "$TMP/inconsistent-metrics-provenance/review.tsv"
+if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" \
+  --camera-dir "$TMP/inconsistent-metrics-provenance" \
+  --screenshot-dir "$TMP/screenshots" \
+  >"$TMP/inconsistent-metrics-provenance.out" 2>&1; then
+  fail 'verifier accepted internally consistent metrics/metadata seam disagreement'
+fi
+grep -q 'metrics transport/test-seam provenance disagrees' \
+  "$TMP/inconsistent-metrics-provenance.out" ||
+  fail 'metrics provenance disagreement was rejected for the wrong reason'
 
 cp -R "$TMP/camera" "$TMP/no-review-camera"
 rm "$TMP/no-review-camera/review.tsv"
@@ -609,7 +984,7 @@ if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" \
   fail 'evidence verifier accepted encoded hash change without decoded Ink pixels'
 fi
 
-printf 'tamper\n' >> "$TMP/camera/10-ink-stroke.jpg"
+printf 'tamper\n' >> "$TMP/camera/09-ink-stroke.jpg"
 if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 "$VERIFY" --camera-dir "$TMP/camera" \
   --screenshot-dir "$TMP/screenshots" >/dev/null 2>&1; then
   fail 'evidence verifier accepted a tampered camera frame'

@@ -15,8 +15,11 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <sstream>
 #include <string_view>
 #include <vector>
 
@@ -34,6 +37,42 @@
 
 namespace pluto {
 namespace {
+
+constexpr std::chrono::milliseconds kDirectInkSemanticsTimeout{4200};
+constexpr std::chrono::milliseconds kDirectInkPresentationTimeout{4000};
+
+bool read_self_process_start_ticks(std::uint64_t *out_ticks) {
+  if (out_ticks == nullptr) {
+    return false;
+  }
+  std::ifstream input("/proc/self/stat");
+  std::string stat;
+  if (!std::getline(input, stat)) {
+    return false;
+  }
+  const std::size_t comm_end = stat.rfind(") ");
+  if (comm_end == std::string::npos) {
+    return false;
+  }
+  std::istringstream fields(stat.substr(comm_end + 2));
+  std::string token;
+  for (unsigned field = 3; field <= 22; ++field) {
+    if (!(fields >> token)) {
+      return false;
+    }
+    if (field == 22) {
+      char *end = nullptr;
+      errno = 0;
+      const unsigned long long parsed = std::strtoull(token.c_str(), &end, 10);
+      if (errno != 0 || end == token.c_str() || *end != '\0' || parsed == 0) {
+        return false;
+      }
+      *out_ticks = static_cast<std::uint64_t>(parsed);
+      return true;
+    }
+  }
+  return false;
+}
 
 std::string join_path(const std::string &base, const char *leaf) {
   return (std::filesystem::path(base) / leaf).string();
@@ -296,6 +335,42 @@ bool prepare_direct_ink_canvas_from_semantics(
   if (wait != DirectInkSemanticsWait::kFound) {
     return wait_failure(wait,
                         "Ink did not mount an editor canvas after create");
+  }
+  return true;
+}
+
+bool prepare_direct_ink_canvas_with_presentation_receipt(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap,
+    const DirectInkPresentationTracker &presentation,
+    std::chrono::milliseconds semantics_timeout,
+    std::chrono::milliseconds presentation_timeout, std::size_t *action_count,
+    DirectInkPresentationProof *proof, DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (!presentation.prove || action_count == nullptr || proof == nullptr ||
+      failure == nullptr ||
+      presentation_timeout <= std::chrono::milliseconds::zero()) {
+    return fail("invalid-control", "invalid Ink presentation tracker");
+  }
+  *action_count = 0;
+  *proof = {};
+  if (!prepare_direct_ink_canvas_from_semantics(
+          state, toggle, tap, semantics_timeout, action_count, failure)) {
+    return false;
+  }
+  // Canvas-ready semantics are only the content predicate. Always cross a
+  // fresh Flutter raster fence and prove one exact retained-surface Full
+  // presenter completion, including the already-mounted actionCount=0 path.
+  if (!presentation.prove(presentation_timeout, proof) ||
+      proof->surface_generation == 0 || proof->frame_id == 0) {
+    return fail("presentation-timeout",
+                "Ink canvas did not complete its exact Full panel proof");
   }
   return true;
 }
@@ -916,6 +991,95 @@ bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
   return true;
 }
 
+bool EngineHost::schedule_frame_on_platform_thread(
+    std::chrono::steady_clock::time_point deadline,
+    std::uint64_t *pre_schedule_surface_generation) {
+  if (pre_schedule_surface_generation == nullptr ||
+      frame_renderer_ == nullptr) {
+    return false;
+  }
+  const auto schedule = [this](std::uint64_t *generation) {
+    *generation = frame_renderer_->flutter_surface_generation();
+    return engine_ != nullptr && engine_library_.loaded() &&
+           engine_library_.procs().ScheduleFrame != nullptr &&
+           engine_library_.procs().ScheduleFrame(engine_) == kSuccess;
+  };
+  if (event_loop_.runs_on_loop_thread()) {
+    return schedule(pre_schedule_surface_generation);
+  }
+  struct Result {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool done = false;
+    bool success = false;
+    std::uint64_t generation = 0;
+  };
+  const auto result = std::make_shared<Result>();
+  event_loop_.post_closure([result, schedule] {
+    std::uint64_t generation = 0;
+    const bool success = schedule(&generation);
+    {
+      std::lock_guard<std::mutex> lock(result->mutex);
+      result->success = success;
+      result->generation = generation;
+      result->done = true;
+    }
+    result->changed.notify_all();
+  });
+  std::unique_lock<std::mutex> lock(result->mutex);
+  if (!result->changed.wait_until(lock, deadline,
+                                  [&] { return result->done; }) ||
+      !result->success) {
+    return false;
+  }
+  *pre_schedule_surface_generation = result->generation;
+  return true;
+}
+
+bool EngineHost::prove_direct_ink_presentation(
+    std::chrono::milliseconds timeout, DirectInkPresentationProof *proof) {
+  if (proof == nullptr || frame_renderer_ == nullptr ||
+      timeout <= std::chrono::milliseconds::zero()) {
+    return false;
+  }
+  *proof = {};
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const auto remaining = [&] {
+    const auto now = std::chrono::steady_clock::now();
+    return now >= deadline
+               ? std::chrono::milliseconds::zero()
+               : std::chrono::duration_cast<std::chrono::milliseconds>(
+                     deadline - now);
+  };
+
+  // The first boundary may be a Flutter frame that was already in flight when
+  // canvas-ready semantics arrived. Requesting and observing a second frame
+  // only after that callback closes the race and makes it post-semantics.
+  std::uint64_t scheduled_after_generation = 0;
+  std::uint64_t generation = 0;
+  if (!schedule_frame_on_platform_thread(deadline,
+                                         &scheduled_after_generation) ||
+      !frame_renderer_->wait_for_flutter_surface_after(
+          scheduled_after_generation, remaining(), &generation)) {
+    return false;
+  }
+  if (!schedule_frame_on_platform_thread(deadline,
+                                         &scheduled_after_generation) ||
+      !frame_renderer_->wait_for_flutter_surface_after(
+          scheduled_after_generation, remaining(), &generation)) {
+    return false;
+  }
+
+  FrameRenderer::ExactPresentationReceipt exact;
+  if (!frame_renderer_->present_retained_surface_full(remaining(), &exact) ||
+      exact.surface_generation < generation || exact.frame_id == 0) {
+    return false;
+  }
+  proof->surface_generation = exact.surface_generation;
+  proof->frame_id = exact.frame_id;
+  return true;
+}
+
 bool EngineHost::send_direct_prepare_ink_canvas(
     const std::string &requested_app_id, std::int64_t expected_pid,
     DirectInkCanvasResult *result, DirectControlFailure *failure) {
@@ -959,17 +1123,35 @@ bool EngineHost::send_direct_prepare_ink_canvas(
     return engine_library_.procs().SendSemanticsAction(engine_, &info) ==
            kSuccess;
   };
+  if (frame_renderer_ == nullptr) {
+    return fail("unavailable", "native presentation tracking is unavailable");
+  }
+  const DirectInkPresentationTracker presentation{
+      .prove = [this](std::chrono::milliseconds timeout,
+                      DirectInkPresentationProof *proof) {
+        return prove_direct_ink_presentation(timeout, proof);
+      }};
   std::size_t action_count = 0;
-  if (!prepare_direct_ink_canvas_from_semantics(
-          &direct_ink_semantics_, toggle, tap, std::chrono::milliseconds(4200),
-          &action_count, failure)) {
+  DirectInkPresentationProof proof;
+  if (!prepare_direct_ink_canvas_with_presentation_receipt(
+          &direct_ink_semantics_, toggle, tap, presentation,
+          kDirectInkSemanticsTimeout, kDirectInkPresentationTimeout,
+          &action_count, &proof, failure)) {
     return false;
+  }
+  std::uint64_t process_start_ticks = 0;
+  if (!read_self_process_start_ticks(&process_start_ticks)) {
+    return fail("identity-unavailable",
+                "could not bind Ink proof to process start ticks");
   }
   *result = DirectInkCanvasResult{
       .app_id = config_.app_id,
       .pid = process_pid,
+      .process_start_ticks = process_start_ticks,
       .action_count = action_count,
       .canvas_ready = true,
+      .surface_generation = proof.surface_generation,
+      .proof_frame_id = proof.frame_id,
   };
   return true;
 }

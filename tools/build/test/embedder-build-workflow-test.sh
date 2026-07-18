@@ -205,17 +205,39 @@ ARM_STANDARD_DRY_RUN="$(
     --output "$ARM_SLICE" --standard
 )"
 assert_contains "$ARM_STANDARD_DRY_RUN" \
-  ".pluto-cache/build/codex-armv7/output/codex 2.35 linux-arm"
+  "dev.pluto.examples.counter"
 assert_contains "$ARM_STANDARD_DRY_RUN" \
-  "$ARM_SLICE/bin/codex"
+  "dev.pluto.examples.motion_lab"
+assert_contains "$ARM_STANDARD_DRY_RUN" \
+  "dev.pluto.examples.ink_lab"
+assert_contains "$ARM_STANDARD_DRY_RUN" \
+  "dev.pluto.validation_lab"
+assert_contains "$ARM_STANDARD_DRY_RUN" \
+  "$ARM_SLICE/apps/dev.pluto.ink"
+[[ "$ARM_STANDARD_DRY_RUN" != *"dev.pluto.codex"* ]] ||
+  fail "linux-arm standard payload included unsupported Paper Codex"
+[[ "$ARM_STANDARD_DRY_RUN" != *"/bin/codex"* ]] ||
+  fail "linux-arm standard payload included a custom Codex CLI"
+if bash "$PAYLOAD_SCRIPT" --dry-run --target-platform linux-arm \
+  --output "$ARM_SLICE" --app codex >/dev/null 2>&1; then
+  fail "linux-arm accepted an explicitly selected unsupported Paper Codex"
+fi
 ARM64_STANDARD_IDS="$(printf '%s\n' "$STANDARD_DRY_RUN" |
   sed -n 's|.*/targets/linux-arm64/apps/\(dev\.[^ /]*\).*|\1|p' |
   LC_ALL=C sort -u)"
 ARM_STANDARD_IDS="$(printf '%s\n' "$ARM_STANDARD_DRY_RUN" |
   sed -n 's|.*/targets/linux-arm/apps/\(dev\.[^ /]*\).*|\1|p' |
   LC_ALL=C sort -u)"
-[[ -n "$ARM64_STANDARD_IDS" && "$ARM64_STANDARD_IDS" = "$ARM_STANDARD_IDS" ]] ||
-  fail "--standard selects different application identities by target"
+[[ -n "$ARM64_STANDARD_IDS" && -n "$ARM_STANDARD_IDS" ]] ||
+  fail "--standard did not select applications for both targets"
+[[ "$(comm -23 \
+  <(printf '%s\n' "$ARM64_STANDARD_IDS") \
+  <(printf '%s\n' "$ARM_STANDARD_IDS"))" == "dev.pluto.codex" ]] ||
+  fail "Paper Codex must be the only standard-app capability difference"
+[[ -z "$(comm -13 \
+  <(printf '%s\n' "$ARM64_STANDARD_IDS") \
+  <(printf '%s\n' "$ARM_STANDARD_IDS"))" ]] ||
+  fail "linux-arm selected an app unavailable on linux-arm64"
 
 RELEASE_DRY_RUN="$(bash "$RELEASE_SCRIPT" --dry-run)"
 assert_contains "$RELEASE_DRY_RUN" "embedder-device.sh --dry-run"
@@ -228,6 +250,9 @@ assert_contains "$RELEASE_DRY_RUN" "targets/linux-arm"
 assert_contains "$RELEASE_DRY_RUN" "write_release_manifest.dart"
 assert_contains "$RELEASE_DRY_RUN" "write-release-revision"
 assert_contains "$RELEASE_DRY_RUN" "--git-revision"
+if bash "$RELEASE_SCRIPT" --dry-run --codex-bin /tmp/codex >/dev/null 2>&1; then
+  fail "universal release still accepts an alternate Codex binary"
+fi
 EXPECTED_RELEASE_NEXT="Universal release handoff: pluto provision --payload-dir $ROOT/build/pluto-release"
 [[ "$(printf '%s\n' "$RELEASE_DRY_RUN" | tail -1)" == "$EXPECTED_RELEASE_NEXT" ]] ||
   fail "universal release dry run did not end with the common provision command"

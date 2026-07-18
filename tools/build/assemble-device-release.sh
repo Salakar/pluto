@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTPUT="$ROOT/build/pluto-release"
 DRY_RUN=0
-CODEX_BIN=""
 FLUTTER_VERSION="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/flutter.version")"
 SDK="${PLUTO_SDK:-$HOME/.pluto/sdk/$FLUTTER_VERSION}"
 DART="$SDK/bin/cache/dart-sdk/bin/dart"
@@ -17,16 +16,16 @@ usage() {
   cat <<'EOF'
 Usage: tools/build/assemble-device-release.sh [options]
 
-Build one universal release set containing the same standard Pluto apps for
-linux-arm and linux-arm64. Target compilers and payload workers remain private;
-the resulting release manifest freezes one clean Git revision, all toolchain
-pins, and the SHA-256 of every file in both self-contained slices.
+Build one universal release set containing the common Pluto app set on
+linux-arm and linux-arm64, plus apps whose manifests declare the selected
+target. Target compilers and payload workers remain private; the resulting
+release manifest freezes one clean Git revision, all toolchain pins, and the
+SHA-256 of every file in both self-contained slices.
 
 Options:
-  --output DIR     override build/pluto-release
-  --codex-bin PATH pinned ARMv7 Codex CLI input
-  --dry-run        print the complete two-target build without changing files
-  -h, --help       show this help
+  --output DIR  override build/pluto-release
+  --dry-run     print the complete two-target build without changing files
+  -h, --help    show this help
 EOF
 }
 
@@ -88,12 +87,6 @@ while (($# > 0)); do
       OUTPUT="${1#*=}"
       OUTPUT="${OUTPUT%/}"
       ;;
-    --codex-bin)
-      shift
-      (($# > 0)) || die "--codex-bin requires a value"
-      CODEX_BIN="$1"
-      ;;
-    --codex-bin=*) CODEX_BIN="${1#*=}" ;;
     --dry-run) DRY_RUN=1 ;;
     -h | --help)
       usage
@@ -148,9 +141,6 @@ ARM_ARGS=(
   --standard
   --output "$STAGE/targets/linux-arm"
 )
-if [[ -n "$CODEX_BIN" ]]; then
-  ARM_ARGS+=(--codex-bin "$CODEX_BIN")
-fi
 if ((DRY_RUN == 1)); then
   ARM64_ARGS+=(--dry-run)
   ARM_ARGS+=(--dry-run)

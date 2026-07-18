@@ -1,8 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COLLECTOR="$ROOT/tools/device/diagnostics/acceptance-metrics/collect.sh"
+VISUAL_VERIFIER="$ROOT/tools/device/diagnostics/verify-visual-acceptance.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 FIXTURE="$TMP/device"
@@ -10,6 +11,25 @@ TRANSPORT="$TMP/transport.sh"
 REVISION=0123456789abcdef0123456789abcdef01234567
 
 fail() { echo "acceptance-metrics_test: FAIL: $*" >&2; exit 1; }
+
+[[ "$(head -n 1 "$COLLECTOR")" == '#!/bin/bash -p' &&
+  "$(head -n 1 "$VISUAL_VERIFIER")" == '#!/bin/bash -p' ]] ||
+  fail 'acceptance collection/verifier entrypoints do not use privileged absolute Bash'
+if /bin/bash "$COLLECTOR" >"$TMP/unprivileged-collector.out" 2>&1; then
+  fail 'acceptance collector accepted unprivileged Bash'
+fi
+grep -q 'directly or with /bin/bash -p' "$TMP/unprivileged-collector.out" ||
+  fail 'acceptance collector did not diagnose unprivileged Bash'
+
+host_sha() {
+  if [[ -x /usr/bin/sha256sum ]]; then
+    /usr/bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  elif [[ -x /bin/sha256sum ]]; then
+    /bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  else
+    LC_ALL=C LANG=C /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
+  fi
+}
 
 mkdir -p \
   "$FIXTURE/home/root/pluto/share" \
@@ -79,12 +99,9 @@ for file in pluto-embedder pluto-controlctl pluto-session.sh pluto-session-once.
   chmod 755 "$FIXTURE/home/root/pluto/bin/$file"
 done
 printf 'fixture engine\n' > "$FIXTURE/home/root/pluto/engine/release/libflutter_engine.so"
-printf 'fixture codex\n' > "$FIXTURE/home/root/bin/codex"
-chmod 755 "$FIXTURE/home/root/bin/codex"
-
 for app_id in dev.pluto.launcher dev.pluto.examples.counter \
   dev.pluto.examples.motion_lab dev.pluto.examples.ink_lab \
-  dev.pluto.validation_lab dev.pluto.codex dev.pluto.ink; do
+  dev.pluto.validation_lab dev.pluto.ink; do
   app_root="$FIXTURE/home/root/pluto/apps/$app_id"
   [[ "$app_id" == dev.pluto.launcher ]] && app_root="$FIXTURE/home/root/pluto/launcher"
   mkdir -p "$app_root/bundle/lib"
@@ -219,7 +236,10 @@ port=$2
 samples=$3
 interval=$4
 collector=$5
-[ "$device" = root@127.0.0.1 ] || exit 64
+case "$device" in
+  root@127.0.0.1) ;;
+  *) exit 64 ;;
+esac
 [ "$port" = 22202 ] || exit 64
 PLUTO_METRICS_TEST_ROOT="$FIXTURE_ROOT" \
 PLUTO_METRICS_SAMPLE_COUNT="$samples" \
@@ -233,18 +253,228 @@ sh "$collector"
 EOF
 chmod 755 "$TRANSPORT"
 
+# Exercise the exact single-value parser used by the final verifier. In
+# particular, command substitution must not hide a duplicate trailing blank
+# row by stripping its newlines.
+/usr/bin/awk '
+  /^one_summary_value\(\) \{/ { emit = 1 }
+  emit { print }
+  emit && /^}$/ { exit }
+' "$VISUAL_VERIFIER" > "$TMP/one-summary-value.sh"
+printf 'status=PASS\n' > "$TMP/one-summary-positive.txt"
+(
+  # shellcheck disable=SC1090
+  source "$TMP/one-summary-value.sh"
+  [[ "$(one_summary_value status "$TMP/one-summary-positive.txt")" == PASS ]]
+) || fail 'visual verifier single-summary parser rejected one nonblank row'
+for duplicate_rows in nonblank-then-blank blank-then-nonblank; do
+  case "$duplicate_rows" in
+    nonblank-then-blank) printf 'status=PASS\nstatus=\n' ;;
+    blank-then-nonblank) printf 'status=\nstatus=PASS\n' ;;
+  esac > "$TMP/one-summary-duplicate.txt"
+  if (
+    # shellcheck disable=SC1090
+    source "$TMP/one-summary-value.sh"
+    one_summary_value status "$TMP/one-summary-duplicate.txt" >/dev/null
+  ); then
+    fail "visual verifier accepted duplicated blank/nonblank summary rows: $duplicate_rows"
+  fi
+done
+
+DUPLICATE_TRANSPORT="$TMP/duplicate-transport.sh"
+cat > "$DUPLICATE_TRANSPORT" <<EOF
+#!/bin/sh
+"$TRANSPORT" "\$@" | /usr/bin/awk '
+  /^collection.status=PASS\$/ { print "identity.profile_id=" }
+  { print }
+'
+EOF
+chmod 755 "$DUPLICATE_TRANSPORT"
+
+mkdir -p "$TMP/path-shim"
+cat > "$TMP/path-shim/ssh" <<'EOF'
+#!/bin/sh
+: > "$PATH_SHIM_MARKER"
+exit 0
+EOF
+cat > "$TMP/path-shim/python3" <<'EOF'
+#!/bin/sh
+: > "$PYTHON_PATH_SHIM_MARKER"
+exit 0
+EOF
+cat > "$TMP/path-shim/sha256sum" <<'EOF'
+#!/bin/sh
+: > "$SHA_PATH_SHIM_MARKER"
+printf '%064d  %s\n' 0 "$1"
+EOF
+for shim in bash dirname awk; do
+  cat > "$TMP/path-shim/$shim" <<EOF
+#!/bin/sh
+: > '$TMP/path-$shim-used'
+exit 0
+EOF
+done
+chmod 755 "$TMP/path-shim/ssh" "$TMP/path-shim/python3" \
+  "$TMP/path-shim/sha256sum" "$TMP/path-shim/bash" \
+  "$TMP/path-shim/dirname" "$TMP/path-shim/awk"
+mkdir -p "$TMP/python-path-shim"
+cat > "$TMP/python-path-shim/ipaddress.py" <<EOF
+open('$TMP/python-module-shim-used', 'w').close()
+raise RuntimeError('acceptance identity imported a PYTHONPATH shim')
+EOF
+cat > "$TMP/acceptance-bash-env" <<EOF
+: > '$TMP/path-bash-env-used'
+EOF
+if PATH="$TMP/path-shim:$PATH" \
+  BASH_ENV="$TMP/acceptance-bash-env" \
+  PATH_SHIM_MARKER="$TMP/path-shim-used" \
+  PYTHON_PATH_SHIM_MARKER="$TMP/python-path-shim-used" \
+  SHA_PATH_SHIM_MARKER="$TMP/sha-path-shim-used" \
+  PYTHONPATH="$TMP/python-path-shim" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 65534 \
+    --samples 3 --interval-seconds 1 --output "$TMP/path-shim-output" \
+    >"$TMP/path-shim.out" 2>&1; then
+  fail 'production collector unexpectedly completed against a closed local port'
+fi
+[[ ! -e "$TMP/path-shim-used" ]] ||
+  fail 'production collection resolved SSH through PATH instead of /usr/bin/ssh'
+[[ ! -e "$TMP/python-path-shim-used" ]] ||
+  fail 'production collection resolved Python through PATH instead of /usr/bin/python3'
+[[ ! -e "$TMP/sha-path-shim-used" ]] ||
+  fail 'production collection resolved SHA-256 through PATH'
+[[ ! -e "$TMP/python-module-shim-used" ]] ||
+  fail 'production identity validation imported a PYTHONPATH module shim'
+for marker in bash dirname awk bash-env; do
+  [[ ! -e "$TMP/path-$marker-used" ]] ||
+    fail "production collection executed a $marker startup/PATH shim"
+done
+[[ ! -e "$TMP/path-shim-output" ]] ||
+  fail 'failed pinned-SSH probe published an evidence directory'
+if (
+  dirname() {
+    : > "$TMP/path-exported-function-used"
+    /usr/bin/dirname "$@"
+  }
+  export -f dirname
+  PATH="$TMP/path-shim:$PATH" \
+    "$COLLECTOR" --device root@127.0.0.1 --port 65534 \
+    --samples 3 --interval-seconds 1 --output "$TMP/function-shim-output" \
+    >/dev/null 2>&1
+); then
+  fail 'production collector unexpectedly completed with an exported function'
+fi
+[[ ! -e "$TMP/path-exported-function-used" ]] ||
+  fail 'production collector imported an exported shell function'
+mkdir -p "$TMP/loader-search"
+if LD_LIBRARY_PATH="$TMP/loader-search" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 65534 \
+  --samples 3 --interval-seconds 1 --output "$TMP/loader-output" \
+  >"$TMP/loader.out" 2>&1; then
+  fail 'production collector accepted loader-injection environment'
+fi
+grep -q 'LD_LIBRARY_PATH is forbidden for production collection' \
+  "$TMP/loader.out" ||
+  fail 'production collector did not diagnose loader-injection environment'
+
 run_collect() {
   local output="$1"
   FIXTURE_ROOT="$FIXTURE" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
   PLUTO_ACCEPTANCE_TRANSPORT="$TRANSPORT" \
-    bash "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
       --samples 3 --interval-seconds 1 --output "$output"
 }
+
+if FIXTURE_ROOT="$FIXTURE" \
+  PLUTO_ACCEPTANCE_TRANSPORT="$TRANSPORT" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$TMP/unmarked-transport" \
+    >"$TMP/unmarked-transport.out" 2>&1; then
+  fail 'collector accepted a custom transport without the test seam'
+fi
+grep -q 'custom transport requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/unmarked-transport.out" ||
+  fail 'unmarked custom transport did not fail during collector preflight'
+[[ ! -e "$TMP/unmarked-transport" ]] ||
+  fail 'rejected custom transport published an evidence directory'
+
+if PLUTO_SDK="$TMP/untrusted-sdk" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$TMP/unmarked-sdk" \
+    >"$TMP/unmarked-sdk.out" 2>&1; then
+  fail 'collector accepted a PLUTO_SDK override as production evidence'
+fi
+grep -q 'PLUTO_SDK override requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/unmarked-sdk.out" ||
+  fail 'unmarked PLUTO_SDK override did not fail during collector preflight'
+[[ ! -e "$TMP/unmarked-sdk" ]] ||
+  fail 'rejected PLUTO_SDK override published an evidence directory'
+
+if PLUTO_METRICS_SYSTEMCTL="$TMP/untrusted-systemctl" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$TMP/unmarked-metrics-tool" \
+    >"$TMP/unmarked-metrics-tool.out" 2>&1; then
+  fail 'collector accepted a PLUTO_METRICS_* tool override as production evidence'
+fi
+grep -q 'PLUTO_METRICS_\* overrides require PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/unmarked-metrics-tool.out" ||
+  fail 'unmarked PLUTO_METRICS_* override did not fail during collector preflight'
+[[ ! -e "$TMP/unmarked-metrics-tool" ]] ||
+  fail 'rejected PLUTO_METRICS_* override published an evidence directory'
+
+if PLUTO_ACCEPTANCE_BEFORE_PUBLISH_HOOK="$TMP/untrusted-publish-hook" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$TMP/unmarked-publish-hook" \
+    >"$TMP/unmarked-publish-hook.out" 2>&1; then
+  fail 'collector accepted a publication hook as production evidence'
+fi
+grep -q 'publication hook requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/unmarked-publish-hook.out" ||
+  fail 'unmarked publication hook did not fail during collector preflight'
+[[ ! -e "$TMP/unmarked-publish-hook" ]] ||
+  fail 'rejected publication hook published an evidence directory'
+
+if FIXTURE_ROOT="$FIXTURE" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
+  PLUTO_ACCEPTANCE_TRANSPORT="$DUPLICATE_TRANSPORT" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$TMP/duplicate-evidence-value" \
+    >"$TMP/duplicate-evidence-value.out" 2>&1; then
+  fail 'collector accepted duplicated nonblank/blank evidence rows'
+fi
+[[ ! -e "$TMP/duplicate-evidence-value" ]] ||
+  fail 'duplicate evidence-row rejection published an evidence directory'
 
 OUT="$TMP/pass"
 run_collect "$OUT" >/dev/null
 [[ -f "$OUT/device-evidence.txt" ]] || fail 'positive bundle omitted evidence'
 [[ "$(tail -n 1 "$OUT/device-evidence.txt")" == collection.status=PASS ]] || fail 'positive bundle omitted terminal PASS'
+grep -q '^transport=test-hook$' "$OUT/summary.txt" ||
+  fail 'custom transport bundle was not permanently marked'
+grep -q '^ssh_binary=not-used$' "$OUT/summary.txt" ||
+  fail 'custom transport bundle did not record that SSH was bypassed'
+grep -q '^test_seam=1$' "$OUT/summary.txt" ||
+  fail 'custom transport bundle omitted its test seam'
+grep -q '^device=root@127.0.0.1$' "$OUT/summary.txt" ||
+  fail 'custom transport bundle omitted its validated device identity'
+grep -q '^port=22202$' "$OUT/summary.txt" ||
+  fail 'custom transport bundle omitted its validated numeric port'
+grep -Fqx "identity_helper_sha256=$(host_sha "$ROOT/tools/device/diagnostics/acceptance_identity.py")" \
+  "$OUT/summary.txt" || fail 'bundle omitted the exact identity-helper provenance'
+grep -Fqx "remote_collector_sha256=$(host_sha "$ROOT/tools/device/diagnostics/acceptance-metrics/remote-collector.sh")" \
+  "$OUT/summary.txt" || fail 'bundle omitted the exact remote-collector provenance'
+grep -Fqx "manifest_verifier_sha256=$(host_sha "$ROOT/tools/device/diagnostics/acceptance-metrics/verify_manifest.dart")" \
+  "$OUT/summary.txt" || fail 'bundle omitted the exact manifest-verifier provenance'
+grep -q '^python_binary=/usr/bin/python3$' "$OUT/summary.txt" ||
+  fail 'bundle omitted the pinned Python interpreter'
+grep -Fqx "python_sha256=$(host_sha /usr/bin/python3)" "$OUT/summary.txt" ||
+  fail 'bundle omitted the exact Python interpreter provenance'
+grep -q '^dart_binary=not-used$' "$OUT/summary.txt" ||
+  fail 'manifest-free bundle did not mark Dart as unused'
+grep -q '^dart_sha256=not-used$' "$OUT/summary.txt" ||
+  fail 'manifest-free bundle did not mark Dart provenance as unused'
+grep -q '^remote_shell=/bin/sh$' "$OUT/summary.txt" ||
+  fail 'bundle omitted the exact remote shell contract'
 grep -q '^warm.stopped_count=1$' "$OUT/device-evidence.txt" || fail 'warm stopped process was not measured'
 grep -q '^health.seq_delta=2$' "$OUT/device-evidence.txt" || fail 'health progression was not measured'
 [[ "$(grep -c '^sample.process .* role=warm-stopped ' "$OUT/device-evidence.txt")" -eq 3 ]] || fail 'warm process samples are incomplete'
@@ -257,12 +487,167 @@ grep -q '^health.seq_delta=2$' "$OUT/device-evidence.txt" || fail 'health progre
   fi
 ) || fail 'bundle digest manifest did not verify'
 
+# Deterministically substitute the destination after the collector's initial
+# nonexistence check but before rename. The post-move inode/device fence must
+# reject it, remove any nested staging tree, and never print PASS.
+PUBLISH_RACE_HOOK="$TMP/publish-race-hook.sh"
+cat > "$PUBLISH_RACE_HOOK" <<'EOF'
+#!/bin/sh
+mkdir "$1"
+printf 'substituted\n' > "$1/sentinel"
+EOF
+chmod 755 "$PUBLISH_RACE_HOOK"
+RACED_OUTPUT="$TMP/raced-output"
+if FIXTURE_ROOT="$FIXTURE" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
+  PLUTO_ACCEPTANCE_TRANSPORT="$TRANSPORT" \
+  PLUTO_ACCEPTANCE_BEFORE_PUBLISH_HOOK="$PUBLISH_RACE_HOOK" \
+  "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$RACED_OUTPUT" \
+    >"$TMP/publish-race.out" 2>"$TMP/publish-race.err"; then
+  fail 'collector accepted a substituted publication destination'
+fi
+grep -q 'output destination was substituted during publication' \
+  "$TMP/publish-race.err" ||
+  fail 'publication substitution did not fail at the inode/device fence'
+if grep -q 'acceptance metrics: PASS' "$TMP/publish-race.out"; then
+  fail 'publication substitution printed a false PASS'
+fi
+[[ -f "$RACED_OUTPUT/sentinel" ]] ||
+  fail 'publication race fixture did not substitute the destination'
+[[ ! -e "$RACED_OUTPUT/summary.txt" &&
+  ! -e "$RACED_OUTPUT/device-evidence.txt" ]] ||
+  fail 'publication substitution exposed an accepted bundle at the destination'
+[[ -z "$(find "$RACED_OUTPUT" -mindepth 1 -type d -name '.*.partial.*' -print -quit)" ]] ||
+  fail 'publication substitution left its nested staging bundle behind'
+
+OUT_SCOPED_IPV6="$TMP/scoped-ipv6"
+mkdir -p "$TMP/ssh-bin"
+cat > "$TMP/ssh-bin/ssh" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 22 ] || exit 64
+[ "$1" = -F ] && [ "$2" = /dev/null ] || exit 64
+[ "$3" = -o ] && [ "$4" = BatchMode=yes ] || exit 64
+[ "$5" = -o ] && [ "$6" = ConnectTimeout=8 ] || exit 64
+[ "$7" = -o ] && [ "$8" = StrictHostKeyChecking=yes ] || exit 64
+[ "$9" = -o ] && [ "${10}" = ProxyCommand=none ] || exit 64
+[ "${11}" = -o ] && [ "${12}" = CanonicalizeHostname=no ] || exit 64
+[ "${13}" = -o ] && [ "${14}" = ControlMaster=no ] || exit 64
+[ "${15}" = -o ] && [ "${16}" = ControlPath=none ] || exit 64
+[ "${17}" = -o ] && [ "${18}" = ControlPersist=no ] || exit 64
+[ "${19}" = -p ] && [ "${20}" = "$EXPECTED_SSH_PORT" ] || exit 64
+[ "${21}" = "$EXPECTED_SSH_TARGET" ] || exit 64
+expected_remote_command='unset PLUTO_METRICS_ROOT PLUTO_METRICS_RUN_DIR PLUTO_METRICS_TEST_ROOT PLUTO_METRICS_SYSTEMCTL PLUTO_METRICS_JOURNALCTL PLUTO_METRICS_UNAME PLUTO_METRICS_SLEEP PLUTO_METRICS_DATE PLUTO_METRICS_STAT PLUTO_METRICS_SHA256SUM; PLUTO_METRICS_SAMPLE_COUNT=3 PLUTO_METRICS_SAMPLE_INTERVAL=1 /bin/sh -s'
+[ "${22}" = "$expected_remote_command" ] ||
+  exit 64
+PLUTO_METRICS_TEST_ROOT="$FIXTURE_ROOT" \
+PLUTO_METRICS_SAMPLE_COUNT=3 \
+PLUTO_METRICS_SAMPLE_INTERVAL=1 \
+PLUTO_METRICS_SYSTEMCTL="$FIXTURE_ROOT/bin/systemctl" \
+PLUTO_METRICS_JOURNALCTL="$FIXTURE_ROOT/bin/journalctl" \
+PLUTO_METRICS_UNAME="$FIXTURE_ROOT/bin/uname" \
+PLUTO_METRICS_SLEEP="$FIXTURE_ROOT/bin/sleep" \
+PLUTO_METRICS_SHA256SUM=sha256sum \
+sh -s
+EOF
+chmod 755 "$TMP/ssh-bin/ssh"
+if FIXTURE_ROOT="$FIXTURE" \
+  PLUTO_ACCEPTANCE_SSH_BIN="$TMP/ssh-bin/ssh" \
+  "$COLLECTOR" --device 'root@fe80::1%en7' --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$TMP/unmarked-ssh-override" \
+    >"$TMP/unmarked-ssh-override.out" 2>&1; then
+  fail 'collector accepted an SSH binary override without the test seam'
+fi
+grep -q 'SSH binary override requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/unmarked-ssh-override.out" ||
+  fail 'unmarked SSH binary override did not fail during collector preflight'
+[[ ! -e "$TMP/unmarked-ssh-override" ]] ||
+  fail 'rejected SSH binary override published an evidence directory'
+
+FIXTURE_ROOT="$FIXTURE" \
+EXPECTED_SSH_TARGET='root@fe80::1%en7' \
+EXPECTED_SSH_PORT=22202 \
+PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
+PLUTO_ACCEPTANCE_SSH_BIN="$TMP/ssh-bin/ssh" \
+  "$COLLECTOR" --device 'root@fe80::1%en7' --port 22202 \
+    --samples 3 --interval-seconds 1 --output "$OUT_SCOPED_IPV6" >/dev/null
+[[ -f "$OUT_SCOPED_IPV6/device-evidence.txt" ]] ||
+  fail 'scoped IPv6 collection omitted evidence'
+grep -q 'device=root@fe80::1%en7 port=22202' \
+  "$OUT_SCOPED_IPV6/commands.log" ||
+  fail 'scoped IPv6 endpoint was not preserved as one SSH argument'
+grep -q '^transport=test-hook$' "$OUT_SCOPED_IPV6/summary.txt" ||
+  fail 'scoped IPv6 SSH override was not permanently marked as a test hook'
+grep -Fqx "ssh_binary=$TMP/ssh-bin/ssh" "$OUT_SCOPED_IPV6/summary.txt" ||
+  fail 'scoped IPv6 collection omitted the exact SSH binary override'
+grep -q '^test_seam=1$' "$OUT_SCOPED_IPV6/summary.txt" ||
+  fail 'scoped IPv6 SSH override omitted its test seam'
+
+OUT_EMBEDDED_PORT="$TMP/embedded-port"
+FIXTURE_ROOT="$FIXTURE" \
+EXPECTED_SSH_TARGET=root@127.0.0.1 \
+EXPECTED_SSH_PORT=22202 \
+PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
+PLUTO_ACCEPTANCE_SSH_BIN="$TMP/ssh-bin/ssh" \
+  "$COLLECTOR" --device root@127.0.0.1:22202 \
+    --samples 3 --interval-seconds 1 --output "$OUT_EMBEDDED_PORT" >/dev/null
+grep -q '^device=root@127.0.0.1$' "$OUT_EMBEDDED_PORT/summary.txt" ||
+  fail 'embedded-port collection did not canonicalize the SSH invocation target'
+grep -q '^port=22202$' "$OUT_EMBEDDED_PORT/summary.txt" ||
+  fail 'embedded parsed port was not propagated to the invocation and summary'
+grep -q 'device=root@127.0.0.1 port=22202' "$OUT_EMBEDDED_PORT/commands.log" ||
+  fail 'embedded parsed port was not propagated to the transcript'
+
+if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
+  PLUTO_ACCEPTANCE_SSH_BIN="$TMP/ssh-bin/ssh" \
+  "$COLLECTOR" --device root@127.0.0.1:22202 --port 22203 \
+    --samples 3 --interval-seconds 1 --output "$TMP/conflicting-port" \
+    >/dev/null 2>&1; then
+  fail 'collector accepted conflicting embedded and explicit ports'
+fi
+[[ ! -e "$TMP/conflicting-port" ]] ||
+  fail 'conflicting port rejection published an evidence directory'
+
+invalid_scope_index=0
+for invalid_scope_target in \
+  'root@example%en7' \
+  'root@127.0.0.1%en7' \
+  'root@fe80::1%en7;bad' \
+  'root@fe80::1%-oProxyCommand=x' \
+  'root@fe80::1%en7%extra' \
+  'root@fe80::1%abcdefghijklmnop' \
+  'root@fe80::1%_en7' \
+  'root@fe80::1%'; do
+  invalid_scope_index=$((invalid_scope_index + 1))
+  invalid_output="$TMP/invalid-scope-$invalid_scope_index"
+  if PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
+    PLUTO_ACCEPTANCE_SSH_BIN="$TMP/ssh-bin/ssh" \
+    "$COLLECTOR" --device "$invalid_scope_target" --port 22202 \
+      --samples 3 --interval-seconds 1 --output "$invalid_output" \
+      >/dev/null 2>&1; then
+    fail "collector accepted unsafe IPv6 scope: $invalid_scope_target"
+  fi
+  [[ ! -e "$invalid_output" ]] ||
+    fail "unsafe IPv6 scope rejection published evidence: $invalid_scope_target"
+done
+
 printf 'one-shot\n' > "$FIXTURE/service-mode"
 if run_collect "$TMP/rm1-one-shot" >/dev/null 2>&1; then
   fail 'one-shot ownership was accepted while the boot-default recovery gate was enabled'
 fi
 [[ ! -e "$TMP/rm1-one-shot" ]] || fail 'rejected RM1 one-shot run published a partial bundle'
 printf 'move\n' > "$FIXTURE/profile-mode"
+printf 'fixture codex\n' > "$FIXTURE/home/root/bin/codex"
+chmod 755 "$FIXTURE/home/root/bin/codex"
+mkdir -p "$FIXTURE/home/root/pluto/apps/dev.pluto.codex/bundle/lib"
+printf '{"id":"dev.pluto.codex"}\n' \
+  > "$FIXTURE/home/root/pluto/apps/dev.pluto.codex/manifest.json"
+printf '{"mode":"release","target":"linux-arm64"}\n' \
+  > "$FIXTURE/home/root/pluto/apps/dev.pluto.codex/build-metadata.json"
+printf '{"buildMode":"release","engineFlavor":"release"}\n' \
+  > "$FIXTURE/home/root/pluto/apps/dev.pluto.codex/install.json"
+printf 'aot dev.pluto.codex\n' \
+  > "$FIXTURE/home/root/pluto/apps/dev.pluto.codex/bundle/lib/app.so"
 OUT_ONCE="$TMP/pass-once"
 run_collect "$OUT_ONCE" >/dev/null
 grep -q '^service.supervisor.unit=pluto-session-once.service$' \
@@ -272,6 +657,8 @@ grep -q '^identity.profile_id=move$' \
 grep -q '^service.xochitl.active_state=inactive$' \
   "$OUT_ONCE/device-evidence.txt" || fail 'one-shot evidence did not prove stock xochitl inactive'
 rm -f "$FIXTURE/service-mode" "$FIXTURE/profile-mode"
+rm -f "$FIXTURE/home/root/bin/codex"
+rm -rf "$FIXTURE/home/root/pluto/apps/dev.pluto.codex"
 
 printf 'gallery3_drm\n' > "$FIXTURE/driver-mode"
 if run_collect "$TMP/contradictory-driver" >/dev/null 2>&1; then
@@ -441,12 +828,13 @@ chmod 755 "$FAKE_DART"
 run_fenced_collect() {
   local mode="$1" manifest="$2" output="$3" error="$4"
   FIXTURE_ROOT="$FIXTURE" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
   PLUTO_ACCEPTANCE_TRANSPORT="$TRANSPORT" \
   PLUTO_SDK="$FAKE_SDK" \
   FAKE_DART_MODE="$mode" \
   FAKE_REPLACEMENT_MANIFEST="${FAKE_REPLACEMENT_MANIFEST:-}" \
   FAKE_PROOF_SHA="${FAKE_PROOF_SHA:-}" \
-    bash "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
+    "$COLLECTOR" --device root@127.0.0.1 --port 22202 \
       --samples 3 --interval-seconds 1 --release-manifest "$manifest" \
       --output "$output" >/dev/null 2>"$error"
 }

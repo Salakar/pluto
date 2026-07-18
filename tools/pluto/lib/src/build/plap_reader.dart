@@ -212,6 +212,16 @@ final class PlapArchive {
     _SliceIdentity? commonIdentity;
     for (final MapEntry<String, List<PlapEntry>> target
         in targetEntries.entries) {
+      final AppTargetPlatform manifestTarget = AppTargetPlatform.fromWireName(
+        target.key,
+      )!;
+      if (!appManifest.targets.contains(manifestTarget)) {
+        throw ArtifactVerificationException(
+          message: 'Package manifest does not support target ${target.key}.',
+          remediation:
+              'Rebuild the package using only its declared target slices.',
+        );
+      }
       final _ValidatedArchiveSlice validated = _validateTargetSlice(
         target: target.key,
         canonicalEntries: target.value,

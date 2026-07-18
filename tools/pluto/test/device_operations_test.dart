@@ -228,6 +228,7 @@ Future<File> _writePlap(
                   'flutterVersion': '3.44.4',
                   'engineCommit': _engineCommit,
                 },
+                'targets': <Object?>['linux-arm', 'linux-arm64'],
                 'permissions': <Object?>[],
                 'display': <String, Object?>{
                   'orientations': <Object?>['portrait'],
@@ -331,6 +332,7 @@ String _manifestJson({
     'flutterVersion': '3.44.4',
     'engineCommit': _engineCommit,
   },
+  'targets': <Object?>['linux-arm', 'linux-arm64'],
   'permissions': <Object?>[],
   'display': <String, Object?>{
     'orientations': <Object?>['portrait'],

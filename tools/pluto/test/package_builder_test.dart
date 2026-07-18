@@ -700,6 +700,7 @@ Uint8List _manifest({String appId = 'dev.example.notes', bool debug = false}) {
           'flutterVersion': '3.44.4',
           'engineCommit': _engine,
         },
+        'targets': <Object?>['linux-arm', 'linux-arm64'],
         'permissions': <Object?>[],
         'display': <String, Object?>{
           'orientations': <Object?>['portrait'],

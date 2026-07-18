@@ -814,6 +814,7 @@ AppManifest _decodeManifest({
     "flutterVersion": "3.44.4",
     "engineCommit": "a10d8ac38de835021c8d2f920dbf50a920ccc030"
   },
+  "targets": ["linux-arm", "linux-arm64"],
   "permissions": ["device.info", "settings.read"],
   "display": {
     "orientations": ["portrait", "landscapeLeft", "landscapeRight"],

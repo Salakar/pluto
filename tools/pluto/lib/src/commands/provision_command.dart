@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import '../artifacts/checksums.dart';
 import '../build/release_pipeline.dart';
@@ -164,12 +163,6 @@ final class ProvisionCommand extends PlutoCommand {
         usageException('Unsupported payload target: $payloadTarget.');
       }
       final bool armPayload = targetPlatform == PlutoTargetPlatform.linuxArm;
-      final bool includesCodex = apps.any(
-        (PayloadApp app) => app.appId == 'dev.pluto.codex',
-      );
-      final PayloadFile? armCodex = armPayload && includesCodex
-          ? _resolveArmCodex(payloadDir)
-          : null;
 
       final String releaseEngine = _resolvePinnedAotEngine(
         payloadDir: payloadDir,
@@ -239,7 +232,6 @@ final class ProvisionCommand extends PlutoCommand {
             localPath: profileEngine,
             remoteRelative: 'engine/profile/libflutter_engine.so',
           ),
-        ?armCodex,
         if (allowDebug && debugEngine != null)
           PayloadFile(
             localPath: debugEngine,
@@ -406,103 +398,6 @@ final class ProvisionCommand extends PlutoCommand {
 
   FileSystemEntityType _entityType(String path) =>
       FileSystemEntity.typeSync(path, followLinks: false);
-
-  PayloadFile _resolveArmCodex(String payloadDir) {
-    final File pinFile = File(
-      '${environment.paths.pinsDirectory}/codex-armv7.json',
-    );
-    final File binary = File('$payloadDir/bin/codex');
-    for (final File file in <File>[pinFile, binary]) {
-      if (_entityType(file.path) != FileSystemEntityType.file) {
-        usageException('Missing regular ARMv7 payload file: ${file.path}.');
-      }
-    }
-
-    Map<String, Object?> readJson(File file) {
-      try {
-        final Object? decoded = jsonDecode(file.readAsStringSync());
-        if (decoded is Map<String, Object?>) {
-          return decoded;
-        }
-      } on FileSystemException catch (error) {
-        usageException('Could not read ${file.path}: ${error.message}.');
-      } on FormatException catch (error) {
-        usageException('Invalid ${file.path}: ${error.message}.');
-      }
-      usageException('${file.path} must contain a JSON object.');
-    }
-
-    final Map<String, Object?> pin = readJson(pinFile);
-    final Object? pinVersion = pin['version'];
-    final Object? pinDigest = pin['sha256'];
-    if (pin['schema'] != 1 ||
-        pin['target'] != PlutoTargetPlatform.linuxArm.cliName ||
-        pinVersion is! String ||
-        pinVersion.isEmpty ||
-        pinDigest is! String ||
-        !RegExp(r'^[0-9a-f]{64}$').hasMatch(pinDigest)) {
-      usageException('Invalid Codex ARMv7 pin: ${pinFile.path}.');
-    }
-
-    final Uint8List bytes = binary.readAsBytesSync();
-    final String actualDigest = sha256Bytes(bytes);
-    if (actualDigest != pinDigest) {
-      usageException(
-        'Codex ARMv7 checksum mismatch: ${binary.path}. Refusing to '
-        'provision a tampered binary.',
-      );
-    }
-    if (!_isArmV7HardFloatElf(bytes) ||
-        !_containsBytes(bytes, utf8.encode(pinVersion))) {
-      usageException(
-        'Codex payload is not the pinned ARMv7 hard-float release '
-        '$pinVersion: ${binary.path}.',
-      );
-    }
-    return PayloadFile(
-      localPath: binary.path,
-      remoteRelative: 'bin/codex',
-      executable: true,
-    );
-  }
-
-  bool _isArmV7HardFloatElf(Uint8List bytes) {
-    if (bytes.length < 52 ||
-        bytes[0] != 0x7f ||
-        bytes[1] != 0x45 ||
-        bytes[2] != 0x4c ||
-        bytes[3] != 0x46 ||
-        bytes[4] != 1 ||
-        bytes[5] != 1 ||
-        bytes[18] != 40 ||
-        bytes[19] != 0) {
-      return false;
-    }
-    final int flags =
-        bytes[36] | (bytes[37] << 8) | (bytes[38] << 16) | (bytes[39] << 24);
-    return ((flags >> 24) & 0xff) == 5 &&
-        (flags & 0x400) != 0 &&
-        (flags & 0x200) == 0;
-  }
-
-  bool _containsBytes(Uint8List bytes, List<int> needle) {
-    if (needle.isEmpty || needle.length > bytes.length) {
-      return false;
-    }
-    for (var start = 0; start <= bytes.length - needle.length; start += 1) {
-      var matches = true;
-      for (var index = 0; index < needle.length; index += 1) {
-        if (bytes[start + index] != needle[index]) {
-          matches = false;
-          break;
-        }
-      }
-      if (matches) {
-        return true;
-      }
-    }
-    return false;
-  }
 
   /// Collects complete Pluto layouts under `apps/<id>/`, plus an optional
   /// top-level `launcher/` layout treated as the launcher app.

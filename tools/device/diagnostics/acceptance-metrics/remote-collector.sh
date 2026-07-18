@@ -654,9 +654,13 @@ done
 
 trace 'validate and separately hash generated install receipts for all standard apps'
 GENERATED_HASH_COUNT=0
-for app_id in dev.pluto.launcher dev.pluto.examples.counter \
-  dev.pluto.examples.motion_lab dev.pluto.examples.ink_lab \
-  dev.pluto.validation_lab dev.pluto.codex dev.pluto.ink; do
+STANDARD_APP_IDS='dev.pluto.launcher dev.pluto.examples.counter
+dev.pluto.examples.motion_lab dev.pluto.examples.ink_lab
+dev.pluto.validation_lab dev.pluto.ink'
+if [ "$PLUTO_PROFILE_TARGET" = linux-arm64 ]; then
+  STANDARD_APP_IDS="$STANDARD_APP_IDS dev.pluto.codex"
+fi
+for app_id in $STANDARD_APP_IDS; do
   app_root="$ROOT/apps/$app_id"
   [ "$app_id" = dev.pluto.launcher ] && app_root="$ROOT/launcher"
   install_real=$(real_path "$app_root/install.json")
@@ -669,22 +673,30 @@ for app_id in dev.pluto.launcher dev.pluto.examples.counter \
   GENERATED_HASH_COUNT=$((GENERATED_HASH_COUNT + 1))
 done
 
-CODEX_LOGICAL=
-for candidate in "$ROOT/bin/codex" /home/root/bin/codex /home/root/.local/bin/codex; do
-  actual=$(real_path "$candidate")
-  [ -x "$actual" ] || continue
-  if [ -L "$actual" ]; then
-    resolved=$(readlink -f "$actual" 2>/dev/null || true)
-    [ -n "$resolved" ] || continue
-    actual=$resolved
-  fi
-  [ -f "$actual" ] || continue
-  CODEX_LOGICAL=$candidate
-  CODEX_DIGEST=$(sha256_file "$actual") || fail 'cannot hash resolved Codex binary'
-  printf 'codex.sha256=%s device_path=%s resolved=%s\n' "$CODEX_DIGEST" "$candidate" "$(logical_path "$actual")"
-  break
-done
-[ -n "$CODEX_LOGICAL" ] || fail 'real Codex binary is absent'
+if [ "$PLUTO_PROFILE_TARGET" = linux-arm64 ]; then
+  CODEX_LOGICAL=
+  for candidate in "$ROOT/bin/codex" /home/root/bin/codex /home/root/.local/bin/codex; do
+    actual=$(real_path "$candidate")
+    [ -x "$actual" ] || continue
+    if [ -L "$actual" ]; then
+      resolved=$(readlink -f "$actual" 2>/dev/null || true)
+      [ -n "$resolved" ] || continue
+      actual=$resolved
+    fi
+    [ -f "$actual" ] || continue
+    CODEX_LOGICAL=$candidate
+    CODEX_DIGEST=$(sha256_file "$actual") || fail 'cannot hash resolved Codex binary'
+    printf 'codex.sha256=%s device_path=%s resolved=%s\n' "$CODEX_DIGEST" "$candidate" "$(logical_path "$actual")"
+    break
+  done
+  [ -n "$CODEX_LOGICAL" ] || fail 'native linux-arm64 Codex binary is absent'
+else
+  [ ! -e "$(real_path "$ROOT/bin/codex")" ] ||
+    fail 'linux-arm runtime contains an unsupported custom Codex binary'
+  [ ! -e "$(real_path "$ROOT/apps/dev.pluto.codex")" ] ||
+    fail 'linux-arm runtime contains the unsupported Paper Codex app'
+  printf 'codex.supported=0\n'
+fi
 DEBUG_KERNEL_COUNT=$(find "$(real_path "$ROOT")" -type f -name kernel_blob.bin 2>/dev/null | wc -l | tr -d '[:space:]')
 [ "$DEBUG_KERNEL_COUNT" = 0 ] || fail 'debug kernel exists in release runtime'
 printf 'installed.hash_count=%s\n' "$INSTALLED_HASH_COUNT"

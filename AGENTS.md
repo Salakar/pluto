@@ -199,7 +199,7 @@ cmake --preset host-release
 cmake --build --preset host-release
 ./build/host-release/pluto_renderer_bench      # tile pass, dither, scheduler
 ./build/host-release/pluto_presenter_bench     # NEON vs scalar sweep/deposit kernels
-./build/host-release/ct33_frontend_bench       # colour front-end
+./build/host-release/ct33_frontend_bench CT33_BIN  # colour front-end
 ```
 
 Budgets are in `embedder/bench/renderer/budgets.yaml` (device p99 targets). The
@@ -264,9 +264,10 @@ every slice file hash under `build/pluto-release/release-manifest.json`.
 melos run build:device-release
 ```
 
-The ARMv7 assembler packages a pinned, target-native Codex CLI. It rejects
-fake acceptance modes, a missing or tampered binary, the wrong version, and an
-ABI mismatch. Authentication is user-owned and never embedded in the payload.
+Application manifests declare their supported targets. The shared standard app
+set ships in both slices. Paper Codex is `linux-arm64` only because upstream
+Codex has no native ARMv7 release; the ARMv7 assembler omits it and rejects
+explicit selection. Pluto does not maintain a custom ARMv7 Codex port.
 
 Release assembly gates every app as product AOT and verifies the matching
 engine against committed checksums. A bare bundle, mixed target, missing slice,
@@ -320,10 +321,12 @@ pluto logs --device "$DEVICE"
 pluto screenshot --device "$DEVICE" -o shot.png
 ```
 
-Run Home, Ink, and real Codex through the CLI; require fresh presentation
+Run Home, the switcher, Counter, Motion Lab, Ink Lab, Validation Lab, and Ink
+through the CLI; require a deterministic Ink stroke, fresh presentation
 evidence, exact release/AOT process identity, camera-visible panel behavior,
 responsive layout at the presenter-reported viewport, and responsiveness
-measurements. The existing
+measurements. Paper Codex may additionally be checked on `linux-arm64`; it is
+not an RM1/RM2 acceptance requirement. The existing
 `tools/device/test/release-aot-hardware-smoke.sh` is additional coverage for
 the native supervisor, not the whole all-device compatibility gate.
 

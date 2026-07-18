@@ -75,6 +75,9 @@ struct MonoCapture {
   bool completion_on_wait_sent = false;
   bool complete_latest_frame_on_wait = false;
   uint64_t latest_frame_completed_on_wait = 0;
+  FrameRenderer *synchronous_completion_target = nullptr;
+  bool complete_present_synchronously = false;
+  uint64_t synchronous_wrong_frame_id = 0;
   bool block_next_wait_idle = false;
   bool wait_idle_entered = false;
   bool release_wait_idle = false;
@@ -117,6 +120,9 @@ void reset_mono_capture() {
   g_mono_capture.completion_on_wait_sent = false;
   g_mono_capture.complete_latest_frame_on_wait = false;
   g_mono_capture.latest_frame_completed_on_wait = 0;
+  g_mono_capture.synchronous_completion_target = nullptr;
+  g_mono_capture.complete_present_synchronously = false;
+  g_mono_capture.synchronous_wrong_frame_id = 0;
   g_mono_capture.block_next_wait_idle = false;
   g_mono_capture.wait_idle_entered = false;
   g_mono_capture.release_wait_idle = false;
@@ -169,21 +175,37 @@ const PlutoPresenterOps *mono_capture_ops() {
       return kPlutoStatusOk;
     };
     o.present = [](PlutoPresenter *, const PlutoPresentRequest *request) {
-      std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-      ++g_mono_capture.presents;
-      g_mono_capture.last_flags = request->flags;
-      g_mono_capture.last_class = request->refresh_class;
-      g_mono_capture.last_rect = request->damage[0];
-      const auto *px =
-          reinterpret_cast<const uint16_t *>(request->surface.pixels);
-      const size_t row_pixels = request->surface.stride_bytes / sizeof(*px);
-      g_mono_capture.last_pixels.assign(
-          px, px + row_pixels * static_cast<size_t>(request->surface.height));
-      g_mono_capture.flags_history.push_back(request->flags);
-      g_mono_capture.class_history.push_back(request->refresh_class);
-      g_mono_capture.frame_id_history.push_back(request->frame_id);
-      g_mono_capture.pixel_history.push_back(g_mono_capture.last_pixels);
-      return g_mono_capture.present_status;
+      FrameRenderer *completion_target = nullptr;
+      bool complete_exact = false;
+      uint64_t wrong_frame_id = 0;
+      PlutoStatus status = kPlutoStatusInternal;
+      {
+        std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+        ++g_mono_capture.presents;
+        g_mono_capture.last_flags = request->flags;
+        g_mono_capture.last_class = request->refresh_class;
+        g_mono_capture.last_rect = request->damage[0];
+        const auto *px =
+            reinterpret_cast<const uint16_t *>(request->surface.pixels);
+        const size_t row_pixels = request->surface.stride_bytes / sizeof(*px);
+        g_mono_capture.last_pixels.assign(
+            px, px + row_pixels * static_cast<size_t>(request->surface.height));
+        g_mono_capture.flags_history.push_back(request->flags);
+        g_mono_capture.class_history.push_back(request->refresh_class);
+        g_mono_capture.frame_id_history.push_back(request->frame_id);
+        g_mono_capture.pixel_history.push_back(g_mono_capture.last_pixels);
+        completion_target = g_mono_capture.synchronous_completion_target;
+        complete_exact = g_mono_capture.complete_present_synchronously;
+        wrong_frame_id = g_mono_capture.synchronous_wrong_frame_id;
+        status = g_mono_capture.present_status;
+      }
+      if (completion_target != nullptr && wrong_frame_id != 0) {
+        completion_target->notify_present_complete(wrong_frame_id);
+      }
+      if (completion_target != nullptr && complete_exact) {
+        completion_target->notify_present_complete(request->frame_id);
+      }
+      return status;
     };
     o.ready = [](PlutoPresenter *, PlutoRefreshClass) {
       std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
@@ -432,6 +454,184 @@ TEST(FrameRendererTest, DetachRejectsFramesAndAttachRebuildsPresenterState) {
       mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
   EXPECT_TRUE(renderer.valid());
   EXPECT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 3)));
+}
+
+TEST(FrameRendererTest,
+     ExactFullReceiptRejectsLatePreActionUnknownAndOutOfOrderCompletions) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::uint64_t pre_action_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 1u);
+    pre_action_frame_id = g_mono_capture.frame_id_history.front();
+  }
+
+  bool completed = true;
+  FrameRenderer::ExactPresentationReceipt receipt{UINT64_MAX, UINT64_MAX};
+  std::atomic<bool> waiter_started{false};
+  std::atomic<bool> waiter_done{false};
+  std::thread control_worker([&] {
+    waiter_started.store(true, std::memory_order_release);
+    completed = renderer.present_retained_surface_full(
+        std::chrono::milliseconds(500), &receipt);
+    waiter_done.store(true, std::memory_order_release);
+  });
+  while (!waiter_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  // A new retained Flutter surface arrives while the old present is still in
+  // flight. The proof must drain that exact app-owned update first and its
+  // eventual Full must replay these newer pixels, not the pre-action surface.
+  pixels[0] = 0;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2)));
+
+  // Future ids arriving out of order, an unrelated maintenance/Sparkle-like
+  // id, and stale duplicates are not proof. The real older presents must
+  // retire before the dedicated Full dispatch.
+  renderer.notify_present_complete(pre_action_frame_id + 1);
+  renderer.notify_present_complete(pre_action_frame_id + 2);
+  renderer.notify_present_complete(999999);
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  EXPECT_FALSE(waiter_done.load(std::memory_order_acquire));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u);
+  }
+  renderer.notify_present_complete(pre_action_frame_id);
+  ASSERT_TRUE(wait_for_present_count(2));
+  std::uint64_t post_action_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    post_action_frame_id = g_mono_capture.frame_id_history.back();
+  }
+  ASSERT_EQ(post_action_frame_id, pre_action_frame_id + 1);
+  renderer.notify_present_complete(post_action_frame_id);
+  ASSERT_TRUE(wait_for_present_count(3));
+  std::uint64_t proof_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 3u);
+    proof_frame_id = g_mono_capture.frame_id_history.back();
+    EXPECT_EQ(g_mono_capture.class_history.back(), kPlutoRefreshFull);
+    EXPECT_EQ(g_mono_capture.flags_history.back(),
+              kPlutoPresentFlagPreDithered);
+    ASSERT_TRUE(!g_mono_capture.pixel_history.back().empty());
+    EXPECT_EQ(g_mono_capture.pixel_history.back()[0], 0u);
+    EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 64, 64}));
+  }
+  ASSERT_EQ(proof_frame_id, pre_action_frame_id + 2);
+  renderer.notify_present_complete(pre_action_frame_id);
+  renderer.notify_present_complete(proof_frame_id + 50);
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  EXPECT_FALSE(waiter_done.load(std::memory_order_acquire));
+  renderer.notify_present_complete(proof_frame_id);
+  control_worker.join();
+
+  EXPECT_TRUE(completed);
+  EXPECT_EQ(receipt.surface_generation, 2u);
+  EXPECT_EQ(receipt.frame_id, proof_frame_id);
+}
+
+TEST(FrameRendererTest, ExactFullReceiptHandlesSynchronousExactCompletion) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  uint64_t initial_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(initial_frame_id);
+  // Reconcile the initial completion before enabling synchronous callbacks.
+  const auto initial_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  while (std::chrono::steady_clock::now() < initial_deadline) {
+    if (renderer.queued_present_completions_for_testing() == 0) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.synchronous_completion_target = &renderer;
+    g_mono_capture.synchronous_wrong_frame_id = 777777;
+    g_mono_capture.complete_present_synchronously = true;
+  }
+
+  FrameRenderer::ExactPresentationReceipt receipt;
+  ASSERT_TRUE(renderer.present_retained_surface_full(
+      std::chrono::milliseconds(250), &receipt));
+  EXPECT_EQ(receipt.surface_generation, 1u);
+  EXPECT_NE(receipt.frame_id, 0u);
+}
+
+TEST(FrameRendererTest, ExactFullReceiptTimesOutWithoutItsExactCompletion) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  uint64_t initial_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(initial_frame_id);
+
+  FrameRenderer::ExactPresentationReceipt receipt{UINT64_MAX, UINT64_MAX};
+  EXPECT_FALSE(renderer.present_retained_surface_full(
+      std::chrono::milliseconds(35), &receipt));
+  EXPECT_EQ(receipt.surface_generation, 0u);
+  EXPECT_EQ(receipt.frame_id, 0u);
+}
+
+TEST(FrameRendererTest, FlutterSurfaceFenceRequiresStrictlyNewFrame) {
+  reset_mono_capture();
+  FrameRenderer renderer(mono_capture_config());
+  ASSERT_TRUE(renderer.valid());
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  const uint64_t baseline = renderer.flutter_surface_generation();
+  ASSERT_EQ(baseline, 1u);
+  uint64_t generation = 0;
+  EXPECT_FALSE(renderer.wait_for_flutter_surface_after(
+      baseline, std::chrono::milliseconds(2), &generation));
+  EXPECT_EQ(generation, baseline);
+  renderer.notify_idle_frame();
+  EXPECT_TRUE(renderer.wait_for_flutter_surface_after(
+      baseline, std::chrono::milliseconds(20), &generation));
+  EXPECT_EQ(generation, baseline + 1);
 }
 
 TEST(FrameRendererTest,

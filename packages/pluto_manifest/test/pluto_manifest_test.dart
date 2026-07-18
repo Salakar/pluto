@@ -34,6 +34,10 @@ void main() {
     expect(roundTrip.valueOrNull!.encode(), encoded);
     expect(manifest.id.value, 'dev.example.sketchpad');
     expect(manifest.permissions, contains(AppPermission.penRaw));
+    expect(manifest.targets, <AppTargetPlatform>{
+      AppTargetPlatform.linuxArm,
+      AppTargetPlatform.linuxArm64,
+    });
     expect(manifest.display.refreshProfile, DisplayRefreshProfile.drawing);
     expect(document, isNot(contains('schema')));
     expect(
@@ -74,6 +78,7 @@ $displaySource
         root.keys,
         containsAll(<String>[
           'icon',
+          'targets',
           'permissions',
           'display',
           'launch',
@@ -204,6 +209,7 @@ $extra
       'name',
       'version',
       'icon',
+      'targets',
       'runtime',
       'engine',
       'permissions',
@@ -265,6 +271,48 @@ $extra
         AppManifest.decode(jsonEncode(document)).errorOrNull,
         isA<ManifestFieldError>(),
       );
+    }
+  });
+
+  test('authored targets are exact, non-empty, and duplicate-free', () {
+    final Result<AppManifest, ManifestError> arm64Only =
+        AppManifest.decodeAuthoredYaml(
+          '''
+id: dev.example.arm64
+name: ARM64
+version: 1.0.0
+targets: [linux-arm64]
+''',
+          runtime: const FlutterAotRuntime(),
+          engine: const EngineRequirement(
+            flutterVersion: '3.44.4',
+            engineCommit: _engineCommit,
+          ),
+        );
+    expect(arm64Only.valueOrNull?.targets, <AppTargetPlatform>{
+      AppTargetPlatform.linuxArm64,
+    });
+
+    for (final String targets in <String>[
+      'targets: []',
+      'targets: [linux-x64]',
+      'targets: [linux-arm, linux-arm]',
+    ]) {
+      final Result<AppManifest, ManifestError> invalid =
+          AppManifest.decodeAuthoredYaml(
+            '''
+id: dev.example.invalid
+name: Invalid
+version: 1.0.0
+$targets
+''',
+            runtime: const FlutterAotRuntime(),
+            engine: const EngineRequirement(
+              flutterVersion: '3.44.4',
+              engineCommit: _engineCommit,
+            ),
+          );
+      expect(invalid.errorOrNull, isA<ManifestFieldError>(), reason: targets);
     }
   });
 
@@ -352,6 +400,7 @@ Map<String, Object?> _canonicalManifest({
   'name': name,
   'version': '1.2.0',
   'icon': 'icon.png',
+  'targets': <Object?>['linux-arm', 'linux-arm64'],
   'runtime': <String, Object?>{
     'type': 'flutter-aot',
     'appElf': 'lib/app.so',

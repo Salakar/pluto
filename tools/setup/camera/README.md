@@ -106,7 +106,6 @@ export PLUTO_ACCEPTANCE_SCREENSHOT_DIR="$PWD/analysis/native-cutover/final-accep
 export PLUTO_ACCEPTANCE_STAGE_HOOK="$PWD/tools/setup/camera/capture-acceptance-stage.sh"
 export PLUTO_ACCEPTANCE_STAGE_DELAY=1
 export PLUTO_ACCEPTANCE_CAPTURE_SETTLE=1
-export PLUTO_ACCEPTANCE_CODEX_REQUEST=1
 export PLUTO_ACCEPTANCE_REQUIRE_VISUAL=1
 export PLUTO_ACCEPTANCE_COLLECT_ONLY=1
 export PLUTO_ACCEPTANCE_RELEASE_REVISION="$(git rev-parse HEAD)"
@@ -134,20 +133,27 @@ writes a native PNG and digest record for every identical stage. Camera glass
 remains authoritative; the paired PNG proves which settled framebuffer Pluto
 reported. The hook also freezes `camera-provenance.tsv` and the exact
 `camera-config.json`; every stage rechecks the repository wrapper, Python
-driver, camera configuration, rig, and their hashes before and after capture.
+driver, pinned Python interpreter, resolved FFmpeg/FFprobe executables, camera
+configuration, rig, and their hashes before and after capture. Production
+entrypoints use privileged absolute Bash, fail on any visible non-empty
+`LD_*`, `DYLD_*`, or `GLIBC_TUNABLES` loader control, and do not resolve
+evidence tools through the caller's `PATH`. This fail-closed contamination
+check does not claim to defend against already-running same-user code that
+actively erases its loader variables or tampers with the checkout or evidence.
 The final metrics bundle independently verifies every immutable installed byte
 against the frozen universal release manifest. Final visual mode requires
 fresh, nonexistent camera and screenshot
 directories, the exact installed release revision and profile, the universal
-release-manifest digest, target and SSH identity, the numbered camera rig, all
-eleven unique interaction stages, and a real authenticated Codex CLI request.
-The Codex app camera stage proves its UI is visible; the authenticated CLI
-request is a separate end-to-end backend check and is not represented as UI
-interaction. A capture failure or reused evidence path fails the run instead of
-silently leaving an evidence gap.
+release-manifest digest, target and SSH identity, the numbered camera rig, and
+all ten common interaction stages. The common run covers Counter, Motion Lab,
+Ink Lab, Validation Lab, Ink, the switcher, deterministic app selection, a
+real Ink stroke, and Home. Paper Codex is not part of this all-device gate
+because it is supported only where the upstream CLI is native. A capture
+failure or reused evidence path fails the run instead of silently leaving an
+evidence gap.
 
-View all eleven JPEG/PNG pairs. Confirm that the label names what is actually
-visible on the named physical tablet, including the switcher-selected Codex UI,
+View all ten JPEG/PNG pairs. Confirm that the label names what is actually
+visible on the named physical tablet, including switcher-selected Validation Lab,
 the empty Ink canvas, the visibly changed Ink stroke, and final Home. Only after
 that review, write the hash-bound receipt and run the final verifier:
 

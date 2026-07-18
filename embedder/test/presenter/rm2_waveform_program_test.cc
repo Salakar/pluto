@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -19,7 +20,8 @@ void write_text(const std::filesystem::path &path, std::string_view value) {
   output << value << '\n';
 }
 
-TEST(Rm2WaveformProgram, DiscoversExactPoweredFaultFreeSy7636aParent) {
+TEST(Rm2WaveformProgram,
+     DiscoversExactSy7636aAndSeparatesLivePowerFromFaultLatch) {
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() /
                         ("pluto_rm2_power_state_" +
@@ -33,23 +35,64 @@ TEST(Rm2WaveformProgram, DiscoversExactPoweredFaultFreeSy7636aParent) {
   write_text(device / "state", "no fault event");
 
   std::string error;
-  EXPECT_TRUE(read_rm2_panel_power_ready(&error, root.string())) << error;
+  Rm2PanelPowerState power = read_rm2_panel_power_state(&error, root.string());
+  EXPECT_TRUE(power.ready()) << error;
+  EXPECT_TRUE(power.attributes_readable);
+  EXPECT_TRUE(power.power_good);
+  EXPECT_TRUE(power.latched_fault_event.empty());
 
   write_text(device / "power_good", "OFF");
-  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
-  EXPECT_FALSE(error.empty());
+  power = read_rm2_panel_power_state(&error, root.string());
+  EXPECT_FALSE(power.ready());
+  EXPECT_TRUE(power.attributes_readable);
+  EXPECT_FALSE(power.power_good);
+  EXPECT_EQ(error, "SY7636A panel power-good='OFF' state='no fault event'");
+
+  constexpr std::array<std::string_view, 16> kAcceptedFaultStates = {
+      "no fault event",   "UVP at VP rail",    "UVP at VN rail",
+      "UVP at VPOS rail", "UVP at VNEG rail",  "UVP at VDDH rail",
+      "UVP at VEE rail",  "SCP at VP rail",    "SCP at VN rail",
+      "SCP at VPOS rail", "SCP at VNEG rail",  "SCP at VDDH rail",
+      "SCP at VEE rail",  "SCP at V COM rail", "UVLO",
+      "Thermal shutdown",
+  };
+  write_text(device / "power_good", "ON");
+  for (const std::string_view state : kAcceptedFaultStates) {
+    write_text(device / "state", state);
+    power = read_rm2_panel_power_state(&error, root.string());
+    EXPECT_TRUE(power.ready()) << state << ": " << error;
+    EXPECT_EQ(power.latched_fault_event,
+              state == "no fault event" ? std::string{} : std::string(state));
+    EXPECT_TRUE(error.empty()) << state;
+  }
+
+  write_text(device / "power_good", "MAYBE");
+  power = read_rm2_panel_power_state(&error, root.string());
+  EXPECT_FALSE(power.ready());
+  EXPECT_FALSE(power.attributes_readable);
+  EXPECT_EQ(error, "SY7636A power-good attribute has unknown value='MAYBE'");
 
   write_text(device / "power_good", "ON");
-  write_text(device / "state", "VNEG fault event");
-  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+  write_text(device / "state", "invented fault");
+  power = read_rm2_panel_power_state(&error, root.string());
+  EXPECT_FALSE(power.ready());
+  EXPECT_FALSE(power.attributes_readable);
+  EXPECT_EQ(error,
+            "SY7636A fault-state attribute has unknown value='invented fault'");
 
   write_text(device / "state", "no fault event");
   fs::remove(device / "power_good", filesystem_error);
-  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+  power = read_rm2_panel_power_state(&error, root.string());
+  EXPECT_FALSE(power.ready());
+  EXPECT_FALSE(power.attributes_readable);
+  EXPECT_EQ(error, "SY7636A power/fault attributes are unreadable");
 
   write_text(device / "power_good", "ON");
   fs::remove(device / "state", filesystem_error);
-  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+  power = read_rm2_panel_power_state(&error, root.string());
+  EXPECT_FALSE(power.ready());
+  EXPECT_FALSE(power.attributes_readable);
+  EXPECT_EQ(error, "SY7636A power/fault attributes are unreadable");
 
   write_text(device / "state", "no fault event");
   const fs::path ambiguous = root / "4-0062";
@@ -57,7 +100,10 @@ TEST(Rm2WaveformProgram, DiscoversExactPoweredFaultFreeSy7636aParent) {
   write_text(ambiguous / "name", "sy7636a");
   write_text(ambiguous / "power_good", "ON");
   write_text(ambiguous / "state", "no fault event");
-  EXPECT_FALSE(read_rm2_panel_power_ready(&error, root.string()));
+  power = read_rm2_panel_power_state(&error, root.string());
+  EXPECT_FALSE(power.ready());
+  EXPECT_FALSE(power.attributes_readable);
+  EXPECT_EQ(error, "multiple SY7636A I2C parents are ambiguous");
 
   fs::remove_all(root, filesystem_error);
 }

@@ -53,7 +53,7 @@ panel implementation.
 ## Universal device release
 
 Release maintainers use one public command. It builds both native embedders and
-the same standard release-AOT application set for both target ABIs:
+the standard release-AOT application set supported by each target:
 
 ```sh
 bash tools/build/assemble-device-release.sh
@@ -69,8 +69,8 @@ build/pluto-release/
 ```
 
 The architecture-specific compiler and slice assemblers are private workers.
-The manifest freezes one clean Git revision, the Flutter/engine/Codex pins, and
-the deterministic SHA-256 file set for each slice. Each slice is self-contained
+The manifest freezes one clean Git revision, the Flutter/engine/toolchain pins,
+and the deterministic SHA-256 file set for each slice. Each slice is self-contained
 for deployable payload files; checkout pins and committed engine checksum
 metadata remain the local trust anchors. Provisioning never fills a missing
 payload from checkout source, a committed engine directory, or an embedder
@@ -93,14 +93,16 @@ runtime-only systemd unit for the current boot and restores stock on stop,
 failure, or reboot. There is no separate install or app flow.
 
 The release assembler verifies the pinned SDK and engine checksums, exact
-native ABI, release metadata, application manifests, and product `app.so`. A
-`kernel_blob.bin`, debug engine, mixed target, or fake/tampered Codex payload
-fails assembly. When Codex is selected for ARMv7, the payload carries the
-pinned target-native Codex CLI; authentication remains user-owned and is never
-built into the artifact.
+native ABI, release metadata, application manifests, declared app targets, and
+product `app.so`. A `kernel_blob.bin`, debug engine, mixed target, or app slice
+outside its declared targets fails assembly. The shared standard set is Home,
+Counter, Motion Lab, Ink Lab, Validation Lab, and Ink. Paper Codex declares
+`linux-arm64` only because upstream Codex has no native ARMv7 release; the
+`linux-arm` slice omits it and rejects explicit selection. Pluto does not build,
+patch, pin, package, or provision a custom ARMv7 Codex CLI.
 
-Published app packages use the same model: one manifest and both exact target
-slices in one `.plap`:
+Published app packages use the same model: one manifest and every
+app-declared exact target slice in one `.plap`:
 
 ```sh
 pluto build package --published --release
@@ -125,12 +127,12 @@ The side-effect-free build contracts are:
 
 ```sh
 bash tools/build/test/embedder-build-workflow-test.sh
-bash tools/build/test/codex-armv7-build-recipe-test.sh
+bash tools/build/test/native-cutover-residue-test.sh
 ```
 
 Run the native CTest suite through `melos run build:embedder:host`, then run
 `./ci/check.sh` before handing off a release. Real compatibility additionally
 requires the normal CLI commands, logs, screenshots, measured responsiveness,
-and camera-visible Home, Ink, and authenticated Codex behavior on each device
-and firmware listed in
+and camera-visible Home, switching, the supported app set, and deterministic
+Ink behavior on each device and firmware listed in
 [`docs/device-compatibility.md`](../../docs/device-compatibility.md).

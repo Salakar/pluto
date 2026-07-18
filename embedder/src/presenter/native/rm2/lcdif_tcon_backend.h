@@ -15,12 +15,14 @@
 #include "presenter/native/native_display_backend.h"
 #include "presenter/native/rm2/mxs_lcdif_device.h"
 #include "presenter/native/rm2/rm2_cpu_frequency_lease.h"
+#include "presenter/native/rm2/rm2_waveform_program.h"
 
 namespace pluto::native::rm2 {
 
 using Rm2TemperatureReader =
     std::function<std::optional<int>(std::string *error)>;
-using Rm2PowerReadyReader = std::function<bool(std::string *error)>;
+using Rm2PanelPowerStateReader =
+    std::function<Rm2PanelPowerState(std::string *error)>;
 
 // Production is fixed to the shared private tmpfs bundle. Tests may provide
 // an isolated path and clock, but the native presenter factory cannot.
@@ -54,7 +56,7 @@ public:
   LcdifTconDisplayBackend(const GeneratedDeviceProfile &profile,
                           std::unique_ptr<MxsLcdifDevice> device = nullptr,
                           Rm2TemperatureReader temperature_reader = {},
-                          Rm2PowerReadyReader power_ready_reader = {},
+                          Rm2PanelPowerStateReader power_state_reader = {},
                           Rm2HandoffOptions handoff = {});
   ~LcdifTconDisplayBackend() override;
 

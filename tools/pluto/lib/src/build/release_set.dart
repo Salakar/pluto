@@ -13,8 +13,6 @@ final class ReleaseSetPins {
     required this.pinFiles,
     required this.flutterVersion,
     required this.engineCommit,
-    required this.codexArmv7Version,
-    required this.codexArmv7Sha256,
   });
 
   /// Digest of the complete authoritative ARMv7 SDK pin file.
@@ -28,12 +26,6 @@ final class ReleaseSetPins {
 
   /// Pinned Flutter engine commit.
   final String engineCommit;
-
-  /// Pinned target-native Codex CLI version for ARMv7.
-  final String codexArmv7Version;
-
-  /// Pinned target-native Codex CLI digest for ARMv7.
-  final String codexArmv7Sha256;
 
   /// Reads the authoritative pin files used by release assembly and provision.
   factory ReleaseSetPins.read(String pinsDirectory) {
@@ -49,35 +41,6 @@ final class ReleaseSetPins {
       File(armSdkPinPath).readAsBytesSync(),
     );
     final Map<String, String> pinFiles = _scanRegularFiles(pinsDirectory);
-    final Map<String, Object?> codex = _decodeJsonObject(
-      _readRegularText('$pinsDirectory/codex-armv7.json'),
-      description: 'codex-armv7.json',
-    );
-    _requireExactKeys(codex, const <String>{
-      'schema',
-      'version',
-      'target',
-      'sha256',
-    }, description: 'codex-armv7.json');
-    final Object? codexVersion = codex['version'];
-    final Object? codexSha256 = codex['sha256'];
-    if (codex['schema'] != 1 ||
-        codex['target'] != 'linux-arm' ||
-        codexVersion is! String ||
-        codexVersion.isEmpty ||
-        codexSha256 is! String ||
-        !_sha256Pattern.hasMatch(codexSha256)) {
-      throw const ArtifactVerificationException(
-        message: 'codex-armv7.json is not an exact linux-arm pin.',
-      );
-    }
-    if (!RegExp(
-      r'^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$',
-    ).hasMatch(codexVersion)) {
-      throw const ArtifactVerificationException(
-        message: 'codex-armv7.json has an invalid version.',
-      );
-    }
     if (flutterVersion.isEmpty ||
         !RegExp(r'^[0-9a-f]{40}$').hasMatch(engineCommit)) {
       throw const ArtifactVerificationException(
@@ -89,16 +52,12 @@ final class ReleaseSetPins {
       pinFiles: Map<String, String>.unmodifiable(pinFiles),
       flutterVersion: flutterVersion,
       engineCommit: engineCommit,
-      codexArmv7Version: codexVersion,
-      codexArmv7Sha256: codexSha256,
     );
   }
 
   /// Encodes the exact release-manifest pin object.
   Map<String, Object?> toJson() => <String, Object?>{
     'armSdkPinSha256': armSdkPinSha256,
-    'codexArmv7Sha256': codexArmv7Sha256,
-    'codexArmv7Version': codexArmv7Version,
     'engineCommit': engineCommit,
     'flutterVersion': flutterVersion,
     'pinFiles': <String, String>{
@@ -115,8 +74,6 @@ final class ReleaseSetPins {
       );
     }
     _requireExactKeys(value, const <String>{
-      'codexArmv7Sha256',
-      'codexArmv7Version',
       'engineCommit',
       'flutterVersion',
       'armSdkPinSha256',
@@ -126,8 +83,6 @@ final class ReleaseSetPins {
     final Object? armSdkPinSha256 = value['armSdkPinSha256'];
     final Object? engineCommit = value['engineCommit'];
     final Object? pinFileValue = value['pinFiles'];
-    final Object? codexVersion = value['codexArmv7Version'];
-    final Object? codexSha256 = value['codexArmv7Sha256'];
     if (armSdkPinSha256 is! String ||
         !_sha256Pattern.hasMatch(armSdkPinSha256) ||
         pinFileValue is! Map<String, Object?> ||
@@ -135,11 +90,7 @@ final class ReleaseSetPins {
         flutterVersion is! String ||
         flutterVersion.isEmpty ||
         engineCommit is! String ||
-        !RegExp(r'^[0-9a-f]{40}$').hasMatch(engineCommit) ||
-        codexVersion is! String ||
-        codexVersion.isEmpty ||
-        codexSha256 is! String ||
-        !_sha256Pattern.hasMatch(codexSha256)) {
+        !RegExp(r'^[0-9a-f]{40}$').hasMatch(engineCommit)) {
       throw const ArtifactVerificationException(
         message: 'Release manifest pins are incomplete or invalid.',
       );
@@ -160,8 +111,6 @@ final class ReleaseSetPins {
       pinFiles: Map<String, String>.unmodifiable(pinFiles),
       flutterVersion: flutterVersion,
       engineCommit: engineCommit,
-      codexArmv7Version: codexVersion,
-      codexArmv7Sha256: codexSha256,
     );
   }
 
@@ -170,9 +119,7 @@ final class ReleaseSetPins {
       armSdkPinSha256 == other.armSdkPinSha256 &&
       _stringMapsEqual(pinFiles, other.pinFiles) &&
       flutterVersion == other.flutterVersion &&
-      engineCommit == other.engineCommit &&
-      codexArmv7Version == other.codexArmv7Version &&
-      codexArmv7Sha256 == other.codexArmv7Sha256;
+      engineCommit == other.engineCommit;
 }
 
 /// One manifest checksum-verified native runtime slice.

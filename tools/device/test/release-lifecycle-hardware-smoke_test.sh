@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -12,6 +12,13 @@ fail() {
   exit 1
 }
 
+[[ "$(head -n 1 "$SMOKE")" == '#!/bin/bash -p' ]] ||
+  fail 'lifecycle acceptance entrypoint does not use privileged absolute Bash'
+if /bin/bash "$SMOKE" >"$TMP/unprivileged-entry.out" 2>&1; then
+  fail 'lifecycle acceptance entrypoint accepted unprivileged Bash'
+fi
+grep -q 'directly or with /bin/bash -p' "$TMP/unprivileged-entry.out" ||
+  fail 'lifecycle acceptance entrypoint did not diagnose unprivileged Bash'
 mkdir -p "$TMP/bin" "$TMP/png"
 cp "$ROOT/apps/launcher/test_goldens/goldens/s04_home_empty.png" \
   "$TMP/png/ink-canvas-before-stroke.png"
@@ -26,6 +33,14 @@ cmp -s "$TMP/png/ink-canvas-before-stroke.png" \
 cat > "$TMP/bin/pluto" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${PLUTO_ACCEPTANCE_STRICT_SSH:-}" == 1 ]]
+[[ "${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-}" == 1 ]]
+[[ "${PLUTO_ACCEPTANCE_SSH_BIN:-}" == /* ]]
+if [[ -n "${PLUTO_FAKE_CALL_LOG:-}" ]]; then
+  printf 'strict_ssh=%s ssh_bin=%s command=%s\n' \
+    "$PLUTO_ACCEPTANCE_STRICT_SSH" "$PLUTO_ACCEPTANCE_SSH_BIN" "$*" \
+    >> "$PLUTO_FAKE_CALL_LOG"
+fi
 if [[ "$1" == screenshot ]]; then
   output=''
   app=''
@@ -174,6 +189,10 @@ chmod 0755 "$TMP/bin/journalctl"
 cat > "$TMP/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${SSH_ARGV_LOG:-}" ]]; then
+  printf '%s\n' BEGIN >> "$SSH_ARGV_LOG"
+  printf 'arg=%s\n' "$@" >> "$SSH_ARGV_LOG"
+fi
 command=${!#}
 state="$STATE_DIR/state"
 . "$state"
@@ -288,6 +307,9 @@ verify_receipt_query() {
   [[ "$command" != *'suspend target completed after wake'* ]] || exit 66
 }
 case "$command" in
+  true)
+    exit 0
+    ;;
   *'proc_start_ticks()'*)
     verify_receipt_query
     receipt_count=$(wc -l < "$STATE_DIR/wake-receipts" | tr -d ' ')
@@ -343,12 +365,25 @@ case "$command" in
     fi
     ;;
   *'release-lifecycle-prepare-ink'*)
-    if ! printf '%s' "$command" | grep -F -- \
-      '"${prepare_prefix}0}}" | "${prepare_prefix}1}}" | "${prepare_prefix}2}}")' \
-      >/dev/null; then
-      echo 'fake ssh: lifecycle prepare consumer did not require a complete exact JSON receipt' >&2
-      exit 66
-    fi
+    case "${PREPARE_RECEIPT_MODE:-action}" in
+      action)
+        printf '%s\n' \
+          '{"requestId":"release-lifecycle-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":200,"processStartTicks":2000,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":17}}'
+        ;;
+      mounted)
+        printf '%s\n' \
+          '{"requestId":"release-lifecycle-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":200,"processStartTicks":2000,"canvasReady":true,"actionCount":0,"surfaceGeneration":24,"proofFrameId":19}}'
+        ;;
+      missing-present)
+        printf '%s\n' \
+          '{"requestId":"release-lifecycle-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":200,"processStartTicks":2000,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":0}}'
+        ;;
+      wrong-start)
+        printf '%s\n' \
+          '{"requestId":"release-lifecycle-prepare-ink","ok":true,"result":{"appId":"dev.pluto.ink","pid":200,"processStartTicks":2001,"canvasReady":true,"actionCount":2,"surfaceGeneration":23,"proofFrameId":17}}'
+        ;;
+      *) exit 64 ;;
+    esac
     ;;
   *'release-lifecycle-stroke'*)
     seq=$((seq + 1))
@@ -546,9 +581,13 @@ run_smoke() {
   RTC_FIXTURE_MODE="${RTC_FIXTURE_MODE:-normal}" \
   WAKE_FIXTURE_MODE="${WAKE_FIXTURE_MODE:-rtc}" \
   PUBLICATION_FIXTURE_MODE="${PUBLICATION_FIXTURE_MODE:-normal}" \
+  PREPARE_RECEIPT_MODE="${PREPARE_RECEIPT_MODE:-action}" \
   SLEEP_LOG="${SLEEP_LOG:-}" \
+  SSH_ARGV_LOG="${SSH_ARGV_LOG:-}" \
+  PLUTO_FAKE_CALL_LOG="${PLUTO_FAKE_CALL_LOG:-}" \
   PLUTO_TEST_NO_SLEEP="${PLUTO_TEST_NO_SLEEP:-0}" \
-  PLUTO_CLI=pluto \
+  PLUTO_CLI="$TMP/bin/pluto" \
+  PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
   PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
   PLUTO_ACCEPTANCE_PROFILE_ID="${ACCEPTANCE_PROFILE_ID:-rm1}" \
   PLUTO_LIFECYCLE_CYCLES="${ACCEPTANCE_CYCLES:-1}" \
@@ -559,7 +598,7 @@ run_smoke() {
   PLUTO_ACCEPTANCE_STAGE_DELAY=0 \
   PLUTO_ACCEPTANCE_SSH_TARGET="${ACCEPTANCE_SSH_TARGET:-root@fixture-device}" \
   PLUTO_ACCEPTANCE_SSH_PORT="${ACCEPTANCE_SSH_PORT:-}" \
-  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS="${ACCEPTANCE_ALLOW_TEST_HOOKS:-0}" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS="${ACCEPTANCE_ALLOW_TEST_HOOKS:-1}" \
     "$SMOKE" "${ACCEPTANCE_DEVICE:-root@fixture-device}"
 }
 
@@ -570,8 +609,120 @@ fi
 grep -q 'wake seconds must be in \[60,120\]' "$TMP/short-alarm.err" ||
   fail 'legacy alarm rejection did not report the safe minimum'
 
+if PLUTO_CLI="$TMP/bin/pluto" \
+  "$SMOKE" root@fixture-device >"$TMP/cli-override.out" 2>&1; then
+  fail 'production lifecycle smoke accepted a Pluto CLI override'
+fi
+grep -q 'PLUTO_CLI requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/cli-override.out" ||
+  fail 'lifecycle Pluto CLI override did not require the test seam'
+
+if PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  "$SMOKE" root@fixture-device >"$TMP/ssh-override.out" 2>&1; then
+  fail 'production lifecycle smoke accepted an SSH binary override'
+fi
+grep -q \
+  'PLUTO_ACCEPTANCE_SSH_BIN requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1' \
+  "$TMP/ssh-override.out" ||
+  fail 'lifecycle SSH binary override did not require the test seam'
+
+mkdir -p "$TMP/no-home" "$TMP/path-shims"
+cat > "$TMP/path-shims/pluto" <<EOF
+#!/bin/sh
+: > '$TMP/path-pluto-used'
+exit 0
+EOF
+cat > "$TMP/path-shims/ssh" <<EOF
+#!/bin/sh
+: > '$TMP/path-ssh-used'
+exit 0
+EOF
+cat > "$TMP/path-shims/python3" <<EOF
+#!/bin/sh
+: > '$TMP/path-python-used'
+exit 0
+EOF
+for shim in bash ffmpeg dirname awk; do
+  cat > "$TMP/path-shims/$shim" <<EOF
+#!/bin/sh
+: > '$TMP/path-$shim-used'
+exit 0
+EOF
+done
+chmod 0755 "$TMP/path-shims/pluto" "$TMP/path-shims/ssh" \
+  "$TMP/path-shims/python3" "$TMP/path-shims/bash" \
+  "$TMP/path-shims/ffmpeg" "$TMP/path-shims/dirname" "$TMP/path-shims/awk"
+cat > "$TMP/acceptance-bash-env" <<EOF
+: > '$TMP/path-bash-env-used'
+EOF
+if PATH="$TMP/path-shims:$PATH" BASH_ENV="$TMP/acceptance-bash-env" \
+  PLUTO_BIN_DIR="$TMP/path-shims" \
+  PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
+  PLUTO_ACCEPTANCE_PROFILE_ID=rm1 PLUTO_LIFECYCLE_CYCLES=1 \
+  PLUTO_LIFECYCLE_WAKE_SECONDS=60 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/path-pluto.out" 2>&1; then
+  fail 'production lifecycle smoke unexpectedly reached localhost:1'
+fi
+[[ ! -e "$TMP/path-pluto-used" ]] ||
+  fail 'production lifecycle smoke executed a Pluto CLI shim from PATH or PLUTO_BIN_DIR'
+[[ ! -e "$TMP/path-python-used" ]] ||
+  fail 'production lifecycle smoke executed a Python shim from PATH'
+for marker in bash ffmpeg dirname awk bash-env; do
+  [[ ! -e "$TMP/path-$marker-used" ]] ||
+    fail "production lifecycle smoke executed a $marker startup/PATH shim"
+done
+if (
+  dirname() {
+    : > "$TMP/path-exported-function-used"
+    /usr/bin/dirname "$@"
+  }
+  export -f dirname
+  PATH="$TMP/path-shims:$PATH" \
+    PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
+    PLUTO_ACCEPTANCE_PROFILE_ID=rm1 PLUTO_LIFECYCLE_CYCLES=1 \
+    PLUTO_LIFECYCLE_WAKE_SECONDS=60 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+    "$SMOKE" root@127.0.0.1:1 >/dev/null 2>&1
+); then
+  fail 'production lifecycle smoke unexpectedly reached a device with an exported function'
+fi
+[[ ! -e "$TMP/path-exported-function-used" ]] ||
+  fail 'production lifecycle smoke imported an exported shell function'
+
+if PATH="$TMP/path-shims:$PATH" \
+  PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
+  PLUTO_ACCEPTANCE_PROFILE_ID=rm1 PLUTO_LIFECYCLE_CYCLES=1 \
+  PLUTO_LIFECYCLE_WAKE_SECONDS=60 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/path-ssh.out" 2>&1; then
+  fail 'production lifecycle smoke unexpectedly reached localhost:1'
+fi
+[[ ! -e "$TMP/path-ssh-used" ]] ||
+  fail 'production lifecycle smoke executed an SSH shim from PATH'
+
+if LD_LIBRARY_PATH="$TMP/path-shims" \
+  PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
+  PLUTO_ACCEPTANCE_PROFILE_ID=rm1 PLUTO_LIFECYCLE_CYCLES=1 \
+  PLUTO_LIFECYCLE_WAKE_SECONDS=60 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/loader-env.out" 2>&1; then
+  fail 'production lifecycle smoke accepted loader-injection environment'
+fi
+grep -q 'LD_LIBRARY_PATH is forbidden for production acceptance' \
+  "$TMP/loader-env.out" ||
+  fail 'production lifecycle smoke did not diagnose loader-injection environment'
+if PLUTO_ACCEPTANCE_FFMPEG_BIN="$TMP/path-shims/ffmpeg" \
+  PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
+  PLUTO_ACCEPTANCE_PROFILE_ID=rm1 PLUTO_LIFECYCLE_CYCLES=1 \
+  PLUTO_LIFECYCLE_WAKE_SECONDS=60 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  "$SMOKE" root@127.0.0.1:1 >"$TMP/ffmpeg-override.out" 2>&1; then
+  fail 'production lifecycle smoke accepted an FFmpeg override'
+fi
+grep -q 'PLUTO_ACCEPTANCE_FFMPEG_BIN requires' "$TMP/ffmpeg-override.out" ||
+  fail 'production lifecycle smoke did not gate its FFmpeg override'
+
 reset_state "$TMP/pass"
-PLUTO_LIFECYCLE_CRASH_TEST=1 run_smoke normal "$TMP/pass" > "$TMP/pass.out"
+SSH_ARGV_LOG="$TMP/strict-ssh-argv" \
+  PLUTO_FAKE_CALL_LOG="$TMP/strict-cli-calls" \
+  PLUTO_LIFECYCLE_CRASH_TEST=1 \
+  run_smoke normal "$TMP/pass" > "$TMP/pass.out"
 grep -q 'PASS cycles=1 crash_test=1' "$TMP/pass.out" ||
   fail 'same-process warm resume and crash recovery did not pass'
 grep -Eq \
@@ -581,6 +732,15 @@ grep -Eq \
   'PASS cycle=1 .* wake_epoch=100060 accepted=100060 transport_down_observed=1' \
   "$TMP/pass.out" ||
   fail 'exact wake receipt and observed transport loss were not retained as evidence'
+grep -q "strict_ssh=1 ssh_bin=$TMP/bin/ssh" "$TMP/strict-cli-calls" ||
+  fail 'lifecycle Pluto CLI did not inherit acceptance-strict SSH mode'
+for strict_arg in \
+  '-F' '/dev/null' 'StrictHostKeyChecking=yes' 'ProxyCommand=none' \
+  'CanonicalizeHostname=no' 'ControlMaster=no' 'ControlPath=none' \
+  'ControlPersist=no'; do
+  grep -Fqx -- "arg=$strict_arg" "$TMP/strict-ssh-argv" ||
+    fail "lifecycle raw SSH omitted strict argument: $strict_arg"
+done
 . "$TMP/pass/state"
 [[ "$frontlight_snapshot" == none && "$standby_requests" == 1 &&
   "$(tr '\n' ',' < "$TMP/pass/publish-order")" == 'standby,' &&
@@ -588,9 +748,13 @@ grep -Eq \
   fail 'RM1 lifecycle fixture did not publish the exact marker-only transaction'
 
 reset_state "$TMP/rm2" rm2
-ACCEPTANCE_PROFILE_ID=rm2 PLUTO_LIFECYCLE_CRASH_TEST=0 \
-  run_smoke normal "$TMP/rm2" >/dev/null ||
+ACCEPTANCE_PROFILE_ID=rm2 PREPARE_RECEIPT_MODE=mounted \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/rm2" >"$TMP/rm2.out" ||
   fail 'RM2 lifecycle fixture no longer passes the common standby flow'
+grep -q 'action_count=0 surface_generation=24 proof_frame_id=19' \
+  "$TMP/rm2.out" ||
+  fail 'already-mounted Ink canvas did not require a fresh presentation receipt'
 . "$TMP/rm2/state"
 [[ "$frontlight_snapshot" == none && "$standby_requests" == 1 &&
   "$(tr '\n' ',' < "$TMP/rm2/publish-order")" == 'standby,' &&
@@ -760,7 +924,7 @@ grep -q 'could not arm RTC and request standby' "$TMP/uncleared.err" ||
 for camera_mismatch in '2|rm1' '3|rm2'; do
   IFS='|' read -r camera_rig camera_profile <<< "$camera_mismatch"
   error_file="$TMP/lifecycle-camera-$camera_rig-$camera_profile.err"
-  if PATH="$TMP/bin:$PATH" PLUTO_CLI=pluto \
+  if PATH="$TMP/bin:$PATH" \
     PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
     PLUTO_ACCEPTANCE_PROFILE_ID="$camera_profile" \
     PLUTO_ACCEPTANCE_STAGE_HOOK="$ROOT/tools/setup/camera/capture-acceptance-stage.sh" \
@@ -793,11 +957,13 @@ for mismatch in \
   'root@device|root@other-device|22' \
   'root@device:2222|root@device|22'; do
   mismatch_index=$((mismatch_index + 1))
-  reset_state "$TMP/mismatch-$mismatch_index"
   IFS='|' read -r cli_endpoint ssh_endpoint ssh_port <<< "$mismatch"
-  if ACCEPTANCE_DEVICE="$cli_endpoint" ACCEPTANCE_SSH_TARGET="$ssh_endpoint" \
-    ACCEPTANCE_SSH_PORT="$ssh_port" PLUTO_LIFECYCLE_CRASH_TEST=0 \
-    run_smoke normal "$TMP/mismatch-$mismatch_index" >/dev/null 2>&1; then
+  if PLUTO_ACCEPTANCE_RELEASE_REVISION="$REVISION" \
+    PLUTO_ACCEPTANCE_PROFILE_ID=rm1 PLUTO_LIFECYCLE_CYCLES=1 \
+    PLUTO_LIFECYCLE_WAKE_SECONDS=60 PLUTO_LIFECYCLE_CRASH_TEST=0 \
+    PLUTO_ACCEPTANCE_SSH_TARGET="$ssh_endpoint" \
+    PLUTO_ACCEPTANCE_SSH_PORT="$ssh_port" \
+    "$SMOKE" "$cli_endpoint" >/dev/null 2>&1; then
     fail "lifecycle smoke accepted split endpoint identity: $mismatch"
   fi
 done
@@ -816,6 +982,28 @@ if NO_STROKE_CHANGE=1 PLUTO_LIFECYCLE_CRASH_TEST=0 \
   run_smoke normal "$TMP/no-pixels" >/dev/null 2>&1; then
   fail 're-encoded unchanged Ink pixels passed lifecycle stroke acceptance'
 fi
+
+reset_state "$TMP/prepare-no-present"
+if PREPARE_RECEIPT_MODE=missing-present PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/prepare-no-present" >/dev/null \
+    2>"$TMP/prepare-no-present.err"; then
+  fail 'mutating Ink prepare without a native presentation receipt passed'
+fi
+grep -q 'Ink canvas preparation returned an invalid presentation receipt' \
+  "$TMP/prepare-no-present.err" ||
+  fail 'missing Ink presentation receipt failed for the wrong reason'
+
+reset_state "$TMP/prepare-wrong-start"
+if PREPARE_RECEIPT_MODE=wrong-start PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/prepare-wrong-start" >/dev/null \
+    2>"$TMP/prepare-wrong-start.err"; then
+  fail 'Ink receipt with a replacement process start time passed'
+fi
+grep -q 'Ink canvas preparation returned an invalid presentation receipt' \
+  "$TMP/prepare-wrong-start.err" ||
+  fail 'wrong Ink process start time failed for the wrong reason'
 
 reset_state "$TMP/cold"
 if PLUTO_LIFECYCLE_CRASH_TEST=0 run_smoke cold "$TMP/cold" >/dev/null 2>&1; then
@@ -839,7 +1027,9 @@ fi
 
 reset_state "$TMP/revision"
 if STATE_DIR="$TMP/revision" FIXTURE_MODE=normal PATH="$TMP/bin:$PATH" \
-  PLUTO_CLI=pluto \
+  PLUTO_CLI="$TMP/bin/pluto" \
+  PLUTO_ACCEPTANCE_SSH_BIN="$TMP/bin/ssh" \
+  PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1 \
   PLUTO_ACCEPTANCE_RELEASE_REVISION=ffffffffffffffffffffffffffffffffffffffff \
   PLUTO_ACCEPTANCE_PROFILE_ID=rm1 \
   PLUTO_LIFECYCLE_CYCLES=1 PLUTO_LIFECYCLE_WAKE_SECONDS=60 \

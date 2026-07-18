@@ -29,12 +29,28 @@ constexpr std::array<std::uint32_t, 3> kRequiredRefreshModes = {
     kModeUi,
     kModeFast,
 };
+constexpr std::array<std::string_view, 16> kSy7636aFaultStates = {
+    "no fault event",   "UVP at VP rail",    "UVP at VN rail",
+    "UVP at VPOS rail", "UVP at VNEG rail",  "UVP at VDDH rail",
+    "UVP at VEE rail",  "SCP at VP rail",    "SCP at VN rail",
+    "SCP at VPOS rail", "SCP at VNEG rail",  "SCP at VDDH rail",
+    "SCP at VEE rail",  "SCP at V COM rail", "UVLO",
+    "Thermal shutdown",
+};
 
 bool fail(std::string *error, std::string message) {
   if (error != nullptr) {
     *error = std::move(message);
   }
   return false;
+}
+
+Rm2PanelPowerState unavailable_power_state(std::string *error,
+                                           std::string message) {
+  if (error != nullptr) {
+    *error = std::move(message);
+  }
+  return {};
 }
 
 int hex_nibble(char value) {
@@ -414,8 +430,9 @@ std::optional<int> read_rm2_panel_temperature_millidegrees(std::string *error) {
   return std::nullopt;
 }
 
-bool read_rm2_panel_power_ready(std::string *error,
-                                std::string_view i2c_devices_root) {
+Rm2PanelPowerState
+read_rm2_panel_power_state(std::string *error,
+                           std::string_view i2c_devices_root) {
   namespace fs = std::filesystem;
   std::error_code filesystem_error;
   std::optional<fs::path> sy7636a_path;
@@ -432,15 +449,16 @@ bool read_rm2_panel_power_ready(std::string *error,
       continue;
     }
     if (sy7636a_path.has_value()) {
-      return fail(error, "multiple SY7636A I2C parents are ambiguous");
+      return unavailable_power_state(
+          error, "multiple SY7636A I2C parents are ambiguous");
     }
     sy7636a_path = entry->path();
   }
   if (filesystem_error) {
-    return fail(error, "cannot enumerate RM2 I2C devices");
+    return unavailable_power_state(error, "cannot enumerate RM2 I2C devices");
   }
   if (!sy7636a_path.has_value()) {
-    return fail(error, "SY7636A I2C parent was not found");
+    return unavailable_power_state(error, "SY7636A I2C parent was not found");
   }
 
   const std::optional<std::string> power_good =
@@ -448,18 +466,33 @@ bool read_rm2_panel_power_ready(std::string *error,
   const std::optional<std::string> state =
       read_trimmed_file(*sy7636a_path / "state");
   if (!power_good.has_value() || !state.has_value()) {
-    return fail(error, "SY7636A power/fault attributes are unreadable");
+    return unavailable_power_state(
+        error, "SY7636A power/fault attributes are unreadable");
   }
+  if (*power_good != "ON" && *power_good != "OFF") {
+    return unavailable_power_state(
+        error,
+        "SY7636A power-good attribute has unknown value='" + *power_good + "'");
+  }
+  if (std::find(kSy7636aFaultStates.begin(), kSy7636aFaultStates.end(),
+                std::string_view(*state)) == kSy7636aFaultStates.end()) {
+    return unavailable_power_state(
+        error,
+        "SY7636A fault-state attribute has unknown value='" + *state + "'");
+  }
+  const std::string latched_fault_event =
+      *state == "no fault event" ? std::string{} : *state;
   if (*power_good != "ON") {
-    return fail(error, "SY7636A panel power-good is not ON");
-  }
-  if (*state != "no fault event") {
-    return fail(error, "SY7636A reports a panel power fault");
+    if (error != nullptr) {
+      *error = "SY7636A panel power-good='" + *power_good + "' state='" +
+               *state + "'";
+    }
+    return {true, false, latched_fault_event};
   }
   if (error != nullptr) {
     error->clear();
   }
-  return true;
+  return {true, true, latched_fault_event};
 }
 
 } // namespace pluto::native::rm2

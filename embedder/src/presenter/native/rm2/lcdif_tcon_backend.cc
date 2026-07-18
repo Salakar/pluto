@@ -108,6 +108,65 @@ enum class HandoffDecision : std::uint8_t {
   kRejected,
 };
 
+enum class PoweredTemperatureContext : std::uint8_t {
+  kColdStart,
+  kPresent,
+};
+
+enum class PoweredTemperatureFailure : std::uint8_t {
+  kUnblank,
+  kSafeIdlePan,
+  kPowerPrecheck,
+  kRead,
+  kRange,
+  kPowerPostcheck,
+  kCount,
+};
+
+constexpr std::size_t kPoweredTemperatureFailureCount =
+    static_cast<std::size_t>(PoweredTemperatureFailure::kCount);
+constexpr std::array<std::string_view, kPoweredTemperatureFailureCount>
+    kColdPoweredTemperatureStages = {
+        "start.cold-initialize.powered-temperature-unblank",
+        "start.cold-initialize.powered-temperature-safe-idle-pan",
+        "start.cold-initialize.powered-temperature-power-precheck",
+        "start.cold-initialize.powered-temperature-read",
+        "start.cold-initialize.powered-temperature-range",
+        "start.cold-initialize.powered-temperature-power-postcheck",
+};
+constexpr std::array<std::string_view, kPoweredTemperatureFailureCount>
+    kPresentPoweredTemperatureStages = {
+        "present.powered-temperature-unblank",
+        "present.powered-temperature-safe-idle-pan",
+        "present.powered-temperature-power-precheck",
+        "present.powered-temperature-read",
+        "present.powered-temperature-range",
+        "present.powered-temperature-power-postcheck",
+};
+constexpr std::string_view kColdInitPostDrivePowerStateStage =
+    "start.cold-initialize.post-drive-power-state";
+constexpr std::string_view kColdInitPreDrivePowerStateStage =
+    "start.cold-initialize.pre-drive-power-state";
+constexpr std::string_view kPresentPreDrivePowerStateStage =
+    "present.pre-drive-power-state";
+constexpr std::string_view kPresentPostDrivePowerStateStage =
+    "present.post-drive-power-state";
+
+enum class InitClearOutcome : std::uint8_t {
+  kOk,
+  kDriveFailure,
+  kPowerStateFailure,
+};
+
+constexpr std::string_view
+powered_temperature_stage(PoweredTemperatureContext context,
+                          PoweredTemperatureFailure failure) {
+  const std::size_t index = static_cast<std::size_t>(failure);
+  return context == PoweredTemperatureContext::kColdStart
+             ? kColdPoweredTemperatureStages[index]
+             : kPresentPoweredTemperatureStages[index];
+}
+
 class HandoffFingerprint final {
 public:
   void add_u32(std::uint32_t value) {
@@ -409,18 +468,18 @@ public:
   Impl(const GeneratedDeviceProfile &profile,
        std::unique_ptr<MxsLcdifDevice> device,
        Rm2TemperatureReader temperature_reader,
-       Rm2PowerReadyReader power_ready_reader, Rm2HandoffOptions handoff)
+       Rm2PanelPowerStateReader power_state_reader, Rm2HandoffOptions handoff)
       : profile_(profile),
         device_(device == nullptr ? std::make_unique<MxsLcdifDevice>()
                                   : std::move(device)),
         temperature_reader_(temperature_reader
                                 ? std::move(temperature_reader)
                                 : read_rm2_panel_temperature_millidegrees),
-        power_ready_reader_(
-            power_ready_reader
-                ? std::move(power_ready_reader)
+        power_state_reader_(
+            power_state_reader
+                ? std::move(power_state_reader)
                 : [](std::string
-                         *error) { return read_rm2_panel_power_ready(error); }),
+                         *error) { return read_rm2_panel_power_state(error); }),
         pan_completion_delivery_delay_for_testing_(
             handoff.pan_completion_delivery_delay_for_testing),
         pan_worker_([this](std::uint32_t slot, Rm2PanResult *out_result) {
@@ -596,6 +655,9 @@ public:
       waveforms_.clear();
       observe_fault(status);
       return status;
+    }
+    if (!capture_panel_fault_baseline()) {
+      return rollback_powered_start(kPlutoStatusDeviceLost);
     }
     for (std::uint32_t slot = 0; slot < kRm2MappedSlots; ++slot) {
       if (!fill_rm2_scan_slot(device_->slot(slot), 0)) {
@@ -1227,82 +1289,146 @@ private:
     cpu_frequency_release_armed_ = true;
   }
 
+  void attempt_fail_safe_blank(std::string_view source_stage) noexcept {
+    if (device_->blank_powerdown() == kPlutoStatusOk) {
+      return;
+    }
+    std::string_view device_error = device_->last_error();
+    if (device_error.empty()) {
+      device_error = "<none>";
+    }
+    std::fprintf(stderr,
+                 "lcdif_tcon: RM2 fail-safe blank failure "
+                 "source_stage=%.*s status=%d mxs_lcdif_error=\"%.*s\"\n",
+                 static_cast<int>(source_stage.size()), source_stage.data(),
+                 static_cast<int>(kPlutoStatusDeviceLost),
+                 static_cast<int>(device_error.size()), device_error.data());
+  }
+
+  bool validate_powered_panel_state(std::string_view stage,
+                                    std::string *error) {
+    std::string local_error;
+    std::string *const reason = error == nullptr ? &local_error : error;
+    reason->clear();
+    const Rm2PanelPowerState state = power_state_reader_(reason);
+    if (!state.ready()) {
+      if (reason->empty()) {
+        *reason = state.attributes_readable
+                      ? "panel power-good is not ON"
+                      : "panel power state is unavailable";
+      }
+      return false;
+    }
+    if (!validate_panel_fault_transition(state, stage, reason)) {
+      if (reason->empty()) {
+        *reason = "panel fault-event transition is unsafe";
+      }
+      return false;
+    }
+    return true;
+  }
+
+  bool capture_panel_fault_baseline() {
+    panel_fault_baseline_captured_ = false;
+    panel_fault_baseline_.clear();
+    last_latched_fault_event_.clear();
+    std::string error;
+    const Rm2PanelPowerState baseline = power_state_reader_(&error);
+    // This sample is deliberately taken after framebuffer initialization has
+    // powered the panel down. PG=OFF is therefore expected and is not a failed
+    // powered check; the sysfs attributes themselves must still be readable.
+    if (!baseline.attributes_readable) {
+      const std::string_view reason =
+          error.empty() ? std::string_view("panel power state is unavailable")
+                        : std::string_view(error);
+      report_startup_failure("start.panel-fault-baseline",
+                             kPlutoStatusDeviceLost, reason);
+      return false;
+    }
+    if (baseline.power_good) {
+      report_startup_failure(
+          "start.panel-fault-baseline", kPlutoStatusDeviceLost,
+          "SY7636A panel power-good='ON' while framebuffer is powered down");
+      return false;
+    }
+    panel_fault_baseline_ = baseline.latched_fault_event;
+    panel_fault_baseline_captured_ = true;
+    if (!panel_fault_baseline_.empty()) {
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 panel fault baseline power_good=%s "
+                   "state=\"%s\"\n",
+                   baseline.power_good ? "ON" : "OFF",
+                   panel_fault_baseline_.c_str());
+    }
+    return true;
+  }
+
   std::optional<int>
   read_powered_temperature(std::string *error,
-                           bool report_cold_start_failure = false) {
+                           PoweredTemperatureContext context) {
     if (device_->is_blanked()) {
       if (device_->unblank(kRm2IdleSlot) != kPlutoStatusOk) {
-        if (report_cold_start_failure) {
-          report_startup_failure(
-              "start.cold-initialize.powered-temperature-unblank",
-              kPlutoStatusDeviceLost);
-        }
+        report_powered_temperature_failure(context,
+                                           PoweredTemperatureFailure::kUnblank);
         (void)device_->blank_powerdown();
         return std::nullopt;
       }
       if (!pan_with_deadline(kRm2IdleSlot)) {
-        if (report_cold_start_failure) {
-          report_startup_failure(
-              "start.cold-initialize.powered-temperature-safe-idle-pan",
-              kPlutoStatusDeviceLost,
-              "safe-idle pan failed or missed its deadline");
-        }
+        report_powered_temperature_failure(
+            context, PoweredTemperatureFailure::kSafeIdlePan,
+            "safe-idle pan failed or missed its deadline");
         (void)device_->blank_powerdown();
         return std::nullopt;
       }
     }
     // FB_BLANK_UNBLANK synchronously enables the LCDIF supply through the
-    // vendor kernel's SY7636A regulator path. The independent MFD attributes
-    // must then agree before and after the signed temperature register read.
-    if (!power_ready_reader_(error)) {
-      if (report_cold_start_failure) {
-        const std::string_view reason =
-            error != nullptr && !error->empty()
-                ? std::string_view(*error)
-                : std::string_view("panel power-ready precheck returned false");
-        report_startup_failure(
-            "start.cold-initialize.powered-temperature-power-precheck",
-            kPlutoStatusDeviceLost, reason);
-      }
-      (void)device_->blank_powerdown();
+    // vendor kernel's SY7636A regulator path. Live power-good must remain true
+    // before and after the signed temperature register read. A non-zero fault
+    // event is recorded separately because that register is historical and
+    // remains latched until the PMIC EN pin is retoggled.
+    const std::string_view precheck_stage = powered_temperature_stage(
+        context, PoweredTemperatureFailure::kPowerPrecheck);
+    if (!validate_powered_panel_state(precheck_stage, error)) {
+      const std::string_view reason =
+          error != nullptr && !error->empty()
+              ? std::string_view(*error)
+              : std::string_view("panel power state is unsafe");
+      report_powered_temperature_failure(
+          context, PoweredTemperatureFailure::kPowerPrecheck, reason);
+      attempt_fail_safe_blank(precheck_stage);
       return std::nullopt;
+    }
+    if (error != nullptr) {
+      error->clear();
     }
     const std::optional<int> temperature = temperature_reader_(error);
     if (!temperature.has_value()) {
-      if (report_cold_start_failure) {
-        const std::string_view reason =
-            error != nullptr && !error->empty()
-                ? std::string_view(*error)
-                : std::string_view(
-                      "panel temperature reader returned no value");
-        report_startup_failure("start.cold-initialize.powered-temperature-read",
-                               kPlutoStatusDeviceLost, reason);
-      }
+      const std::string_view reason =
+          error != nullptr && !error->empty()
+              ? std::string_view(*error)
+              : std::string_view("panel temperature reader returned no value");
+      report_powered_temperature_failure(
+          context, PoweredTemperatureFailure::kRead, reason);
       (void)device_->blank_powerdown();
       return std::nullopt;
     }
     if (!waveforms_.temperature_supported(*temperature)) {
-      if (report_cold_start_failure) {
-        report_startup_failure(
-            "start.cold-initialize.powered-temperature-range",
-            kPlutoStatusDeviceLost,
-            "panel temperature is outside the waveform range");
-      }
+      report_powered_temperature_failure(
+          context, PoweredTemperatureFailure::kRange,
+          "panel temperature is outside the waveform range");
       (void)device_->blank_powerdown();
       return std::nullopt;
     }
-    if (!power_ready_reader_(error)) {
-      if (report_cold_start_failure) {
-        const std::string_view reason =
-            error != nullptr && !error->empty()
-                ? std::string_view(*error)
-                : std::string_view(
-                      "panel power-ready postcheck returned false");
-        report_startup_failure(
-            "start.cold-initialize.powered-temperature-power-postcheck",
-            kPlutoStatusDeviceLost, reason);
-      }
-      (void)device_->blank_powerdown();
+    const std::string_view postcheck_stage = powered_temperature_stage(
+        context, PoweredTemperatureFailure::kPowerPostcheck);
+    if (!validate_powered_panel_state(postcheck_stage, error)) {
+      const std::string_view reason =
+          error != nullptr && !error->empty()
+              ? std::string_view(*error)
+              : std::string_view("panel power state is unsafe");
+      report_powered_temperature_failure(
+          context, PoweredTemperatureFailure::kPowerPostcheck, reason);
+      attempt_fail_safe_blank(postcheck_stage);
       return std::nullopt;
     }
     return temperature;
@@ -1323,7 +1449,7 @@ private:
 
     std::string error;
     const std::optional<int> temperature =
-        read_powered_temperature(&error, true);
+        read_powered_temperature(&error, PoweredTemperatureContext::kColdStart);
     std::vector<std::uint8_t> init_codes;
     Rm2WaveformSelection selection;
     if (!temperature.has_value()) {
@@ -1350,7 +1476,11 @@ private:
     if (!waveforms_.init_pan_codes(*temperature, &init_codes)) {
       return fail_cold_initialize("start.cold-initialize.init-waveform-select");
     }
-    if (!run_init_clear(init_codes)) {
+    const InitClearOutcome init_outcome = run_init_clear(init_codes);
+    if (init_outcome == InitClearOutcome::kPowerStateFailure) {
+      return kPlutoStatusDeviceLost;
+    }
+    if (init_outcome != InitClearOutcome::kOk) {
       return fail_cold_initialize("start.cold-initialize.init-clear");
     }
     {
@@ -1615,6 +1745,80 @@ private:
                  static_cast<int>(reason.size()), reason.data());
   }
 
+  void report_present_failure(
+      std::string_view stage, PlutoStatus status,
+      std::string_view reason = std::string_view{}) const noexcept {
+    std::string_view device_error = device_->last_error();
+    if (device_error.empty()) {
+      device_error = "<none>";
+    }
+    if (reason.empty()) {
+      reason = "<none>";
+    }
+    std::fprintf(stderr,
+                 "lcdif_tcon: RM2 present failure stage=%.*s status=%d "
+                 "mxs_lcdif_error=\"%.*s\" reason=\"%.*s\"\n",
+                 static_cast<int>(stage.size()), stage.data(),
+                 static_cast<int>(status),
+                 static_cast<int>(device_error.size()), device_error.data(),
+                 static_cast<int>(reason.size()), reason.data());
+  }
+
+  void report_powered_temperature_failure(
+      PoweredTemperatureContext context, PoweredTemperatureFailure failure,
+      std::string_view reason = std::string_view{}) const noexcept {
+    const std::string_view stage = powered_temperature_stage(context, failure);
+    if (context == PoweredTemperatureContext::kColdStart) {
+      report_startup_failure(stage, kPlutoStatusDeviceLost, reason);
+      return;
+    }
+    report_present_failure(stage, kPlutoStatusDeviceLost, reason);
+  }
+
+  bool validate_panel_fault_transition(const Rm2PanelPowerState &state,
+                                       std::string_view stage,
+                                       std::string *error) {
+    if (!panel_fault_baseline_captured_) {
+      if (error != nullptr) {
+        *error = "panel fault-event baseline was not captured";
+      }
+      return false;
+    }
+    if (state.latched_fault_event != panel_fault_baseline_) {
+      if (error != nullptr) {
+        const std::string_view baseline =
+            panel_fault_baseline_.empty()
+                ? std::string_view("no fault event")
+                : std::string_view(panel_fault_baseline_);
+        const std::string_view observed =
+            state.latched_fault_event.empty()
+                ? std::string_view("no fault event")
+                : std::string_view(state.latched_fault_event);
+        *error = "SY7636A fault-event transition during presenter ownership "
+                 "baseline='" +
+                 std::string(baseline) + "' observed='" +
+                 std::string(observed) + "'";
+      }
+      return false;
+    }
+    if (state.latched_fault_event.empty()) {
+      last_latched_fault_event_.clear();
+      return true;
+    }
+    ++latched_fault_observations_;
+    if (state.latched_fault_event == last_latched_fault_event_) {
+      return true;
+    }
+    last_latched_fault_event_ = state.latched_fault_event;
+    std::fprintf(stderr,
+                 "lcdif_tcon: RM2 panel fault event remains latched "
+                 "stage=%.*s power_good=ON state=\"%s\"; live rails are "
+                 "in regulation\n",
+                 static_cast<int>(stage.size()), stage.data(),
+                 state.latched_fault_event.c_str());
+    return true;
+  }
+
   PlutoStatus
   fail_cold_initialize(std::string_view stage,
                        std::string_view reason = std::string_view{}) {
@@ -1646,28 +1850,49 @@ private:
     return rollback_powered_start(status);
   }
 
-  bool run_init_clear(const std::vector<std::uint8_t> &codes) {
-    if (codes.empty() || device_->is_blanked() ||
-        !fill_rm2_scan_slot(device_->slot(0), 0) ||
+  InitClearOutcome run_init_clear(const std::vector<std::uint8_t> &codes) {
+    if (codes.empty() || device_->is_blanked()) {
+      return InitClearOutcome::kDriveFailure;
+    }
+    if (!fill_rm2_scan_slot(device_->slot(0), 0) ||
         !fill_rm2_scan_slot(device_->slot(1), 0x5555U) ||
         !fill_rm2_scan_slot(device_->slot(2), 0xaaaaU)) {
-      return false;
+      return InitClearOutcome::kDriveFailure;
+    }
+    std::string error;
+    if (!validate_powered_panel_state(kColdInitPreDrivePowerStateStage,
+                                      &error)) {
+      report_startup_failure(kColdInitPreDrivePowerStateStage,
+                             kPlutoStatusDeviceLost, error);
+      attempt_fail_safe_blank(kColdInitPreDrivePowerStateStage);
+      return InitClearOutcome::kPowerStateFailure;
     }
     if (!pan_with_deadline(codes.front()) || !pan_with_deadline(kRm2IdleSlot)) {
-      return false;
+      return InitClearOutcome::kDriveFailure;
     }
     for (std::size_t phase = 1; phase < codes.size(); ++phase) {
       if (!pan_with_deadline(codes[phase])) {
-        return false;
+        return InitClearOutcome::kDriveFailure;
       }
     }
-    if (!pan_with_deadline(kRm2IdleSlot) ||
-        device_->blank_powerdown() != kPlutoStatusOk) {
-      return false;
+    if (!pan_with_deadline(kRm2IdleSlot)) {
+      return InitClearOutcome::kDriveFailure;
     }
-    return fill_rm2_scan_slot(device_->slot(0), 0) &&
-           fill_rm2_scan_slot(device_->slot(1), 0) &&
-           fill_rm2_scan_slot(device_->slot(2), 0);
+    error.clear();
+    if (!validate_powered_panel_state(kColdInitPostDrivePowerStateStage,
+                                      &error)) {
+      report_startup_failure(kColdInitPostDrivePowerStateStage,
+                             kPlutoStatusDeviceLost, error);
+      attempt_fail_safe_blank(kColdInitPostDrivePowerStateStage);
+      return InitClearOutcome::kPowerStateFailure;
+    }
+    if (device_->blank_powerdown() != kPlutoStatusOk ||
+        !fill_rm2_scan_slot(device_->slot(0), 0) ||
+        !fill_rm2_scan_slot(device_->slot(1), 0) ||
+        !fill_rm2_scan_slot(device_->slot(2), 0)) {
+      return InitClearOutcome::kDriveFailure;
+    }
+    return InitClearOutcome::kOk;
   }
 
   void record_encode_duration(std::chrono::steady_clock::duration duration) {
@@ -1708,7 +1933,7 @@ private:
         "lcdif_tcon: telemetry jobs=%llu phases=%llu encode_p50_us=%llu "
         "encode_p95_us=%llu encode_p99_us=%llu encode_max_us=%llu "
         "missed_deadlines=%llu underflows=%llu safe_holds=%llu "
-        "hardware_faults=%llu\n",
+        "hardware_faults=%llu latched_fault_observations=%llu\n",
         static_cast<unsigned long long>(completed_jobs_),
         static_cast<unsigned long long>(presented_phases_),
         static_cast<unsigned long long>(encode_percentile(50)),
@@ -1718,7 +1943,8 @@ private:
         static_cast<unsigned long long>(missed_deadlines_),
         static_cast<unsigned long long>(underflows_),
         static_cast<unsigned long long>(safe_holds_),
-        static_cast<unsigned long long>(hardware_faults_));
+        static_cast<unsigned long long>(hardware_faults_),
+        static_cast<unsigned long long>(latched_fault_observations_));
     std::fprintf(
         stderr,
         "lcdif_tcon: damage jobs=%llu requested_pixels=%llu "
@@ -1869,10 +2095,24 @@ private:
                   left.panel_rect.row_min < right.panel_rect.row_min);
         });
 
-    const std::optional<int> temperature = read_powered_temperature(nullptr);
-    if (!temperature || *temperature >= kMaximumBurstTemperatureMillidegrees ||
-        !waveforms_.select(request.refresh_class, *temperature,
+    std::string error;
+    const std::optional<int> temperature =
+        read_powered_temperature(&error, PoweredTemperatureContext::kPresent);
+    if (!temperature) {
+      return false;
+    }
+    if (*temperature >= kMaximumBurstTemperatureMillidegrees) {
+      report_present_failure(
+          "present.powered-temperature-panel-thermal-limit",
+          kPlutoStatusDeviceLost,
+          "panel temperature reached the burst safety limit");
+      return false;
+    }
+    if (!waveforms_.select(request.refresh_class, *temperature,
                            &job->waveform)) {
+      report_present_failure("present.powered-temperature-waveform-select",
+                             kPlutoStatusDeviceLost,
+                             "no waveform matches the admitted refresh class");
       return false;
     }
     std::size_t pixels = 0;
@@ -2137,6 +2377,15 @@ private:
       return kPlutoStatusDeviceLost;
     }
 
+    std::string power_error;
+    if (!validate_powered_panel_state(kPresentPreDrivePowerStateStage,
+                                      &power_error)) {
+      report_present_failure(kPresentPreDrivePowerStateStage,
+                             kPlutoStatusDeviceLost, power_error);
+      attempt_fail_safe_blank(kPresentPreDrivePowerStateStage);
+      return kPlutoStatusDeviceLost;
+    }
+
     auto pan_begin = std::chrono::steady_clock::now();
     if (!pan_worker_.begin(0)) {
       (void)device_->blank_powerdown();
@@ -2183,6 +2432,14 @@ private:
     }
     if (!pan_with_deadline(kRm2IdleSlot)) {
       (void)device_->blank_powerdown();
+      return kPlutoStatusDeviceLost;
+    }
+    power_error.clear();
+    if (!validate_powered_panel_state(kPresentPostDrivePowerStateStage,
+                                      &power_error)) {
+      report_present_failure(kPresentPostDrivePowerStateStage,
+                             kPlutoStatusDeviceLost, power_error);
+      attempt_fail_safe_blank(kPresentPostDrivePowerStateStage);
       return kPlutoStatusDeviceLost;
     }
     for (std::uint32_t slot = 0; slot < kRm2ActiveSlots; ++slot) {
@@ -2261,7 +2518,7 @@ private:
   const GeneratedDeviceProfile &profile_;
   std::unique_ptr<MxsLcdifDevice> device_;
   Rm2TemperatureReader temperature_reader_;
-  Rm2PowerReadyReader power_ready_reader_;
+  Rm2PanelPowerStateReader power_state_reader_;
   Rm2WaveformProgram waveforms_;
   Rm2PhaseEncoder phase_encoder_;
   std::chrono::nanoseconds pan_completion_delivery_delay_for_testing_{};
@@ -2292,6 +2549,8 @@ private:
   std::vector<std::uint8_t> incoming_renderer_payload_;
   std::vector<std::uint8_t> incoming_settled_levels_;
   std::vector<std::uint16_t> incoming_mirror_;
+  std::string panel_fault_baseline_;
+  std::string last_latched_fault_event_;
   std::array<std::uint64_t, kEncodeHistogramBuckets> encode_histogram_{};
   PlutoPresentCompleteCallback callback_ = nullptr;
   void *callback_user_data_ = nullptr;
@@ -2312,11 +2571,13 @@ private:
   bool worker_configured_ = false;
   bool telemetry_active_ = false;
   bool telemetry_emitted_ = false;
+  bool panel_fault_baseline_captured_ = false;
   bool cpu_frequency_release_armed_ = false;
   std::chrono::steady_clock::time_point cpu_frequency_release_deadline_{};
   std::chrono::steady_clock::time_point cpu_thermal_retry_deadline_{};
   std::uint64_t completed_jobs_ = 0;
   std::uint64_t hardware_faults_ = 0;
+  std::uint64_t latched_fault_observations_ = 0;
   std::uint64_t presented_phases_ = 0;
   std::uint64_t missed_deadlines_ = 0;
   std::uint64_t underflows_ = 0;
@@ -2333,10 +2594,10 @@ LcdifTconDisplayBackend::LcdifTconDisplayBackend(
     const GeneratedDeviceProfile &profile,
     std::unique_ptr<MxsLcdifDevice> device,
     Rm2TemperatureReader temperature_reader,
-    Rm2PowerReadyReader power_ready_reader, Rm2HandoffOptions handoff)
+    Rm2PanelPowerStateReader power_state_reader, Rm2HandoffOptions handoff)
     : impl_(std::make_unique<Impl>(
           profile, std::move(device), std::move(temperature_reader),
-          std::move(power_ready_reader), std::move(handoff))) {}
+          std::move(power_state_reader), std::move(handoff))) {}
 
 LcdifTconDisplayBackend::~LcdifTconDisplayBackend() = default;
 

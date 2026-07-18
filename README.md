@@ -51,12 +51,14 @@ or a successful SSH connection. Exact validation details live in
 | Device | Codename | Tested reMarkable OS | Release status |
 | --- | --- | --- | --- |
 | reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | ✅ Reference device; release platform, Ink, and Codex validated |
-| reMarkable 2 | `zero-sugar` | 3.28.0.162 | 🧪 Native CPU/scan pipeline verified; first Pluto panel write and final app acceptance pending |
-| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | 🧪 Runtime and real-panel path verified; final Ink/Codex acceptance in progress |
+| reMarkable 2 | `zero-sugar` | 3.28.0.162 | 🧪 Native CPU/scan pipeline verified; final supported-app acceptance pending |
+| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | 🧪 Runtime and real-panel path verified; final supported-app acceptance pending |
 
 Only the first row currently represents completed end-to-end application
 acceptance. The two legacy tablets will be promoted only after the same frozen
-release passes visible Home, switching, Ink, and real Codex runs; this README
+release passes visible Home, switching, the supported app set, and Ink runs;
+Paper Codex is not an RM1/RM2 requirement because upstream has no native ARMv7
+release. This README
 does not treat host tests, CPU-only bring-up, or a synthetic UI as panel
 acceptance.
 
@@ -94,9 +96,9 @@ and symmetry.
 
 ### Paper Codex
 
-**Optionally installable.** A Codex-first paper notebook: pick the model and
-thinking effort, converse on a calm writing surface, and flip through a shelf
-of pages.
+**Optionally installable on `linux-arm64`.** A Codex-first paper notebook: pick
+the model and thinking effort, converse on a calm writing surface, and flip
+through a shelf of pages. Pluto does not maintain a custom ARMv7 Codex port.
 
 <table>
   <tr>

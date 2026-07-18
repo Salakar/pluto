@@ -27,6 +27,13 @@ sealed class PlutoException implements Exception {
   }
 }
 
+/// Host-side CLI configuration is invalid or unsafe for the requested mode.
+final class CliConfigurationException extends PlutoException {
+  /// Creates a CLI configuration failure.
+  const CliConfigurationException({required super.message, super.remediation})
+    : super(exitCode: ExitCodes.usage);
+}
+
 /// A device could not be reached over the configured transport.
 final class DeviceUnreachableException extends PlutoException {
   /// Creates a device reachability failure.

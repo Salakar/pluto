@@ -161,6 +161,37 @@ void main() {
     expect(fixture.host.commands, isEmpty);
   });
 
+  test(
+    'authored target contract rejects unsupported linux-arm before tools',
+    () async {
+      final _BuildFixture fixture = _BuildFixture(
+        targetPlatform: PlutoTargetPlatform.linuxArm,
+        authoredTargets: const <String>['linux-arm64'],
+      );
+      addTearDown(fixture.dispose);
+
+      await expectLater(
+        fixture.adapter.build(
+          BuildRequest(
+            projectDirectory: fixture.project.path,
+            targetFile: 'lib/main.dart',
+            mode: PlutoBuildMode.release,
+            outputDirectory: 'build/pluto/release-arm',
+            targetPlatform: PlutoTargetPlatform.linuxArm,
+          ),
+        ),
+        throwsA(
+          isA<ArtifactVerificationException>().having(
+            (ArtifactVerificationException error) => error.message,
+            'message',
+            allOf(contains('Example'), contains('does not support linux-arm')),
+          ),
+        ),
+      );
+      expect(fixture.host.commands, isEmpty);
+    },
+  );
+
   test('build metadata is unversioned, exact, and strictly decoded', () {
     final Directory temp = Directory.systemTemp.createTempSync(
       'pluto-build-metadata-',
@@ -340,6 +371,7 @@ void main() {
           'flutterVersion': '3.44.4',
           'engineCommit': _engineHash,
         },
+        'targets': <Object?>['linux-arm', 'linux-arm64'],
         'permissions': <Object?>[],
         'display': <String, Object?>{
           'orientations': <Object?>['portrait'],
@@ -384,7 +416,10 @@ void main() {
 }
 
 final class _BuildFixture {
-  _BuildFixture({this.targetPlatform = PlutoTargetPlatform.linuxArm64}) {
+  _BuildFixture({
+    this.targetPlatform = PlutoTargetPlatform.linuxArm64,
+    this.authoredTargets,
+  }) {
     Directory('$rootPath/tools/pluto/pins').createSync(recursive: true);
     File(
       '$rootPath/tools/pluto/pins/flutter.version',
@@ -423,10 +458,15 @@ final class _BuildFixture {
     File('${project.path}/lib/main.dart')
       ..createSync(recursive: true)
       ..writeAsStringSync('void main() {}\n');
+    final String targetsYaml = authoredTargets == null
+        ? ''
+        : '\ntargets:\n'
+              '${authoredTargets!.map((String target) => '  - $target').join('\n')}\n';
     File('${project.path}/pluto.yaml').writeAsStringSync('''
 id: dev.example.app
 name: Example
 version: 1.0.0
+${targetsYaml.trimRight()}
 ''');
     File(
       '${project.path}/icon.png',
@@ -460,6 +500,8 @@ ${sha256Bytes(utf8.encode(contents['libflutter_engine.so']!))}  libflutter_engin
   }
 
   final PlutoTargetPlatform targetPlatform;
+
+  final List<String>? authoredTargets;
 
   final Directory temp = Directory.systemTemp.createTempSync('pluto-aot-test-');
 

@@ -101,6 +101,29 @@ bool prepare_direct_ink_canvas_from_semantics(
     const DirectInkSemanticsTap &tap, std::chrono::milliseconds timeout,
     std::size_t *action_count, DirectControlFailure *failure);
 
+struct DirectInkPresentationProof {
+  std::uint64_t surface_generation = 0;
+  std::uint64_t frame_id = 0;
+};
+
+// Native presentation proof used by the bounded Ink acceptance flow. It must
+// establish a post-semantics Flutter frame fence and then complete one exact
+// retained-surface Full presenter frame.
+struct DirectInkPresentationTracker {
+  std::function<bool(std::chrono::milliseconds, DirectInkPresentationProof *)>
+      prove;
+};
+
+// Couples the exact Ink semantics flow to a native presenter receipt. The
+// proof is mandatory even for an already-mounted editor (actionCount == 0).
+bool prepare_direct_ink_canvas_with_presentation_receipt(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap,
+    const DirectInkPresentationTracker &presentation,
+    std::chrono::milliseconds semantics_timeout,
+    std::chrono::milliseconds presentation_timeout, std::size_t *action_count,
+    DirectInkPresentationProof *proof, DirectControlFailure *failure);
+
 struct EngineHostConfig {
   // Product AOT is the safe default. JIT is reserved for callers that
   // explicitly opt in to debug mode (normally for the hot-reload loop).
@@ -243,6 +266,11 @@ private:
                                       std::int64_t expected_pid,
                                       DirectInkCanvasResult *result,
                                       DirectControlFailure *failure);
+  bool schedule_frame_on_platform_thread(
+      std::chrono::steady_clock::time_point deadline,
+      std::uint64_t *pre_schedule_surface_generation);
+  bool prove_direct_ink_presentation(std::chrono::milliseconds timeout,
+                                     DirectInkPresentationProof *proof);
   std::string hibernate_marker_path() const;
   bool publish_hibernate_marker() const;
   bool publish_control_file(const std::string &leaf,

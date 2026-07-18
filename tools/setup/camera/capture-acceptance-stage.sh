@@ -1,5 +1,39 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+[[ "$-" == *p* ]] || {
+  echo "camera acceptance stage: execute this entrypoint directly or with /bin/bash -p" >&2
+  exit 2
+}
+
+ALLOW_TEST_HOOKS="${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-0}"
+[[ "$ALLOW_TEST_HOOKS" == 0 || "$ALLOW_TEST_HOOKS" == 1 ]] || {
+  echo "camera acceptance stage: PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS must be 0 or 1" >&2
+  exit 2
+}
+LOADER_ENV_NAMES=()
+while IFS= read -r loader_name; do
+  case "$loader_name" in
+    LD_* | DYLD_* | GLIBC_TUNABLES) LOADER_ENV_NAMES+=("$loader_name") ;;
+  esac
+done < <(compgen -e)
+if [[ "$ALLOW_TEST_HOOKS" != 1 ]] && ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    [[ -z "${!loader_name:-}" ]] || {
+      echo "camera acceptance stage: $loader_name is forbidden for production capture" >&2
+      exit 2
+    }
+  done
+fi
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+if ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    unset "$loader_name"
+  done
+fi
+if [[ "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  PATH=/usr/bin:/bin
+  export PATH
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_SCRIPT="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
@@ -12,9 +46,9 @@ CONFIG_OVERRIDE="${PLUTO_CAMERA_CONFIG:-}"
 RIG="${PLUTO_CAMERA_RIG:-}"
 OUTPUT_DIR="${PLUTO_CAMERA_ACCEPTANCE_DIR:-}"
 SETTLE_SECONDS="${PLUTO_CAMERA_ACCEPTANCE_SETTLE:-1}"
-ALLOW_TEST_HOOKS="${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-0}"
 EXPECTED_PROFILE="${PLUTO_ACCEPTANCE_PROFILE_ID:-}"
 LABEL="${1:-}"
+PYTHON_BIN=/usr/bin/python3
 
 die() {
   echo "camera acceptance stage: $*" >&2
@@ -22,10 +56,14 @@ die() {
 }
 
 sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+  if [[ -x /usr/bin/sha256sum ]]; then
+    /usr/bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  elif [[ -x /bin/sha256sum ]]; then
+    /bin/sha256sum "$1" | /usr/bin/awk '{print $1}'
+  elif [[ -x /usr/bin/shasum ]]; then
+    LC_ALL=C LANG=C /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
   else
-    shasum -a 256 "$1" | awk '{print $1}'
+    die "pinned SHA-256 tool is unavailable"
   fi
 }
 
@@ -42,10 +80,64 @@ canonical_regular_file() {
   printf '%s/%s\n' "$directory" "$basename"
 }
 
+validated_capture_toolchain() {
+  local rows index key value extra expected_key
+  local expected_keys=(
+    camera_python_binary
+    camera_python_sha256
+    camera_ffmpeg_binary
+    camera_ffmpeg_sha256
+    camera_ffprobe_binary
+    camera_ffprobe_sha256
+  )
+  local values=()
+  if [[ "$CAPTURE_MODE" == repository ]]; then
+    rows="$("$CAPTURE" --acceptance-toolchain)" ||
+      die "repository capture toolchain could not be resolved"
+  else
+    rows=$'camera_python_binary\tnot-applicable\n'
+    rows+=$'camera_python_sha256\tnot-applicable\n'
+    rows+=$'camera_ffmpeg_binary\tnot-applicable\n'
+    rows+=$'camera_ffmpeg_sha256\tnot-applicable\n'
+    rows+=$'camera_ffprobe_binary\tnot-applicable\n'
+    rows+=$'camera_ffprobe_sha256\tnot-applicable'
+  fi
+  index=0
+  while IFS=$'\t' read -r key value extra; do
+    index=$((index + 1))
+    [[ "$index" -le 6 ]] || die "capture toolchain contains extra rows"
+    expected_key=${expected_keys[$((index - 1))]}
+    [[ -z "${extra:-}" && "$key" == "$expected_key" && -n "$value" ]] ||
+      die "invalid capture toolchain row $index"
+    values+=("$value")
+  done <<< "$rows"
+  [[ "$index" == 6 ]] || die "capture toolchain must contain exactly six rows"
+  if [[ "$CAPTURE_MODE" == repository ]]; then
+    for index in 0 2 4; do
+      [[ "${values[$index]}" == /* &&
+        "${values[$index]}" != *$'\t'* &&
+        "${values[$index]}" != *$'\n'* &&
+        -f "${values[$index]}" && ! -L "${values[$index]}" &&
+        -x "${values[$index]}" ]] ||
+        die "capture toolchain contains an unsafe executable path"
+      [[ "${values[$((index + 1))]}" =~ ^[0-9a-f]{64}$ &&
+        "$(sha256_file "${values[$index]}")" == "${values[$((index + 1))]}" ]] ||
+        die "capture toolchain executable digest is stale"
+    done
+  else
+    for value in "${values[@]}"; do
+      [[ "$value" == not-applicable ]] ||
+        die "test capture toolchain must be marked not-applicable"
+    done
+  fi
+  printf '%s\n' "$rows"
+}
+
 write_current_provenance() {
   local destination="$1"
   local stage_path capture_path driver_path config_path config_snapshot
   local stage_sha capture_sha driver_sha config_sha config_snapshot_sha
+  local capture_toolchain
 
   stage_path="$(canonical_regular_file "$STAGE_SCRIPT")"
   capture_path="$(canonical_regular_file "$CAPTURE")"
@@ -67,6 +159,7 @@ write_current_provenance() {
     config_sha=not-applicable
     config_snapshot_sha=not-applicable
   fi
+  capture_toolchain="$(validated_capture_toolchain)"
 
   cat > "$destination" <<EOF
 test_seam	$ALLOW_TEST_HOOKS
@@ -81,6 +174,7 @@ camera_capture_path	$capture_path
 camera_capture_sha256	$capture_sha
 camera_driver_path	$driver_path
 camera_driver_sha256	$driver_sha
+$capture_toolchain
 camera_config_path	$config_path
 camera_config_sha256	$config_sha
 camera_config_snapshot	$config_snapshot
@@ -120,11 +214,13 @@ fi
   die "camera capture command is not an executable regular file: $CAPTURE"
 CAMERA_PROFILE_ID=not-applicable
 if [[ "$CAPTURE_MODE" == repository ]]; then
+  [[ -f "$PYTHON_BIN" && ! -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] ||
+    die "pinned Python interpreter is unavailable: $PYTHON_BIN"
   case "$EXPECTED_PROFILE" in
     rm1 | rm2 | move) ;;
     *) die "PLUTO_ACCEPTANCE_PROFILE_ID must be rm1, rm2, or move" ;;
   esac
-  CAMERA_PROFILE_ID="$(python3 "$ACCEPTANCE_IDENTITY" camera-profile \
+  CAMERA_PROFILE_ID="$("$PYTHON_BIN" -I "$ACCEPTANCE_IDENTITY" camera-profile \
     --config "$CONFIG" --device "$RIG" --expected-profile "$EXPECTED_PROFILE")" ||
     die "camera rig $RIG is not bound to expected profile $EXPECTED_PROFILE"
 fi
@@ -152,7 +248,7 @@ write_current_provenance "$PROVENANCE_TMP"
 CONFIG_SNAPSHOT="$OUTPUT_DIR/camera-config.json"
 CONFIG_SNAPSHOT_TMP=""
 if [[ "$CAPTURE_MODE" == repository ]]; then
-  expected_config_sha="$(awk -F '\t' '$1 == "camera_config_sha256" {print $2}' "$PROVENANCE_TMP")"
+  expected_config_sha="$(/usr/bin/awk -F '\t' '$1 == "camera_config_sha256" {print $2}' "$PROVENANCE_TMP")"
   [[ "$expected_config_sha" =~ ^[0-9a-f]{64}$ ]] ||
     die "repository camera provenance lacks a config digest"
   [[ ! -L "$CONFIG_SNAPSHOT" ]] || die "camera config snapshot must not be a symlink"
@@ -203,10 +299,22 @@ output="$OUTPUT_DIR/$basename"
 
 sleep "$SETTLE_SECONDS"
 if [[ "$CAPTURE_MODE" == repository ]]; then
-  driver_sha="$(awk -F '\t' '$1 == "camera_driver_sha256" {print $2}' "$PROVENANCE")"
-  config_sha="$(awk -F '\t' '$1 == "camera_config_sha256" {print $2}' "$PROVENANCE")"
+  driver_sha="$(/usr/bin/awk -F '\t' '$1 == "camera_driver_sha256" {print $2}' "$PROVENANCE")"
+  config_sha="$(/usr/bin/awk -F '\t' '$1 == "camera_config_sha256" {print $2}' "$PROVENANCE")"
+  python_binary="$(/usr/bin/awk -F '\t' '$1 == "camera_python_binary" {print $2}' "$PROVENANCE")"
+  python_sha="$(/usr/bin/awk -F '\t' '$1 == "camera_python_sha256" {print $2}' "$PROVENANCE")"
+  ffmpeg_binary="$(/usr/bin/awk -F '\t' '$1 == "camera_ffmpeg_binary" {print $2}' "$PROVENANCE")"
+  ffmpeg_sha="$(/usr/bin/awk -F '\t' '$1 == "camera_ffmpeg_sha256" {print $2}' "$PROVENANCE")"
+  ffprobe_binary="$(/usr/bin/awk -F '\t' '$1 == "camera_ffprobe_binary" {print $2}' "$PROVENANCE")"
+  ffprobe_sha="$(/usr/bin/awk -F '\t' '$1 == "camera_ffprobe_sha256" {print $2}' "$PROVENANCE")"
   PLUTO_CAMERA_EXPECTED_DRIVER_SHA256="$driver_sha" \
     PLUTO_CAMERA_EXPECTED_CONFIG_SHA256="$config_sha" \
+    PLUTO_CAMERA_EXPECTED_PYTHON_BINARY="$python_binary" \
+    PLUTO_CAMERA_EXPECTED_PYTHON_SHA256="$python_sha" \
+    PLUTO_CAMERA_EXPECTED_FFMPEG_BINARY="$ffmpeg_binary" \
+    PLUTO_CAMERA_EXPECTED_FFMPEG_SHA256="$ffmpeg_sha" \
+    PLUTO_CAMERA_EXPECTED_FFPROBE_BINARY="$ffprobe_binary" \
+    PLUTO_CAMERA_EXPECTED_FFPROBE_SHA256="$ffprobe_sha" \
     "$CAPTURE" image --device "$RIG" --output "$output"
 else
   "$CAPTURE" image --device "$RIG" --output "$output"

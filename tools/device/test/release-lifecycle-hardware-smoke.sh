@@ -1,16 +1,52 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Exact-device suspend/resume and foreground-crash acceptance for a deployed
 # release. This is intentionally separate from the visual app smoke so a final
 # camera run can happen after all destructive recovery exercises.
 set -euo pipefail
+[[ "$-" == *p* ]] || {
+  echo "release lifecycle smoke: execute this entrypoint directly or with /bin/bash -p" >&2
+  exit 64
+}
+
+ALLOW_TEST_HOOKS="${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-0}"
+[[ "$ALLOW_TEST_HOOKS" == 0 || "$ALLOW_TEST_HOOKS" == 1 ]] || {
+  echo "release lifecycle smoke: PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS must be 0 or 1" >&2
+  exit 64
+}
+LOADER_ENV_NAMES=()
+while IFS= read -r loader_name; do
+  case "$loader_name" in
+    LD_* | DYLD_* | GLIBC_TUNABLES) LOADER_ENV_NAMES+=("$loader_name") ;;
+  esac
+done < <(compgen -e)
+if [[ "$ALLOW_TEST_HOOKS" != 1 ]] && ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    [[ -z "${!loader_name:-}" ]] || {
+      echo "release lifecycle smoke: $loader_name is forbidden for production acceptance" >&2
+      exit 64
+    }
+  done
+fi
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+if ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    unset "$loader_name"
+  done
+fi
+if [[ "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  PATH=/usr/bin:/bin
+  export PATH
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 OFFICIAL_STAGE_HOOK="$ROOT/tools/setup/camera/capture-acceptance-stage.sh"
 OFFICIAL_CAMERA_CAPTURE="$ROOT/tools/setup/camera/capture.sh"
 ACCEPTANCE_IDENTITY="$ROOT/tools/device/diagnostics/acceptance_identity.py"
+CONTROL_RECEIPT_VERIFIER="$ROOT/tools/device/diagnostics/verify_control_receipt.py"
 DEVICE="${1:-root@10.11.99.1}"
-CLI="${PLUTO_CLI:-pluto}"
+CLI_OVERRIDE="${PLUTO_CLI:-}"
+SSH_BIN_OVERRIDE="${PLUTO_ACCEPTANCE_SSH_BIN:-}"
 SSH_TARGET="${PLUTO_ACCEPTANCE_SSH_TARGET:-$DEVICE}"
 SSH_PORT="${PLUTO_ACCEPTANCE_SSH_PORT:-}"
 SSH_BIND_ADDRESS="${PLUTO_ACCEPTANCE_SSH_BIND_ADDRESS:-}"
@@ -39,12 +75,19 @@ EXPECTED_REVISION="${PLUTO_ACCEPTANCE_RELEASE_REVISION:-}"
 EXPECTED_PROFILE="${PLUTO_ACCEPTANCE_PROFILE_ID:-}"
 EXPECTED_APP_ID=dev.pluto.ink
 LAUNCHER_APP_ID=dev.pluto.launcher
-ALLOW_TEST_HOOKS="${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-0}"
+FFMPEG_OVERRIDE="${PLUTO_ACCEPTANCE_FFMPEG_BIN:-}"
 SSH_OPTIONS=(
+  -F /dev/null
   -o BatchMode=yes
   -o ConnectTimeout=3
   -o ServerAliveInterval=2
   -o ServerAliveCountMax=1
+  -o StrictHostKeyChecking=yes
+  -o ProxyCommand=none
+  -o CanonicalizeHostname=no
+  -o ControlMaster=no
+  -o ControlPath=none
+  -o ControlPersist=no
 )
 
 is_positive_integer() {
@@ -92,6 +135,59 @@ is_nonnegative_decimal "$CRASH_SETTLE_SECONDS" || {
   echo "release lifecycle smoke: PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS must be 0 or 1" >&2
   exit 64
 }
+if [[ -n "$CLI_OVERRIDE" && "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  echo "release lifecycle smoke: PLUTO_CLI requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1" >&2
+  exit 64
+fi
+if [[ -n "$SSH_BIN_OVERRIDE" && "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  echo "release lifecycle smoke: PLUTO_ACCEPTANCE_SSH_BIN requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1" >&2
+  exit 64
+fi
+if [[ -n "$FFMPEG_OVERRIDE" && "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  echo "release lifecycle smoke: PLUTO_ACCEPTANCE_FFMPEG_BIN requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1" >&2
+  exit 64
+fi
+PYTHON_BIN=/usr/bin/python3
+[[ -f "$PYTHON_BIN" && ! -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || {
+  echo "release lifecycle smoke: pinned Python interpreter is unavailable: $PYTHON_BIN" >&2
+  exit 66
+}
+ACCOUNT_HOME="$("$PYTHON_BIN" -I -c \
+  'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+[[ "$ACCOUNT_HOME" == /* && "$ACCOUNT_HOME" != *$'\n'* &&
+  "$ACCOUNT_HOME" != *$'\t'* ]] || {
+  echo "release lifecycle smoke: OS account home is invalid" >&2
+  exit 66
+}
+CLI="$ACCOUNT_HOME/.pluto/bin/pluto"
+if [[ -n "$CLI_OVERRIDE" ]]; then
+  CLI="$CLI_OVERRIDE"
+fi
+[[ "$CLI" == /* && "$CLI" != *$'\n'* && "$CLI" != *$'\t'* &&
+  -f "$CLI" && ! -L "$CLI" && -x "$CLI" ]] || {
+  echo "release lifecycle smoke: setup-managed Pluto CLI is unavailable: $CLI" >&2
+  exit 66
+}
+SSH_BIN=/usr/bin/ssh
+if [[ -n "$SSH_BIN_OVERRIDE" ]]; then
+  SSH_BIN="$SSH_BIN_OVERRIDE"
+fi
+[[ "$SSH_BIN" == /* && "$SSH_BIN" != *$'\n'* && "$SSH_BIN" != *$'\t'* &&
+  -f "$SSH_BIN" && ! -L "$SSH_BIN" && -x "$SSH_BIN" ]] || {
+  echo "release lifecycle smoke: acceptance SSH binary is unavailable: $SSH_BIN" >&2
+  exit 66
+}
+export PLUTO_ACCEPTANCE_STRICT_SSH=1
+export PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS="$ALLOW_TEST_HOOKS"
+if [[ -n "$SSH_BIN_OVERRIDE" ]]; then
+  export PLUTO_ACCEPTANCE_SSH_BIN="$SSH_BIN"
+else
+  unset PLUTO_ACCEPTANCE_SSH_BIN
+fi
+[[ -f "$CONTROL_RECEIPT_VERIFIER" && ! -L "$CONTROL_RECEIPT_VERIFIER" ]] || {
+  echo "release lifecycle smoke: control receipt verifier is unavailable" >&2
+  exit 66
+}
 identity_args=(
   endpoint
   --device "$DEVICE"
@@ -101,7 +197,7 @@ identity_args=(
 if [[ "$ALLOW_TEST_HOOKS" == 1 ]]; then
   identity_args+=(--allow-divergence)
 fi
-identity_rows="$(python3 "$ACCEPTANCE_IDENTITY" "${identity_args[@]}")" || {
+identity_rows="$("$PYTHON_BIN" -I "$ACCEPTANCE_IDENTITY" "${identity_args[@]}")" || {
   echo "release lifecycle smoke: DEVICE/SSH identity is invalid" >&2
   exit 64
 }
@@ -152,7 +248,7 @@ if [[ -n "$STAGE_HOOK" ]]; then
     exit 64
   }
   if [[ "$ALLOW_TEST_HOOKS" != 1 ]]; then
-    python3 "$ACCEPTANCE_IDENTITY" camera-profile \
+    "$PYTHON_BIN" -I "$ACCEPTANCE_IDENTITY" camera-profile \
       --config "${PLUTO_CAMERA_CONFIG:-$ROOT/.pluto-devices.json}" \
       --device "$CAMERA_RIG" --expected-profile "$EXPECTED_PROFILE" \
       >/dev/null || {
@@ -195,7 +291,7 @@ cleanup_screenshots() {
 trap cleanup_screenshots EXIT
 
 remote() {
-  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" "$1"
+  "$SSH_BIN" "${SSH_OPTIONS[@]}" "$SSH_TARGET" "$1"
 }
 
 sha256_file() {
@@ -204,6 +300,38 @@ sha256_file() {
   else
     shasum -a 256 "$1" | awk '{print $1}'
   fi
+}
+
+canonical_executable() {
+  local candidate="$1"
+  local resolved
+  [[ "$candidate" == /* && "$candidate" != *$'\t'* &&
+    "$candidate" != *$'\n'* && -x "$candidate" && -f "$candidate" ]] || return 1
+  resolved="$("$PYTHON_BIN" -I -c \
+    'import os, sys; print(os.path.realpath(sys.argv[1]))' "$candidate")" || return 1
+  [[ "$resolved" == /* && "$resolved" != *$'\t'* &&
+    "$resolved" != *$'\n'* && -x "$resolved" && -f "$resolved" &&
+    ! -L "$resolved" ]] || return 1
+  printf '%s\n' "$resolved"
+}
+
+resolve_ffmpeg() {
+  local candidate=""
+  if [[ -n "$FFMPEG_OVERRIDE" ]]; then
+    candidate="$FFMPEG_OVERRIDE"
+  else
+    for candidate in /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg \
+      /usr/bin/ffmpeg /bin/ffmpeg; do
+      [[ -x "$candidate" && -f "$candidate" ]] && break
+      candidate=""
+    done
+  fi
+  [[ -n "$candidate" ]] && canonical_executable "$candidate"
+}
+
+FFMPEG_BIN="$(resolve_ffmpeg)" || {
+  echo "release lifecycle smoke: ffmpeg is unavailable at a supported absolute path" >&2
+  exit 66
 }
 
 lifecycle_screenshot() {
@@ -220,8 +348,7 @@ central_pixel_difference() {
   local before="$1"
   local after="$2"
   local value
-  command -v ffmpeg >/dev/null 2>&1 || return 1
-  value="$(ffmpeg -v error -nostdin -i "$before" -i "$after" \
+  value="$("$FFMPEG_BIN" -v error -nostdin -i "$before" -i "$after" \
     -filter_complex \
     '[0:v]crop=iw*0.5:ih*0.3:iw*0.25:ih*0.36[a];[1:v]crop=iw*0.5:ih*0.3:iw*0.25:ih*0.36[b];[a][b]blend=all_mode=difference,format=gray,signalstats,metadata=print:file=-' \
     -frames:v 1 -f null - 2>/dev/null |
@@ -589,6 +716,10 @@ wait_wake_receipt() {
   return 1
 }
 
+remote true >/dev/null || {
+  echo "release lifecycle smoke: strict SSH preflight failed for $DEVICE" >&2
+  exit 69
+}
 "$CLI" run --release --device "$DEVICE" "$EXPECTED_APP_ID"
 initial="$(wait_matching "$UP_TIMEOUT" any "$EXPECTED_APP_ID" any any any any any)" || {
   echo "release lifecycle smoke: no healthy release supervisor on $DEVICE" >&2
@@ -614,21 +745,53 @@ stroke_ready_file="$STATE_READY_FILE"
 stroke_health_file="$STATE_HEALTH_FILE"
 stroke_seq="$STATE_HEALTH_SEQ"
 stroke_mono="$STATE_HEALTH_MONO"
-remote "set -eu
+prepare_response="$(remote "set -eu
 [ \"\$(cat /run/pluto/embedder.pid 2>/dev/null)\" = '$stroke_pid' ]
 prepare_request='{\"requestId\":\"release-lifecycle-prepare-ink\",\"action\":\"prepare-ink-canvas\",\"appId\":\"$EXPECTED_APP_ID\",\"expectedPid\":$stroke_pid}'
 prepare_response=\$(/home/root/pluto/bin/pluto-controlctl \\
   --socket /run/pluto/embedder-control.sock --request \"\$prepare_request\")
-prepare_prefix='{\"requestId\":\"release-lifecycle-prepare-ink\",\"ok\":true,\"result\":{\"appId\":\"$EXPECTED_APP_ID\",\"pid\":$stroke_pid,\"canvasReady\":true,\"actionCount\":'
-case \"\$prepare_response\" in
-  \"\${prepare_prefix}0}}\" | \"\${prepare_prefix}1}}\" | \"\${prepare_prefix}2}}\") ;;
-  *) echo \"release lifecycle smoke: Ink canvas preparation returned unbound metadata: \$prepare_response\" >&2; exit 91 ;;
-esac
-[ \"\$(cat /run/pluto/embedder.pid 2>/dev/null)\" = '$stroke_pid' ]" >/dev/null
-sleep 1
+[ \"\$(cat /run/pluto/embedder.pid 2>/dev/null)\" = '$stroke_pid' ]
+[ \"\$(sed 's/^.*) //' '/proc/$stroke_pid/stat' | cut -d ' ' -f 20)\" = \
+  '$stroke_start_ticks' ]
+printf '%s\\n' \"\$prepare_response\"")" || {
+  echo "release lifecycle smoke: Ink canvas preparation control failed" >&2
+  exit 74
+}
+[[ -n "$prepare_response" && "$prepare_response" != *$'\n'* ]] || {
+  echo "release lifecycle smoke: Ink canvas preparation returned malformed transport data" >&2
+  exit 74
+}
+prepare_receipt="$("$PYTHON_BIN" -I "$CONTROL_RECEIPT_VERIFIER" prepare-ink \
+  --response "$prepare_response" \
+  --request-id release-lifecycle-prepare-ink \
+  --app-id "$EXPECTED_APP_ID" --pid "$stroke_pid" \
+  --start-ticks "$stroke_start_ticks")" || {
+  echo "release lifecycle smoke: Ink canvas preparation returned an invalid presentation receipt" >&2
+  exit 74
+}
+[[ "$(printf '%s\n' "$prepare_receipt" | wc -l | tr -d '[:space:]')" == 4 ]] || {
+  echo "release lifecycle smoke: Ink canvas preparation receipt metadata is malformed" >&2
+  exit 74
+}
+prepare_action_count="$(printf '%s\n' "$prepare_receipt" |
+  awk -F '\t' '$1 == "action_count" {print $2}')"
+prepare_surface_generation="$(printf '%s\n' "$prepare_receipt" |
+  awk -F '\t' '$1 == "surface_generation" {print $2}')"
+prepare_proof_frame_id="$(printf '%s\n' "$prepare_receipt" |
+  awk -F '\t' '$1 == "proof_frame_id" {print $2}')"
+prepare_start_ticks="$(printf '%s\n' "$prepare_receipt" |
+  awk -F '\t' '$1 == "process_start_ticks" {print $2}')"
+[[ "$prepare_action_count" =~ ^[0-2]$ &&
+  "$prepare_surface_generation" =~ ^[1-9][0-9]*$ &&
+  "$prepare_proof_frame_id" =~ ^[1-9][0-9]*$ &&
+  "$prepare_start_ticks" == "$stroke_start_ticks" ]] || {
+  echo "release lifecycle smoke: Ink canvas preparation receipt values are malformed" >&2
+  exit 74
+}
+echo "release lifecycle smoke: Ink canvas action-bound receipt action_count=$prepare_action_count surface_generation=$prepare_surface_generation proof_frame_id=$prepare_proof_frame_id process_start_ticks=$prepare_start_ticks"
 prepared="$(wait_matching "$UP_TIMEOUT" "$stroke_pid" "$EXPECTED_APP_ID" \
   any any any any any)" || {
-  echo "release lifecycle smoke: Ink canvas preparation did not settle in the same process" >&2
+  echo "release lifecycle smoke: Ink canvas preparation did not retain the same healthy process" >&2
   exit 74
 }
 parse_state "$prepared"

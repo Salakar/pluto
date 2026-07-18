@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:pluto_manifest/pluto_manifest.dart';
+
 import '../build/package_builder.dart';
 import '../build/release_pipeline.dart';
 import '../config/pins.dart';
@@ -262,9 +264,9 @@ final class BuildPackageCommand extends PlutoCommand
         'published',
         negatable: false,
         help:
-            'Emit one release package containing both linux-arm and '
-            'linux-arm64 slices. With --from-layout, the directory must '
-            'contain those two target-named layouts.',
+            'Emit one release package containing every target declared by '
+            'the app. With --from-layout, the directory must contain each '
+            'declared target-named layout.',
       )
       ..addFlag(
         'no-live',
@@ -275,8 +277,8 @@ final class BuildPackageCommand extends PlutoCommand
         'from-layout',
         help:
             'Existing layout containing build-metadata.json, manifest.json, '
-            'and bundle/. With --published, a parent containing '
-            'linux-arm/ and linux-arm64/.',
+            'and bundle/. With --published, a parent containing the app’s '
+            'declared target directories.',
       )
       ..addOption(
         'target',
@@ -356,8 +358,8 @@ final class BuildPackageCommand extends PlutoCommand
           (resolveDeviceTarget() != null ||
               argResults!.wasParsed('target-platform'))) {
         usageException(
-          '--published already builds both targets; do not pass --device or '
-          '--target-platform.',
+          '--published already builds every app-declared target; do not pass '
+          '--device or --target-platform.',
         );
       }
       final PlutoPins pins = environment.pinsRepository.readPins();
@@ -367,15 +369,18 @@ final class BuildPackageCommand extends PlutoCommand
           : const ExternalZstdCompressor();
       final PlapPackage package;
       if (published) {
-        source = await _resolvePublishedLayouts(
-          source: source,
-          mode: effectiveMode,
-        );
+        final List<PlutoTargetPlatform> publishedTargets;
+        if (source == null) {
+          publishedTargets = _authoredPublishedTargets(pins);
+          source = await _resolvePublishedLayouts(
+            mode: effectiveMode,
+            targets: publishedTargets,
+          );
+        } else {
+          publishedTargets = _layoutPublishedTargets(source);
+        }
         final List<PackageSliceSource> slices = <PackageSliceSource>[];
-        for (final PlutoTargetPlatform target in const <PlutoTargetPlatform>[
-          PlutoTargetPlatform.linuxArm,
-          PlutoTargetPlatform.linuxArm64,
-        ]) {
+        for (final PlutoTargetPlatform target in publishedTargets) {
           final String layout = '$source/${target.cliName}';
           if (FileSystemEntity.typeSync(layout, followLinks: false) !=
               FileSystemEntityType.directory) {
@@ -471,12 +476,9 @@ final class BuildPackageCommand extends PlutoCommand
   }
 
   Future<String> _resolvePublishedLayouts({
-    required String? source,
     required PlutoBuildMode mode,
+    required List<PlutoTargetPlatform> targets,
   }) async {
-    if (source != null) {
-      return source;
-    }
     if (argResults!['no-live'] as bool) {
       usageException('--from-layout is required with --no-live.');
     }
@@ -487,10 +489,7 @@ final class BuildPackageCommand extends PlutoCommand
       environment: environment,
       flutterSdkOverride: globalFlutterSdk,
     );
-    for (final PlutoTargetPlatform target in const <PlutoTargetPlatform>[
-      PlutoTargetPlatform.linuxArm,
-      PlutoTargetPlatform.linuxArm64,
-    ]) {
+    for (final PlutoTargetPlatform target in targets) {
       await adapter.build(
         BuildRequest(
           projectDirectory: Directory.current.path,
@@ -504,4 +503,79 @@ final class BuildPackageCommand extends PlutoCommand
     }
     return root;
   }
+
+  List<PlutoTargetPlatform> _authoredPublishedTargets(PlutoPins pins) {
+    final File authored = File('${Directory.current.path}/pluto.yaml');
+    if (!authored.existsSync()) {
+      usageException('Published build requires pluto.yaml.');
+    }
+    final Result<AppManifest, ManifestError> result =
+        AppManifest.decodeAuthoredYaml(
+          authored.readAsStringSync(),
+          runtime: const FlutterAotRuntime(),
+          engine: EngineRequirement(
+            flutterVersion: pins.flutterVersion,
+            engineCommit: pins.engineVersion,
+          ),
+        );
+    final AppManifest? manifest = result.valueOrNull;
+    if (manifest == null) {
+      usageException('pluto.yaml is invalid: ${result.errorOrNull!.message}');
+    }
+    return _orderedTargets(manifest.targets);
+  }
+
+  List<PlutoTargetPlatform> _layoutPublishedTargets(String root) {
+    AppManifest? manifest;
+    for (final PlutoTargetPlatform target in PlutoTargetPlatform.values) {
+      final File candidate = File('$root/${target.cliName}/manifest.json');
+      if (!candidate.existsSync()) {
+        continue;
+      }
+      final Result<AppManifest, ManifestError> result = AppManifest.decode(
+        candidate.readAsStringSync(),
+      );
+      manifest = result.valueOrNull;
+      if (manifest == null) {
+        usageException(
+          '${candidate.path} is invalid: ${result.errorOrNull!.message}',
+        );
+      }
+      break;
+    }
+    if (manifest == null) {
+      usageException(
+        'Published package has no declared target layout under $root.',
+      );
+    }
+    final List<PlutoTargetPlatform> targets = _orderedTargets(manifest.targets);
+    for (final PlutoTargetPlatform target in PlutoTargetPlatform.values) {
+      final bool exists =
+          FileSystemEntity.typeSync(
+            '$root/${target.cliName}',
+            followLinks: false,
+          ) ==
+          FileSystemEntityType.directory;
+      final bool declared = targets.contains(target);
+      if (exists && !declared) {
+        usageException(
+          'Published package contains undeclared ${target.cliName} layout.',
+        );
+      }
+    }
+    return targets;
+  }
+
+  List<PlutoTargetPlatform> _orderedTargets(
+    Set<AppTargetPlatform> manifestTargets,
+  ) => <PlutoTargetPlatform>[
+    for (final PlutoTargetPlatform target in const <PlutoTargetPlatform>[
+      PlutoTargetPlatform.linuxArm,
+      PlutoTargetPlatform.linuxArm64,
+    ])
+      if (manifestTargets.any(
+        (AppTargetPlatform declared) => declared.wireName == target.cliName,
+      ))
+        target,
+  ];
 }

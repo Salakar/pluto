@@ -382,6 +382,15 @@ _ValidatedPackageSlice _validatePackageLayout(
       message: 'Package manifest engine identity does not match its slice.',
     );
   }
+  final AppTargetPlatform manifestTarget = AppTargetPlatform.fromWireName(
+    metadata.target,
+  )!;
+  if (!appManifest.targets.contains(manifestTarget)) {
+    throw ArtifactVerificationException(
+      message: 'Package manifest does not support target ${metadata.target}.',
+      remediation: 'Build only target slices declared by the app manifest.',
+    );
+  }
   final String iconPath = appManifest.icon;
   _validateLayoutPath(iconPath);
   if (!iconPath.startsWith('assets/')) {

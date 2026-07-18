@@ -15,6 +15,7 @@ import sys
 PROFILES = frozenset({"rm1", "rm2", "move"})
 USER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9._-]*\Z")
 HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\Z")
+IPV6_SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,14}\Z")
 
 
 class IdentityError(ValueError):
@@ -44,13 +45,27 @@ def _host(value: str, *, label: str) -> tuple[str, bool]:
         character in value for character in "[]/@\t\r\n"
     ):
         raise IdentityError(f"{label} host is invalid")
+    address_text = value
+    scope = ""
+    if "%" in value:
+        if value.count("%") != 1:
+            raise IdentityError(f"{label} IPv6 scope is invalid")
+        address_text, scope = value.split("%", 1)
+        if IPV6_SCOPE_RE.fullmatch(scope) is None:
+            raise IdentityError(f"{label} IPv6 scope is invalid")
     try:
-        address = ipaddress.ip_address(value)
+        address = ipaddress.ip_address(address_text)
     except ValueError:
         if ":" in value or "%" in value or HOST_RE.fullmatch(value) is None:
             raise IdentityError(f"{label} host is invalid") from None
         return value.lower(), False
-    return address.compressed, isinstance(address, ipaddress.IPv6Address)
+    ipv6 = isinstance(address, ipaddress.IPv6Address)
+    if scope and not ipv6:
+        raise IdentityError(f"{label} IPv6 scope is only valid on an IPv6 address")
+    host = address.compressed
+    if scope:
+        host = f"{host}%{scope}"
+    return host, ipv6
 
 
 def _cli_endpoint(value: str) -> tuple[str, str, int, bool]:
@@ -135,6 +150,12 @@ def validate_endpoint_command(args: argparse.Namespace) -> None:
     print(canonical)
 
 
+def validate_ssh_target_command(args: argparse.Namespace) -> None:
+    parsed = _ssh_endpoint(args.target, args.port)
+    print(f"ssh_invocation_target\t{parsed[0]}@{parsed[1]}")
+    print(f"ssh_port\t{parsed[2]}")
+
+
 def _camera_devices(path: Path) -> list[dict[str, object]]:
     if path.is_symlink() or not path.is_file():
         raise IdentityError(f"camera config must be a regular non-symlink file: {path}")
@@ -203,6 +224,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate_endpoint = subparsers.add_parser("validate-endpoint")
     validate_endpoint.add_argument("--endpoint", required=True)
     validate_endpoint.set_defaults(handler=validate_endpoint_command)
+
+    validate_ssh_target = subparsers.add_parser("validate-ssh-target")
+    validate_ssh_target.add_argument("--target", required=True)
+    validate_ssh_target.add_argument("--port", default="")
+    validate_ssh_target.set_defaults(handler=validate_ssh_target_command)
 
     camera_profile = subparsers.add_parser("camera-profile")
     camera_profile.add_argument("--config", required=True)

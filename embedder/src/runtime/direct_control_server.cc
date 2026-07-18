@@ -1097,7 +1097,8 @@ private:
     }
     if (result.app_id != *request.app_id ||
         result.pid != request.expected_pid || !result.canvas_ready ||
-        result.action_count > 2) {
+        result.process_start_ticks == 0 || result.action_count > 2 ||
+        result.surface_generation == 0 || result.proof_frame_id == 0) {
       return {failure_response(request.request_id,
                                {"internal",
                                 "prepare-ink-canvas callback returned invalid "
@@ -1109,8 +1110,11 @@ private:
         "{\"requestId\":" + json_string(request.request_id) +
         ",\"ok\":true,\"result\":{\"appId\":" + json_string(result.app_id) +
         ",\"pid\":" + std::to_string(result.pid) +
+        ",\"processStartTicks\":" + std::to_string(result.process_start_ticks) +
         ",\"canvasReady\":true,\"actionCount\":" +
-        std::to_string(result.action_count) + "}}";
+        std::to_string(result.action_count) +
+        ",\"surfaceGeneration\":" + std::to_string(result.surface_generation) +
+        ",\"proofFrameId\":" + std::to_string(result.proof_frame_id) + "}}";
     if (response.size() > config_.max_packet_bytes) {
       return {failure_response(
                   request.request_id,

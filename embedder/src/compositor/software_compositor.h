@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -292,6 +293,24 @@ public:
   // from any thread, including synchronously on the present() stack; the
   // completion is processed by the next presenter-loop tick in arrival order.
   void notify_present_complete(uint64_t frame_id);
+  // Monotonic generation of accepted Flutter compositor frames. A caller can
+  // use two sequential schedule/wait rounds as a post-semantics raster fence:
+  // the second frame was requested only after the first callback completed.
+  uint64_t flutter_surface_generation() const;
+  bool wait_for_flutter_surface_after(uint64_t baseline,
+                                      std::chrono::milliseconds timeout,
+                                      uint64_t *surface_generation);
+  struct ExactPresentationReceipt {
+    uint64_t surface_generation = 0;
+    uint64_t frame_id = 0;
+  };
+  // After all older user presents have completed, discards queued maintenance
+  // and sends one dedicated full-screen Full request from the retained Flutter
+  // surface. Success requires the real presenter callback for that exact frame
+  // id. Unknown, stale, out-of-order and synchronous callbacks are reconciled
+  // without weakening the identity proof.
+  bool present_retained_surface_full(std::chrono::milliseconds timeout,
+                                     ExactPresentationReceipt *receipt);
   // TEST-ONLY: number of callbacks enqueued but not yet reconciled with the
   // current scheduler generation.
   size_t queued_present_completions_for_testing() const;
@@ -384,6 +403,7 @@ private:
   void maybe_resume_presentation_locked();
   bool reveal_suspended_presentation_locked();
   void drain_completions_locked();
+  void note_accepted_flutter_frame_locked();
   // Called only on the scheduler/presenter call path after present() returns
   // kPlutoStatusOk. Presenter completion callbacks never call this.
   void mark_ready_after_present_locked();
@@ -469,6 +489,8 @@ private:
   std::FILE *record_file_ = nullptr;
   mutable std::mutex mutex_;
   std::condition_variable cv_;
+  std::condition_variable presentation_completion_cv_;
+  std::condition_variable flutter_surface_cv_;
   std::thread thread_;
   bool stop_ = false;
   // Atomic so completion callbacks can request a wake without taking mutex_.
@@ -482,6 +504,14 @@ private:
   bool health_file_failed_ = false;
   CompletionQueue completion_queue_;
   std::atomic<size_t> dropped_completions_{0};
+  uint64_t flutter_surface_generation_ = 0;
+  bool exact_proof_active_ = false;
+  bool exact_proof_dispatch_armed_ = false;
+  bool exact_proof_present_accepted_ = false;
+  bool exact_proof_failed_ = false;
+  bool exact_proof_completed_ = false;
+  uint64_t exact_proof_frame_id_ = 0;
+  uint64_t exact_proof_surface_generation_ = 0;
   static constexpr uint8_t kTouchInputBit = 1u << 0;
   static constexpr uint8_t kPenInputBit = 1u << 1;
   std::atomic<uint8_t> active_input_mask_{0};

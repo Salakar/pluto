@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "generated/device_profiles.h"
@@ -23,6 +24,28 @@ struct Rm2WaveformSelection {
   // transition with HOLD. Both views remain valid until clear()/open().
   std::span<const std::uint8_t> drive_lut;
   std::span<const std::uint8_t> partial_drive_lut;
+};
+
+// The vendor MFD exposes the live SY7636A power-good bit separately from its
+// fault-event latch. The latter records a historical event until the PMIC EN
+// pin is retoggled, so a non-empty latched_fault_event is diagnostic evidence,
+// not proof that rails which are currently power-good are unsafe.
+struct Rm2PanelPowerState {
+  bool attributes_readable = false;
+  bool power_good = false;
+  std::string latched_fault_event;
+
+  Rm2PanelPowerState() = default;
+  // Keeps injected host readers terse while still distinguishing their live
+  // power result from a production sysfs-read failure.
+  Rm2PanelPowerState(bool current_power_good)
+      : attributes_readable(true), power_good(current_power_good) {}
+  Rm2PanelPowerState(bool readable, bool current_power_good,
+                     std::string fault_event)
+      : attributes_readable(readable), power_good(current_power_good),
+        latched_fault_event(std::move(fault_event)) {}
+
+  bool ready() const { return attributes_readable && power_good; }
 };
 
 class Rm2WaveformProgram final {
@@ -64,9 +87,10 @@ private:
 std::optional<int> read_rm2_panel_temperature_millidegrees(std::string *error);
 
 // Finds exactly one SY7636A I2C parent by address and driver identity, then
-// requires the vendor-kernel MFD power/fault attributes to prove that panel
-// power is good before a temperature value is trusted.
-bool read_rm2_panel_power_ready(
+// returns the live power-good value and the independent historical fault-event
+// latch. Missing, ambiguous, or unreadable attributes return an unavailable
+// state and an exact error.
+Rm2PanelPowerState read_rm2_panel_power_state(
     std::string *error,
     std::string_view i2c_devices_root = "/sys/bus/i2c/devices");
 

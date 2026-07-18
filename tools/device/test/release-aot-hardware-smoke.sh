@@ -1,5 +1,39 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+[[ "$-" == *p* ]] || {
+  echo "release AOT smoke: execute this entrypoint directly or with /bin/bash -p" >&2
+  exit 64
+}
+
+ALLOW_TEST_HOOKS="${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-0}"
+[[ "$ALLOW_TEST_HOOKS" == 0 || "$ALLOW_TEST_HOOKS" == 1 ]] || {
+  echo "release AOT smoke: PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS must be 0 or 1" >&2
+  exit 64
+}
+LOADER_ENV_NAMES=()
+while IFS= read -r loader_name; do
+  case "$loader_name" in
+    LD_* | DYLD_* | GLIBC_TUNABLES) LOADER_ENV_NAMES+=("$loader_name") ;;
+  esac
+done < <(compgen -e)
+if [[ "$ALLOW_TEST_HOOKS" != 1 ]] && ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    [[ -z "${!loader_name:-}" ]] || {
+      echo "release AOT smoke: $loader_name is forbidden for production acceptance" >&2
+      exit 64
+    }
+  done
+fi
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+if ((${#LOADER_ENV_NAMES[@]} > 0)); then
+  for loader_name in "${LOADER_ENV_NAMES[@]}"; do
+    unset "$loader_name"
+  done
+fi
+if [[ "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  PATH=/usr/bin:/bin
+  export PATH
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -7,14 +41,15 @@ OFFICIAL_STAGE_HOOK="$ROOT/tools/setup/camera/capture-acceptance-stage.sh"
 OFFICIAL_CAMERA_CAPTURE="$ROOT/tools/setup/camera/capture.sh"
 OFFICIAL_METRICS_COLLECTOR="$ROOT/tools/device/diagnostics/acceptance-metrics/collect.sh"
 ACCEPTANCE_IDENTITY="$ROOT/tools/device/diagnostics/acceptance_identity.py"
+CONTROL_RECEIPT_VERIFIER="$ROOT/tools/device/diagnostics/verify_control_receipt.py"
 DEVICE="${1:-root@10.11.99.1}"
-CLI="${PLUTO_CLI:-pluto}"
+CLI_OVERRIDE="${PLUTO_CLI:-}"
+SSH_BIN_OVERRIDE="${PLUTO_ACCEPTANCE_SSH_BIN:-}"
 SSH_TARGET="${PLUTO_ACCEPTANCE_SSH_TARGET:-$DEVICE}"
 SSH_PORT="${PLUTO_ACCEPTANCE_SSH_PORT:-}"
 STAGE_DELAY="${PLUTO_ACCEPTANCE_STAGE_DELAY:-0}"
 STAGE_HOOK="${PLUTO_ACCEPTANCE_STAGE_HOOK:-}"
 SCREENSHOT_DIR="${PLUTO_ACCEPTANCE_SCREENSHOT_DIR:-}"
-CODEX_REQUEST="${PLUTO_ACCEPTANCE_CODEX_REQUEST:-0}"
 REQUIRE_VISUAL="${PLUTO_ACCEPTANCE_REQUIRE_VISUAL:-0}"
 CAPTURE_SETTLE="${PLUTO_ACCEPTANCE_CAPTURE_SETTLE:-$REQUIRE_VISUAL}"
 EXPECTED_REVISION="${PLUTO_ACCEPTANCE_RELEASE_REVISION:-}"
@@ -22,17 +57,25 @@ EXPECTED_PROFILE="${PLUTO_ACCEPTANCE_PROFILE_ID:-}"
 CAMERA_DIR="${PLUTO_CAMERA_ACCEPTANCE_DIR:-}"
 CAMERA_RIG="${PLUTO_CAMERA_RIG:-}"
 RELEASE_MANIFEST="${PLUTO_ACCEPTANCE_RELEASE_MANIFEST:-}"
-ALLOW_TEST_HOOKS="${PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS:-0}"
+FFMPEG_OVERRIDE="${PLUTO_ACCEPTANCE_FFMPEG_BIN:-}"
 COLLECT_ONLY="${PLUTO_ACCEPTANCE_COLLECT_ONLY:-0}"
 METRICS_COLLECTOR="${PLUTO_ACCEPTANCE_METRICS_COLLECTOR:-$OFFICIAL_METRICS_COLLECTOR}"
-SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
+PREPARED_INK_PID=""
+PREPARED_INK_START_TICKS=""
+SSH_OPTIONS=(
+  -F /dev/null
+  -o BatchMode=yes
+  -o ConnectTimeout=5
+  -o StrictHostKeyChecking=yes
+  -o ProxyCommand=none
+  -o CanonicalizeHostname=no
+  -o ControlMaster=no
+  -o ControlPath=none
+  -o ControlPersist=no
+)
 
 [[ "$STAGE_DELAY" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
   echo "release AOT smoke: invalid PLUTO_ACCEPTANCE_STAGE_DELAY: $STAGE_DELAY" >&2
-  exit 64
-}
-[[ "$CODEX_REQUEST" == 0 || "$CODEX_REQUEST" == 1 ]] || {
-  echo "release AOT smoke: PLUTO_ACCEPTANCE_CODEX_REQUEST must be 0 or 1" >&2
   exit 64
 }
 [[ "$REQUIRE_VISUAL" == 0 || "$REQUIRE_VISUAL" == 1 ]] || {
@@ -43,6 +86,59 @@ SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=5)
   echo "release AOT smoke: PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS must be 0 or 1" >&2
   exit 64
 }
+if [[ -n "$CLI_OVERRIDE" && "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  echo "release AOT smoke: PLUTO_CLI requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1" >&2
+  exit 64
+fi
+if [[ -n "$SSH_BIN_OVERRIDE" && "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  echo "release AOT smoke: PLUTO_ACCEPTANCE_SSH_BIN requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1" >&2
+  exit 64
+fi
+if [[ -n "$FFMPEG_OVERRIDE" && "$ALLOW_TEST_HOOKS" != 1 ]]; then
+  echo "release AOT smoke: PLUTO_ACCEPTANCE_FFMPEG_BIN requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1" >&2
+  exit 64
+fi
+PYTHON_BIN=/usr/bin/python3
+[[ -f "$PYTHON_BIN" && ! -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || {
+  echo "release AOT smoke: pinned Python interpreter is unavailable: $PYTHON_BIN" >&2
+  exit 66
+}
+ACCOUNT_HOME="$("$PYTHON_BIN" -I -c \
+  'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+[[ "$ACCOUNT_HOME" == /* && "$ACCOUNT_HOME" != *$'\n'* &&
+  "$ACCOUNT_HOME" != *$'\t'* ]] || {
+  echo "release AOT smoke: OS account home is invalid" >&2
+  exit 66
+}
+CLI="$ACCOUNT_HOME/.pluto/bin/pluto"
+if [[ -n "$CLI_OVERRIDE" ]]; then
+  CLI="$CLI_OVERRIDE"
+fi
+[[ "$CLI" == /* && "$CLI" != *$'\n'* && "$CLI" != *$'\t'* &&
+  -f "$CLI" && ! -L "$CLI" && -x "$CLI" ]] || {
+  echo "release AOT smoke: setup-managed Pluto CLI is unavailable: $CLI" >&2
+  exit 66
+}
+SSH_BIN=/usr/bin/ssh
+if [[ -n "$SSH_BIN_OVERRIDE" ]]; then
+  SSH_BIN="$SSH_BIN_OVERRIDE"
+fi
+[[ "$SSH_BIN" == /* && "$SSH_BIN" != *$'\n'* && "$SSH_BIN" != *$'\t'* &&
+  -f "$SSH_BIN" && ! -L "$SSH_BIN" && -x "$SSH_BIN" ]] || {
+  echo "release AOT smoke: acceptance SSH binary is unavailable: $SSH_BIN" >&2
+  exit 66
+}
+export PLUTO_ACCEPTANCE_STRICT_SSH=1
+export PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS="$ALLOW_TEST_HOOKS"
+if [[ -n "$SSH_BIN_OVERRIDE" ]]; then
+  export PLUTO_ACCEPTANCE_SSH_BIN="$SSH_BIN"
+else
+  unset PLUTO_ACCEPTANCE_SSH_BIN
+fi
+[[ -f "$CONTROL_RECEIPT_VERIFIER" && ! -L "$CONTROL_RECEIPT_VERIFIER" ]] || {
+  echo "release AOT smoke: control receipt verifier is unavailable" >&2
+  exit 66
+}
 identity_args=(
   endpoint
   --device "$DEVICE"
@@ -52,7 +148,7 @@ identity_args=(
 if [[ "$ALLOW_TEST_HOOKS" == 1 ]]; then
   identity_args+=(--allow-divergence)
 fi
-identity_rows="$(python3 "$ACCEPTANCE_IDENTITY" "${identity_args[@]}")" || {
+identity_rows="$("$PYTHON_BIN" -I "$ACCEPTANCE_IDENTITY" "${identity_args[@]}")" || {
   echo "release AOT smoke: DEVICE/SSH identity is invalid" >&2
   exit 64
 }
@@ -90,6 +186,10 @@ if [[ "$REQUIRE_VISUAL" == 1 ]]; then
     echo "release AOT smoke: final visual acceptance is two-pass; set PLUTO_ACCEPTANCE_COLLECT_ONLY=1, review every frame, then run the verifier" >&2
     exit 64
   }
+  if [[ "$ALLOW_TEST_HOOKS" != 1 && -n "${PLUTO_ACCEPTANCE_TRANSPORT:-}" ]]; then
+    echo "release AOT smoke: final visual acceptance forbids a custom metrics transport" >&2
+    exit 64
+  fi
   [[ -n "$STAGE_HOOK" ]] || {
     echo "release AOT smoke: final visual acceptance requires a camera stage hook" >&2
     exit 64
@@ -116,10 +216,6 @@ if [[ "$REQUIRE_VISUAL" == 1 ]]; then
     echo "release AOT smoke: final visual acceptance requires native screenshots" >&2
     exit 64
   }
-  [[ "$CODEX_REQUEST" == 1 ]] || {
-    echo "release AOT smoke: final visual acceptance requires a real Codex request" >&2
-    exit 64
-  }
   [[ "$CAPTURE_SETTLE" =~ ^([1-9][0-9]*([.][0-9]+)?|0[.]0*[1-9][0-9]*)$ ]] || {
     echo "release AOT smoke: final visual acceptance requires a positive pre-capture settle" >&2
     exit 64
@@ -140,7 +236,7 @@ if [[ "$REQUIRE_VISUAL" == 1 ]]; then
     exit 64
   }
   if [[ "$ALLOW_TEST_HOOKS" != 1 ]]; then
-    python3 "$ACCEPTANCE_IDENTITY" camera-profile \
+    "$PYTHON_BIN" -I "$ACCEPTANCE_IDENTITY" camera-profile \
       --config "${PLUTO_CAMERA_CONFIG:-$ROOT/.pluto-devices.json}" \
       --device "$CAMERA_RIG" --expected-profile "$EXPECTED_PROFILE" \
       >/dev/null || {
@@ -187,7 +283,7 @@ trap cleanup_screenshots EXIT
 SSH_OPTIONS+=(-p "$SSH_PORT")
 
 remote() {
-  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" "$1"
+  "$SSH_BIN" "${SSH_OPTIONS[@]}" "$SSH_TARGET" "$1"
 }
 
 sha256_file() {
@@ -198,15 +294,43 @@ sha256_file() {
   fi
 }
 
+canonical_executable() {
+  local candidate="$1"
+  local resolved
+  [[ "$candidate" == /* && "$candidate" != *$'\t'* &&
+    "$candidate" != *$'\n'* && -x "$candidate" && -f "$candidate" ]] || return 1
+  resolved="$("$PYTHON_BIN" -I -c \
+    'import os, sys; print(os.path.realpath(sys.argv[1]))' "$candidate")" || return 1
+  [[ "$resolved" == /* && "$resolved" != *$'\t'* &&
+    "$resolved" != *$'\n'* && -x "$resolved" && -f "$resolved" &&
+    ! -L "$resolved" ]] || return 1
+  printf '%s\n' "$resolved"
+}
+
+resolve_ffmpeg() {
+  local candidate=""
+  if [[ -n "$FFMPEG_OVERRIDE" ]]; then
+    candidate="$FFMPEG_OVERRIDE"
+  else
+    for candidate in /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg \
+      /usr/bin/ffmpeg /bin/ffmpeg; do
+      [[ -x "$candidate" && -f "$candidate" ]] && break
+      candidate=""
+    done
+  fi
+  [[ -n "$candidate" ]] && canonical_executable "$candidate"
+}
+
+FFMPEG_BIN="$(resolve_ffmpeg)" || {
+  echo "release AOT smoke: ffmpeg is unavailable at a supported absolute path" >&2
+  exit 66
+}
+
 central_pixel_difference() {
   local before="$1"
   local after="$2"
   local value
-  command -v ffmpeg >/dev/null 2>&1 || {
-    echo "release AOT smoke: ffmpeg is required for decoded framebuffer comparison" >&2
-    return 1
-  }
-  value="$(ffmpeg -v error -nostdin -i "$before" -i "$after" \
+  value="$("$FFMPEG_BIN" -v error -nostdin -i "$before" -i "$after" \
     -filter_complex \
     '[0:v]crop=iw*0.5:ih*0.3:iw*0.25:ih*0.36[a];[1:v]crop=iw*0.5:ih*0.3:iw*0.25:ih*0.36[b];[a][b]blend=all_mode=difference,format=gray,signalstats,metadata=print:file=-' \
     -frames:v 1 -f null - 2>/dev/null |
@@ -275,11 +399,54 @@ pluto_profile_probe
 }"
 }
 
+verify_prepared_ink_identity() {
+  local pid="$1"
+  local start_ticks="$2"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$start_ticks" =~ ^[1-9][0-9]*$ ]] || {
+    echo "release AOT smoke: prepared Ink process identity is malformed" >&2
+    return 92
+  }
+  remote "set -eu
+[ \"\$(cat /run/pluto/embedder.pid 2>/dev/null || true)\" = '$pid' ] || {
+  echo \"release AOT smoke: prepared Ink process identity changed\" >&2
+  exit 92
+}
+kill -0 '$pid' 2>/dev/null || {
+  echo \"release AOT smoke: prepared Ink process identity changed\" >&2
+  exit 92
+}
+[ \"\$(sed 's/^.*) //' '/proc/$pid/stat' | cut -d ' ' -f 20)\" = \
+  '$start_ticks' ] || {
+  echo \"release AOT smoke: prepared Ink process identity changed\" >&2
+  exit 92
+}
+cmd=\$(tr '\\000' ' ' < '/proc/$pid/cmdline')
+case \"\$cmd\" in
+  *--release*--bundle=/home/root/pluto/apps/dev.pluto.ink/bundle*) ;;
+  *) echo \"release AOT smoke: prepared Ink process identity changed\" >&2; exit 92 ;;
+esac
+app_env=\$(tr '\\000' '\\n' < '/proc/$pid/environ' |
+  sed -n 's/^PLUTO_APP_ID=//p' | sed -n '1p')
+[ \"\$app_env\" = dev.pluto.ink ] || {
+  echo \"release AOT smoke: prepared Ink process identity changed\" >&2
+  exit 92
+}"
+}
+
 stage() {
   local label="$1"
   local app_id="$2"
+  local expected_pid="${3:-}"
+  local expected_start_ticks="${4:-}"
   local digest
+  if [[ -n "$expected_pid" || -n "$expected_start_ticks" ]]; then
+    [[ -n "$expected_pid" && -n "$expected_start_ticks" ]] || return 92
+    verify_prepared_ink_identity "$expected_pid" "$expected_start_ticks" || return $?
+  fi
   sleep "$CAPTURE_SETTLE"
+  if [[ -n "$expected_pid" ]]; then
+    verify_prepared_ink_identity "$expected_pid" "$expected_start_ticks" || return $?
+  fi
   local output="$SCREENSHOT_DIR/$label.png"
   [[ ! -e "$output" && ! -L "$output" ]] || {
     echo "release AOT smoke: screenshot already exists: $output" >&2
@@ -287,6 +454,9 @@ stage() {
   }
   "$CLI" screenshot --device "$DEVICE" --app "$app_id" \
     --surface post-dither -o "$output"
+  if [[ -n "$expected_pid" ]]; then
+    verify_prepared_ink_identity "$expected_pid" "$expected_start_ticks" || return $?
+  fi
   [[ -s "$output" && ! -L "$output" ]] || {
     echo "release AOT smoke: screenshot is empty or linked: $output" >&2
     return 74
@@ -296,6 +466,9 @@ stage() {
     "$app_id" >> "$SCREENSHOT_DIR/stages.tsv"
   if [[ -n "$STAGE_HOOK" ]]; then
     "$STAGE_HOOK" "$label"
+    if [[ -n "$expected_pid" ]]; then
+      verify_prepared_ink_identity "$expected_pid" "$expected_start_ticks" || return $?
+    fi
   fi
   sleep "$STAGE_DELAY"
 }
@@ -477,8 +650,8 @@ select_switcher_preview() {
   local target
   target="$(remote "sed -n '2p' /run/pluto/switcher-active 2>/dev/null")" ||
     return $?
-  [[ "$target" == dev.pluto.codex ]] || {
-    echo "release AOT smoke: switcher did not expose deterministic Codex target (got: $target)" >&2
+  [[ "$target" == dev.pluto.validation_lab ]] || {
+    echo "release AOT smoke: switcher did not expose deterministic Validation Lab target (got: $target)" >&2
     return 88
   }
 
@@ -546,7 +719,9 @@ exit 93" || return $?
 }
 
 prepare_ink_canvas() {
-  remote "set -eu
+  local prepare_output pid start_ticks response receipt
+  local action_count surface_generation proof_frame_id receipt_start_ticks
+  prepare_output="$(remote "set -eu
 pid=\$(cat /run/pluto/embedder.pid 2>/dev/null || true)
 case \"\$pid\" in ''|*[!0-9]*) exit 89 ;; esac
 start_ticks=\$(sed 's/^.*) //' \"/proc/\$pid/stat\" | cut -d ' ' -f 20)
@@ -560,24 +735,60 @@ request=\$(printf '%s' \
   '{\"requestId\":\"release-aot-prepare-ink\",\"action\":\"prepare-ink-canvas\",\"appId\":\"dev.pluto.ink\",\"expectedPid\":'\"\$pid\"'}')
 response=\$(/home/root/pluto/bin/pluto-controlctl \\
   --socket /run/pluto/embedder-control.sock --request \"\$request\")
-expected_prefix='{\"requestId\":\"release-aot-prepare-ink\",\"ok\":true,\"result\":{\"appId\":\"dev.pluto.ink\",\"pid\":'"\$pid"',\"canvasReady\":true,\"actionCount\":'
-case \"\$response\" in
-  \"\${expected_prefix}0}}\" | \"\${expected_prefix}1}}\" | \"\${expected_prefix}2}}\") ;;
-  *) echo \"release AOT smoke: Ink canvas preparation returned unbound metadata: \$response\" >&2; exit 91 ;;
-esac
 [ \"\$(cat /run/pluto/embedder.pid 2>/dev/null)\" = \"\$pid\" ] || exit 92
 kill -0 \"\$pid\" 2>/dev/null || exit 92
 [ \"\$(sed 's/^.*) //' \"/proc/\$pid/stat\" | cut -d ' ' -f 20)\" = \
   \"\$start_ticks\" ] || exit 92
-echo \"release AOT smoke: PASS real Ink canvas pid=\$pid start_ticks=\$start_ticks response=\$response\"" || return $?
+printf 'pid=%s\\nstart_ticks=%s\\nresponse=%s\\n' \
+  \"\$pid\" \"\$start_ticks\" \"\$response\"")" || return $?
+  [[ "$(printf '%s\n' "$prepare_output" | wc -l | tr -d '[:space:]')" == 3 ]] || {
+    echo "release AOT smoke: Ink canvas preparation returned malformed transport metadata" >&2
+    return 91
+  }
+  pid="$(printf '%s\n' "$prepare_output" | sed -n 's/^pid=//p')"
+  start_ticks="$(printf '%s\n' "$prepare_output" | sed -n 's/^start_ticks=//p')"
+  response="$(printf '%s\n' "$prepare_output" | sed -n 's/^response=//p')"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$start_ticks" =~ ^[1-9][0-9]*$ &&
+    -n "$response" && "$response" != *$'\n'* ]] || {
+    echo "release AOT smoke: Ink canvas preparation returned malformed process metadata" >&2
+    return 91
+  }
+  receipt="$("$PYTHON_BIN" -I "$CONTROL_RECEIPT_VERIFIER" prepare-ink \
+    --response "$response" --request-id release-aot-prepare-ink \
+    --app-id dev.pluto.ink --pid "$pid" --start-ticks "$start_ticks")" || {
+    echo "release AOT smoke: Ink canvas preparation returned an invalid presentation receipt" >&2
+    return 91
+  }
+  [[ "$(printf '%s\n' "$receipt" | wc -l | tr -d '[:space:]')" == 4 ]] || return 91
+  action_count="$(printf '%s\n' "$receipt" |
+    awk -F '\t' '$1 == "action_count" {print $2}')"
+  surface_generation="$(printf '%s\n' "$receipt" |
+    awk -F '\t' '$1 == "surface_generation" {print $2}')"
+  proof_frame_id="$(printf '%s\n' "$receipt" |
+    awk -F '\t' '$1 == "proof_frame_id" {print $2}')"
+  receipt_start_ticks="$(printf '%s\n' "$receipt" |
+    awk -F '\t' '$1 == "process_start_ticks" {print $2}')"
+  [[ "$action_count" =~ ^[0-2]$ && "$surface_generation" =~ ^[1-9][0-9]*$ &&
+    "$proof_frame_id" =~ ^[1-9][0-9]*$ &&
+    "$receipt_start_ticks" == "$start_ticks" ]] || return 91
+  PREPARED_INK_PID="$pid"
+  PREPARED_INK_START_TICKS="$start_ticks"
+  echo "release AOT smoke: PASS real Ink canvas action-bound pid=$pid start_ticks=$start_ticks action_count=$action_count surface_generation=$surface_generation proof_frame_id=$proof_frame_id response=$response"
 }
 
 inject_ink_stroke() {
+  [[ "$PREPARED_INK_PID" =~ ^[1-9][0-9]*$ &&
+    "$PREPARED_INK_START_TICKS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "release AOT smoke: Ink stroke has no prepared process identity" >&2
+    return 92
+  }
   remote "set -eu
-pid=\$(cat /run/pluto/embedder.pid 2>/dev/null || true)
-case \"\$pid\" in ''|*[!0-9]*) exit 89 ;; esac
-start_ticks=\$(sed 's/^.*) //' \"/proc/\$pid/stat\" | cut -d ' ' -f 20)
-case \"\$start_ticks\" in ''|*[!0-9]*) exit 89 ;; esac
+pid='$PREPARED_INK_PID'
+start_ticks='$PREPARED_INK_START_TICKS'
+[ \"\$(cat /run/pluto/embedder.pid 2>/dev/null || true)\" = \"\$pid\" ] || exit 89
+kill -0 \"\$pid\" 2>/dev/null || exit 89
+[ \"\$(sed 's/^.*) //' \"/proc/\$pid/stat\" | cut -d ' ' -f 20)\" = \
+  \"\$start_ticks\" ] || exit 89
 cmd=\$(tr '\\000' ' ' < \"/proc/\$pid/cmdline\")
 case \"\$cmd\" in
   *--release*--bundle=/home/root/pluto/apps/dev.pluto.ink/bundle*) ;;
@@ -615,7 +826,8 @@ done
 echo \"release AOT smoke: Ink stroke produced no completion-backed present\" >&2
 exit 94" || return $?
 
-  stage "ink-stroke" dev.pluto.ink || return $?
+  stage "ink-stroke" dev.pluto.ink \
+    "$PREPARED_INK_PID" "$PREPARED_INK_START_TICKS" || return $?
   local before after pixel_delta
   before="$SCREENSHOT_DIR/ink-canvas-before-stroke.png"
   after="$SCREENSHOT_DIR/ink-stroke.png"
@@ -624,54 +836,6 @@ exit 94" || return $?
     return 95
   }
   echo "release AOT smoke: PASS Ink decoded central pixel delta YAVG=$pixel_delta"
-}
-
-verify_real_codex() {
-  remote "set -eu
-pid=\$(cat /run/pluto/embedder.pid 2>/dev/null || true)
-case \"\$pid\" in ''|*[!0-9]*) exit 95 ;; esac
-cmd=\$(tr '\\000' ' ' < \"/proc/\$pid/cmdline\")
-case \"\$cmd\" in
-  *--release*--bundle=/home/root/pluto/apps/dev.pluto.codex/bundle*) ;;
-  *) echo \"release AOT smoke: Codex is not the foreground release process\" >&2; exit 96 ;;
-esac
-configured=\$(tr '\\000' '\\n' < \"/proc/\$pid/environ\" |
-  sed -n 's/^PAPER_CODEX_BIN=//p' | sed -n '1p')
-binary=''
-if [ -n \"\$configured\" ] && [ -x \"\$configured\" ]; then
-  binary=\$configured
-else
-  for candidate in /home/root/bin/codex /home/root/.local/bin/codex; do
-    if [ -x \"\$candidate\" ]; then binary=\$candidate; break; fi
-  done
-fi
-[ -n \"\$binary\" ] || {
-  echo \"release AOT smoke: Codex app cannot resolve a real binary\" >&2
-  exit 97
-}
-version=\$(\"\$binary\" --version)
-HOME=/home/root \"\$binary\" login status >/dev/null 2>&1 || {
-  echo \"release AOT smoke: Codex authentication is unavailable\" >&2
-  exit 98
-}
-if [ '$CODEX_REQUEST' -eq 1 ]; then
-  output=''
-  if ! output=\$(printf '%s\\n' \
-      'Reply with exactly PLUTO-CODEX-OK and no other text.' |
-      HOME=/home/root \"\$binary\" exec --json --skip-git-repo-check \
-        --sandbox read-only -C /home/root - 2>&1); then
-    echo \"release AOT smoke: real Codex request failed\" >&2
-    printf '%s\\n' \"\$output\" | tail -n 12 >&2
-    exit 99
-  fi
-  printf '%s\\n' \"\$output\" | grep -Fq '\"type\":\"agent_message\"' || exit 100
-  printf '%s\\n' \"\$output\" | grep -Fq '\"text\":\"PLUTO-CODEX-OK\"' || exit 101
-  printf '%s\\n' \"\$output\" | grep -Fq '\"type\":\"turn.completed\"' || exit 102
-  digest=\$(printf '%s\\n' \"\$output\" | sha256sum | cut -d ' ' -f 1)
-  echo \"release AOT smoke: PASS real authenticated Codex request binary=\$binary version=\$version response_sha256=\$digest\"
-else
-  echo \"release AOT smoke: PASS real Codex binary/auth binary=\$binary version=\$version request=skipped\"
-fi" || return $?
 }
 
 verify_common_supervisor
@@ -693,11 +857,6 @@ verify_app \
   /home/root/pluto/apps/dev.pluto.validation_lab \
   app-dev.pluto.validation_lab
 verify_app \
-  dev.pluto.codex \
-  /home/root/pluto/apps/dev.pluto.codex \
-  app-dev.pluto.codex
-verify_real_codex
-verify_app \
   dev.pluto.ink \
   /home/root/pluto/apps/dev.pluto.ink \
   app-dev.pluto.ink-before-switcher
@@ -709,7 +868,8 @@ verify_app \
   /home/root/pluto/apps/dev.pluto.ink \
   ''
 prepare_ink_canvas
-stage ink-canvas-before-stroke dev.pluto.ink
+stage ink-canvas-before-stroke dev.pluto.ink \
+  "$PREPARED_INK_PID" "$PREPARED_INK_START_TICKS"
 inject_ink_stroke
 verify_app \
   dev.pluto.launcher \
@@ -727,7 +887,7 @@ case ",$PLUTO_PROFILE_BUILD_MODES," in
 esac
 [ "$(find /home/root/pluto/engine -mindepth 1 -maxdepth 1 -type d | wc -l)" \
   -eq "$expected_engine_flavors" ]
-echo "release AOT smoke: all standard apps and switcher passed; Ink changed decoded post-dither pixels; debug/JIT state absent"'
+echo "release AOT smoke: all supported apps and switcher passed; Ink changed decoded post-dither pixels; debug/JIT state absent"'
 verify_common_supervisor
 if [[ "$REQUIRE_VISUAL" == 1 ]]; then
   metrics_args=(
