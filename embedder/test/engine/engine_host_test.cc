@@ -401,7 +401,9 @@ TEST(DirectInkCanvasPreparation, MissingOrRejectedTransitionFailsClosed) {
 TEST(DirectInkCanvasPresentationReceipt,
      ActionWithoutExactFullPresenterProofFailsWithExactTimeout) {
   pluto::DirectInkSemanticsState state;
+  std::vector<std::string> events;
   const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    events.push_back(enabled ? "semantics-on" : "semantics-off");
     if (enabled) {
       publish_semantics(&state, {{80, "create"}});
     }
@@ -409,16 +411,29 @@ TEST(DirectInkCanvasPresentationReceipt,
   };
   const pluto::DirectInkSemanticsTap tap =
       [&](const pluto::DirectInkSemanticsNode &node) {
+        events.push_back("tap");
         EXPECT_EQ(node.node_id, 80u);
         publish_semantics(&state, {{81, "Back to gallery"}});
         return true;
       };
   int proofs = 0;
+  int cancellations = 0;
   const pluto::DirectInkPresentationTracker presentation{
+      .begin =
+          [&] {
+            events.push_back("begin");
+            return true;
+          },
+      .cancel =
+          [&] {
+            ++cancellations;
+            events.push_back("cancel");
+          },
       .prove =
           [&](std::chrono::milliseconds timeout,
               pluto::DirectInkPresentationProof *proof) {
             ++proofs;
+            events.push_back("prove");
             EXPECT_EQ(timeout, std::chrono::milliseconds(19));
             *proof = {};
             return false;
@@ -435,26 +450,123 @@ TEST(DirectInkCanvasPresentationReceipt,
   EXPECT_EQ(proof.surface_generation, 0u);
   EXPECT_EQ(proof.frame_id, 0u);
   EXPECT_EQ(proofs, 1);
+  EXPECT_EQ(cancellations, 1);
+  const std::vector<std::string> expected_events{
+      "begin", "semantics-on", "tap", "semantics-off", "prove", "cancel"};
+  EXPECT_TRUE(events == expected_events);
   EXPECT_EQ(failure.code, "presentation-timeout");
   EXPECT_EQ(failure.message,
             "Ink canvas did not complete its exact Full panel proof");
 }
 
 TEST(DirectInkCanvasPresentationReceipt,
+     PresentationGateFailureStopsBeforeSemantics) {
+  pluto::DirectInkSemanticsState state;
+  int toggle_calls = 0;
+  int taps = 0;
+  int cancellations = 0;
+  int proofs = 0;
+  const pluto::DirectInkPresentationTracker presentation{
+      .begin = [] { return false; },
+      .cancel = [&] { ++cancellations; },
+      .prove =
+          [&](std::chrono::milliseconds, pluto::DirectInkPresentationProof *) {
+            ++proofs;
+            return true;
+          },
+  };
+  std::size_t action_count = 99;
+  pluto::DirectInkPresentationProof proof{UINT64_MAX, UINT64_MAX};
+  pluto::DirectControlFailure failure;
+
+  EXPECT_FALSE(pluto::prepare_direct_ink_canvas_with_presentation_receipt(
+      &state,
+      [&](bool) {
+        ++toggle_calls;
+        return true;
+      },
+      [&](const pluto::DirectInkSemanticsNode &) {
+        ++taps;
+        return true;
+      },
+      presentation, std::chrono::milliseconds(50),
+      std::chrono::milliseconds(19), &action_count, &proof, &failure));
+  EXPECT_EQ(action_count, 0u);
+  EXPECT_EQ(proof.surface_generation, 0u);
+  EXPECT_EQ(proof.frame_id, 0u);
+  EXPECT_EQ(toggle_calls, 0);
+  EXPECT_EQ(taps, 0);
+  EXPECT_EQ(cancellations, 0);
+  EXPECT_EQ(proofs, 0);
+  EXPECT_EQ(failure.code, "presentation-unavailable");
+}
+
+TEST(DirectInkCanvasPresentationReceipt,
+     SemanticsFailureCancelsGateWithoutStartingProof) {
+  pluto::DirectInkSemanticsState state;
+  int cancellations = 0;
+  int proofs = 0;
+  const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    if (enabled) {
+      publish_semantics(&state, {{85, "create"}});
+    }
+    return true;
+  };
+  const pluto::DirectInkPresentationTracker presentation{
+      .begin = [] { return true; },
+      .cancel = [&] { ++cancellations; },
+      .prove =
+          [&](std::chrono::milliseconds, pluto::DirectInkPresentationProof *) {
+            ++proofs;
+            return true;
+          },
+  };
+  std::size_t action_count = 99;
+  pluto::DirectInkPresentationProof proof{UINT64_MAX, UINT64_MAX};
+  pluto::DirectControlFailure failure;
+
+  EXPECT_FALSE(pluto::prepare_direct_ink_canvas_with_presentation_receipt(
+      &state, toggle,
+      [](const pluto::DirectInkSemanticsNode &) { return false; }, presentation,
+      std::chrono::milliseconds(50), std::chrono::milliseconds(19),
+      &action_count, &proof, &failure));
+  EXPECT_EQ(action_count, 0u);
+  EXPECT_EQ(proof.surface_generation, 0u);
+  EXPECT_EQ(proof.frame_id, 0u);
+  EXPECT_EQ(cancellations, 1);
+  EXPECT_EQ(proofs, 0);
+  EXPECT_EQ(failure.code, "semantics-action-failed");
+}
+
+TEST(DirectInkCanvasPresentationReceipt,
      MountedEditorStillRequiresFreshExactFullPresenterProof) {
   pluto::DirectInkSemanticsState state;
+  std::vector<std::string> events;
   const pluto::DirectInkSemanticsToggle toggle = [&](bool enabled) {
+    events.push_back(enabled ? "semantics-on" : "semantics-off");
     if (enabled) {
       publish_semantics(&state, {{90, "Back to gallery"}});
     }
     return true;
   };
   int proofs = 0;
+  int cancellations = 0;
   const pluto::DirectInkPresentationTracker presentation{
+      .begin =
+          [&] {
+            events.push_back("begin");
+            return true;
+          },
+      .cancel =
+          [&] {
+            ++cancellations;
+            events.push_back("cancel");
+          },
       .prove =
           [&](std::chrono::milliseconds timeout,
               pluto::DirectInkPresentationProof *proof) {
             ++proofs;
+            events.push_back("prove");
             EXPECT_EQ(timeout, std::chrono::milliseconds(19));
             *proof = {.surface_generation = 73, .frame_id = 811};
             return true;
@@ -473,6 +585,10 @@ TEST(DirectInkCanvasPresentationReceipt,
   EXPECT_EQ(proof.surface_generation, 73u);
   EXPECT_EQ(proof.frame_id, 811u);
   EXPECT_EQ(proofs, 1);
+  EXPECT_EQ(cancellations, 0);
+  const std::vector<std::string> expected_events{"begin", "semantics-on",
+                                                 "semantics-off", "prove"};
+  EXPECT_TRUE(events == expected_events);
   EXPECT_TRUE(failure.code.empty());
 }
 

@@ -353,13 +353,26 @@ bool prepare_direct_ink_canvas_with_presentation_receipt(
     }
     return false;
   };
-  if (!presentation.prove || action_count == nullptr || proof == nullptr ||
-      failure == nullptr ||
+  if (!presentation.begin || !presentation.cancel || !presentation.prove ||
+      action_count == nullptr || proof == nullptr || failure == nullptr ||
       presentation_timeout <= std::chrono::milliseconds::zero()) {
     return fail("invalid-control", "invalid Ink presentation tracker");
   }
   *action_count = 0;
   *proof = {};
+  if (!presentation.begin()) {
+    return fail("presentation-unavailable",
+                "Ink presentation transaction could not be armed");
+  }
+  struct PresentationCleanup {
+    const DirectInkPresentationTracker *tracker;
+    bool active = true;
+    ~PresentationCleanup() {
+      if (active) {
+        tracker->cancel();
+      }
+    }
+  } cleanup{&presentation};
   if (!prepare_direct_ink_canvas_from_semantics(
           state, toggle, tap, semantics_timeout, action_count, failure)) {
     return false;
@@ -372,6 +385,7 @@ bool prepare_direct_ink_canvas_with_presentation_receipt(
     return fail("presentation-timeout",
                 "Ink canvas did not complete its exact Full panel proof");
   }
+  cleanup.active = false;
   return true;
 }
 
@@ -1037,8 +1051,9 @@ bool EngineHost::schedule_frame_on_platform_thread(
 }
 
 bool EngineHost::prove_direct_ink_presentation(
-    std::chrono::milliseconds timeout, DirectInkPresentationProof *proof) {
-  if (proof == nullptr || frame_renderer_ == nullptr ||
+    std::chrono::milliseconds timeout, std::uint64_t proof_token,
+    DirectInkPresentationProof *proof) {
+  if (proof == nullptr || proof_token == 0 || frame_renderer_ == nullptr ||
       timeout <= std::chrono::milliseconds::zero()) {
     return false;
   }
@@ -1071,7 +1086,8 @@ bool EngineHost::prove_direct_ink_presentation(
   }
 
   FrameRenderer::ExactPresentationReceipt exact;
-  if (!frame_renderer_->present_retained_surface_full(remaining(), &exact) ||
+  if (!frame_renderer_->present_retained_surface_full(proof_token, remaining(),
+                                                      &exact) ||
       exact.surface_generation < generation || exact.frame_id == 0) {
     return false;
   }
@@ -1126,11 +1142,23 @@ bool EngineHost::send_direct_prepare_ink_canvas(
   if (frame_renderer_ == nullptr) {
     return fail("unavailable", "native presentation tracking is unavailable");
   }
+  std::uint64_t proof_token = 0;
   const DirectInkPresentationTracker presentation{
-      .prove = [this](std::chrono::milliseconds timeout,
-                      DirectInkPresentationProof *proof) {
-        return prove_direct_ink_presentation(timeout, proof);
-      }};
+      .begin =
+          [this, &proof_token]() {
+            return frame_renderer_->begin_retained_surface_full_proof(
+                &proof_token);
+          },
+      .cancel =
+          [this, &proof_token]() {
+            (void)frame_renderer_->cancel_retained_surface_full_proof(
+                proof_token);
+          },
+      .prove =
+          [this, &proof_token](std::chrono::milliseconds timeout,
+                               DirectInkPresentationProof *proof) {
+            return prove_direct_ink_presentation(timeout, proof_token, proof);
+          }};
   std::size_t action_count = 0;
   DirectInkPresentationProof proof;
   if (!prepare_direct_ink_canvas_with_presentation_receipt(

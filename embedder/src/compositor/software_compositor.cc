@@ -2614,31 +2614,86 @@ bool FrameRenderer::wait_for_flutter_surface_after(
   return false;
 }
 
-bool FrameRenderer::present_retained_surface_full(
-    std::chrono::milliseconds timeout, ExactPresentationReceipt *receipt) {
-  if (receipt == nullptr || timeout <= std::chrono::milliseconds::zero()) {
+bool FrameRenderer::begin_retained_surface_full_proof(uint64_t *token) {
+  if (token == nullptr) {
     return false;
   }
-  *receipt = {};
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  std::unique_lock<std::mutex> lock(mutex_);
+  *token = 0;
+  std::lock_guard<std::mutex> lock(mutex_);
   if (!valid_ || stop_ || scheduler_ == nullptr || !retained_content_ready_ ||
       width_ == 0 || height_ == 0 || !presenter_supports_health_contract_ ||
-      presentation_suspended_ || exact_proof_active_) {
+      presentation_suspended_ || pixel_reset_phase_ != PixelResetPhase::kIdle ||
+      pixel_reset_render_hold_ || health_file_failed_ ||
+      scheduler_->real_completion_overdue() ||
+      presenter_device_lost_notified_.load(std::memory_order_acquire) ||
+      exact_proof_active_) {
     return false;
   }
 
+  uint64_t next_token = 0;
+  while (next_token == 0) {
+    next_token = next_exact_proof_token_++;
+  }
   exact_proof_active_ = true;
+  exact_proof_token_ = next_token;
   exact_proof_dispatch_armed_ = false;
   exact_proof_present_accepted_ = false;
   exact_proof_failed_ = false;
   exact_proof_completed_ = false;
   exact_proof_frame_id_ = 0;
   exact_proof_surface_generation_ = 0;
+  *token = next_token;
+  return true;
+}
+
+bool FrameRenderer::cancel_retained_surface_full_proof(uint64_t token) {
+  if (token == 0) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!exact_proof_active_ || exact_proof_token_ != token ||
+      exact_proof_dispatch_armed_ || exact_proof_frame_id_ != 0) {
+    return false;
+  }
+  exact_proof_active_ = false;
+  exact_proof_token_ = 0;
+  exact_proof_dispatch_armed_ = false;
+  exact_proof_present_accepted_ = false;
+  exact_proof_failed_ = false;
+  exact_proof_completed_ = false;
+  exact_proof_frame_id_ = 0;
+  exact_proof_surface_generation_ = 0;
+  presentation_completion_cv_.notify_all();
+  wake_.store(true, std::memory_order_release);
+  cv_.notify_one();
+  return true;
+}
+
+bool FrameRenderer::present_retained_surface_full(
+    uint64_t token, std::chrono::milliseconds timeout,
+    ExactPresentationReceipt *receipt) {
+  if (token == 0 || receipt == nullptr ||
+      timeout <= std::chrono::milliseconds::zero()) {
+    return false;
+  }
+  *receipt = {};
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (!exact_proof_active_ || exact_proof_token_ != token) {
+    return false;
+  }
   const auto finish = [this] {
     exact_proof_active_ = false;
+    exact_proof_token_ = 0;
     exact_proof_dispatch_armed_ = false;
+    exact_proof_present_accepted_ = false;
+    exact_proof_failed_ = false;
+    exact_proof_completed_ = false;
+    exact_proof_frame_id_ = 0;
+    exact_proof_surface_generation_ = 0;
     presentation_completion_cv_.notify_all();
+    wake_.store(true, std::memory_order_release);
+    cv_.notify_one();
   };
 
   while (!stop_ && std::chrono::steady_clock::now() < deadline) {
@@ -2687,6 +2742,19 @@ bool FrameRenderer::present_retained_surface_full(
     presentation_completion_cv_.wait_until(lock, poll_deadline);
   }
   finish();
+  return false;
+}
+
+bool FrameRenderer::present_retained_surface_full(
+    std::chrono::milliseconds timeout, ExactPresentationReceipt *receipt) {
+  uint64_t token = 0;
+  if (!begin_retained_surface_full_proof(&token)) {
+    return false;
+  }
+  if (present_retained_surface_full(token, timeout, receipt)) {
+    return true;
+  }
+  (void)cancel_retained_surface_full_proof(token);
   return false;
 }
 

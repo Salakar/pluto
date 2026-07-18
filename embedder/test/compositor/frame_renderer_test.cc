@@ -457,7 +457,7 @@ TEST(FrameRendererTest, DetachRejectsFramesAndAttachRebuildsPresenterState) {
 }
 
 TEST(FrameRendererTest,
-     ExactFullReceiptRejectsLatePreActionUnknownAndOutOfOrderCompletions) {
+     PrearmedExactFullCollapsesRouteFramesAndRejectsUnrelatedCompletions) {
   reset_mono_capture();
   {
     std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
@@ -478,6 +478,35 @@ TEST(FrameRendererTest,
     pre_action_frame_id = g_mono_capture.frame_id_history.front();
   }
 
+  std::uint64_t proof_token = 0;
+  ASSERT_TRUE(renderer.begin_retained_surface_full_proof(&proof_token));
+  ASSERT_NE(proof_token, 0u);
+  std::uint64_t competing_token = UINT64_MAX;
+  EXPECT_FALSE(renderer.begin_retained_surface_full_proof(&competing_token));
+  EXPECT_EQ(competing_token, 0u);
+  EXPECT_FALSE(renderer.cancel_retained_surface_full_proof(proof_token + 1));
+
+  // Model the complete gallery -> chooser -> canvas transaction before the
+  // proof worker starts. Every frame remains valid Flutter retained truth, but
+  // the prearmed gate must keep both route-transition requests away from the
+  // physical presenter.
+  pixels[0] = 0;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2)));
+  pixels[1] = 0;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 3)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u);
+  }
+
+  FrameRenderer::ExactPresentationReceipt unrelated_receipt{UINT64_MAX,
+                                                            UINT64_MAX};
+  EXPECT_FALSE(renderer.present_retained_surface_full(
+      proof_token + 1, std::chrono::milliseconds(5), &unrelated_receipt));
+  EXPECT_EQ(unrelated_receipt.surface_generation, 0u);
+  EXPECT_EQ(unrelated_receipt.frame_id, 0u);
+
   bool completed = true;
   FrameRenderer::ExactPresentationReceipt receipt{UINT64_MAX, UINT64_MAX};
   std::atomic<bool> waiter_started{false};
@@ -485,19 +514,12 @@ TEST(FrameRendererTest,
   std::thread control_worker([&] {
     waiter_started.store(true, std::memory_order_release);
     completed = renderer.present_retained_surface_full(
-        std::chrono::milliseconds(500), &receipt);
+        proof_token, std::chrono::milliseconds(500), &receipt);
     waiter_done.store(true, std::memory_order_release);
   });
   while (!waiter_started.load(std::memory_order_acquire)) {
     std::this_thread::yield();
   }
-
-  // A new retained Flutter surface arrives while the old present is still in
-  // flight. The proof must drain the irreversible old update, discard the
-  // superseded never-dispatched request, and have its eventual Full replay
-  // these newer retained pixels rather than the pre-action surface.
-  pixels[0] = 0;
-  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2)));
 
   // Future ids arriving out of order, an unrelated maintenance/Sparkle-like
   // id, and stale duplicates are not proof. The real older presents must
@@ -523,6 +545,7 @@ TEST(FrameRendererTest,
               kPlutoPresentFlagPreDithered);
     ASSERT_TRUE(!g_mono_capture.pixel_history.back().empty());
     EXPECT_EQ(g_mono_capture.pixel_history.back()[0], 0u);
+    EXPECT_EQ(g_mono_capture.pixel_history.back()[1], 0u);
     EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 64, 64}));
   }
   ASSERT_EQ(proof_frame_id, pre_action_frame_id + 1);
@@ -534,8 +557,67 @@ TEST(FrameRendererTest,
   control_worker.join();
 
   EXPECT_TRUE(completed);
-  EXPECT_EQ(receipt.surface_generation, 2u);
+  EXPECT_EQ(receipt.surface_generation, 3u);
   EXPECT_EQ(receipt.frame_id, proof_frame_id);
+}
+
+TEST(FrameRendererTest,
+     CancellingPrearmedExactFullReleasesQueuedWorkAndInvalidatesToken) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::uint64_t initial_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(initial_frame_id);
+  const auto initial_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  while (std::chrono::steady_clock::now() < initial_deadline &&
+         renderer.queued_present_completions_for_testing() != 0) {
+    std::this_thread::yield();
+  }
+
+  std::uint64_t proof_token = 0;
+  ASSERT_TRUE(renderer.begin_retained_surface_full_proof(&proof_token));
+  pixels[0] = 0;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u);
+  }
+
+  EXPECT_FALSE(renderer.cancel_retained_surface_full_proof(proof_token + 1));
+  EXPECT_TRUE(renderer.cancel_retained_surface_full_proof(proof_token));
+  EXPECT_FALSE(renderer.cancel_retained_surface_full_proof(proof_token));
+  ASSERT_TRUE(wait_for_present_count(2));
+
+  std::uint64_t released_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    released_frame_id = g_mono_capture.frame_id_history.back();
+    ASSERT_TRUE(!g_mono_capture.pixel_history.back().empty());
+    EXPECT_EQ(g_mono_capture.pixel_history.back()[0], 0u);
+  }
+  renderer.notify_present_complete(released_frame_id);
+
+  std::uint64_t next_token = 0;
+  ASSERT_TRUE(renderer.begin_retained_surface_full_proof(&next_token));
+  EXPECT_NE(next_token, 0u);
+  EXPECT_NE(next_token, proof_token);
+  EXPECT_TRUE(renderer.cancel_retained_surface_full_proof(next_token));
 }
 
 TEST(FrameRendererTest, ExactFullReceiptHandlesSynchronousExactCompletion) {

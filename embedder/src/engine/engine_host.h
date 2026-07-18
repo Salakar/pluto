@@ -107,9 +107,13 @@ struct DirectInkPresentationProof {
 };
 
 // Native presentation proof used by the bounded Ink acceptance flow. It must
-// establish a post-semantics Flutter frame fence and then complete one exact
-// retained-surface Full presenter frame.
+// open an optical transaction before the semantic route changes, establish a
+// post-semantics Flutter frame fence, and then complete one exact
+// retained-surface Full presenter frame. Cancellation releases any queued
+// route work when semantics cannot reach the canvas.
 struct DirectInkPresentationTracker {
+  std::function<bool()> begin;
+  std::function<void()> cancel;
   std::function<bool(std::chrono::milliseconds, DirectInkPresentationProof *)>
       prove;
 };
@@ -270,6 +274,7 @@ private:
       std::chrono::steady_clock::time_point deadline,
       std::uint64_t *pre_schedule_surface_generation);
   bool prove_direct_ink_presentation(std::chrono::milliseconds timeout,
+                                     std::uint64_t proof_token,
                                      DirectInkPresentationProof *proof);
   std::string hibernate_marker_path() const;
   bool publish_hibernate_marker() const;

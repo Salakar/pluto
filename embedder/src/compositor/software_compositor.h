@@ -304,11 +304,24 @@ public:
     uint64_t surface_generation = 0;
     uint64_t frame_id = 0;
   };
-  // After all older user presents have completed, discards queued maintenance
-  // and sends one dedicated full-screen Full request from the retained Flutter
+  // Starts an acceptance-only exact-Full transaction before Flutter performs
+  // its semantic route changes. While armed, accepted Flutter frames continue
+  // updating the retained surface but cannot dispatch intermediate panel
+  // requests. The opaque nonzero token binds completion/cancellation to the
+  // one caller that opened the transaction.
+  bool begin_retained_surface_full_proof(uint64_t *token);
+  bool cancel_retained_surface_full_proof(uint64_t token);
+  // After all work already accepted by the presenter has completed, discards
+  // every superseded request still queued in the scheduler and sends one
+  // dedicated full-screen Full request from the newest retained Flutter
   // surface. Success requires the real presenter callback for that exact frame
   // id. Unknown, stale, out-of-order and synchronous callbacks are reconciled
   // without weakening the identity proof.
+  bool present_retained_surface_full(uint64_t token,
+                                     std::chrono::milliseconds timeout,
+                                     ExactPresentationReceipt *receipt);
+  // Convenience path for callers that do not need to hold the proof gate
+  // across a preceding Flutter transaction.
   bool present_retained_surface_full(std::chrono::milliseconds timeout,
                                      ExactPresentationReceipt *receipt);
   // TEST-ONLY: number of callbacks enqueued but not yet reconciled with the
@@ -510,6 +523,8 @@ private:
   bool exact_proof_present_accepted_ = false;
   bool exact_proof_failed_ = false;
   bool exact_proof_completed_ = false;
+  uint64_t next_exact_proof_token_ = 1;
+  uint64_t exact_proof_token_ = 0;
   uint64_t exact_proof_frame_id_ = 0;
   uint64_t exact_proof_surface_generation_ = 0;
   static constexpr uint8_t kTouchInputBit = 1u << 0;
