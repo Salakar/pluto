@@ -106,7 +106,10 @@ temperature table. The choice remains outside `WbfDecoder`, so parsing cannot
 silently invent a display policy.
 
 An exact cross-app warm handoff has one additional RM2 execution rule. The
-first common full-panel reconciliation drives mode 6 to white from the recorded
+renderer may partition its complete retained-surface reconciliation into
+several presenter jobs, so the backend promotes the first request to an exact
+full-panel Text job unless it is the single `{0,0,1,1}` Fast same-surface
+liveness proof. The promoted job drives mode 6 to white from the recorded
 source levels, then mode 2 from white to the incoming content. This is the AF
 fast-mode exit protocol needed when logical target history cannot represent
 residual pigment. The worker remaps the existing transition keys through a

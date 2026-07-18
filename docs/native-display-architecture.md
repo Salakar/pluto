@@ -166,21 +166,25 @@ logged at a bounded rate so they remain observable without causing app restarts
 or unbounded hot-path I/O.
 
 An accepted cross-app warm handoff imports the outgoing app's exact optical
-state, then the common renderer reconciles the incoming app with one
-full-panel `Text` request. The imported levels are the last commanded optical
-targets, not a sensor measurement of residual pigment. Physical RM2 testing
-therefore rejected merely retaining mode-2 old-equals-new transitions: a
-high-contrast app could remain visible even though logical old and new levels
-already agreed.
+state, then the common renderer reconciles the complete retained incoming
+surface. The scheduler may partition that reconciliation into several
+presenter jobs; it is not valid for a backend to assume the first job's damage
+already covers the panel. The imported levels are also the last commanded
+optical targets, not a sensor measurement of residual pigment. Physical RM2
+testing therefore rejected merely retaining mode-2 old-equals-new
+transitions: a high-contrast app could remain visible even though logical old
+and new levels already agreed.
 
-For this first full-panel reconciliation only, the RM2 backend follows the AF
-fast-mode exit protocol inside the same admitted job. It drives one mode-6
-white precondition from the recorded source levels, then mode-2 content from
-white to the incoming target. A 256-byte phase-local LUT remap reuses the
-existing transition-key vector for both stages, so there is no second frame,
-full-surface traversal, allocation, or copy. The next job returns to ordinary
-unchanged-cell suppression, and a same-app sparse `Fast` resume consumes no
-precondition. This is a panel-specific waveform sequence below the common
+The RM2 backend gives the renderer's exact same-surface liveness request
+strong semantics: a single `{0,0,1,1}` `Fast` request consumes the handoff
+marker without a flash. Any other first request is promoted inside that
+backend to one exact full-panel `Text` job. It follows the AF fast-mode exit
+protocol by driving one mode-6 white precondition from the recorded source
+levels, then mode-2 content from white to the incoming target. A 256-byte
+phase-local LUT remap reuses the existing transition-key vector for both
+stages, so there is no second Flutter frame, full-surface traversal,
+allocation, or copy. The next job returns to ordinary unchanged-cell
+suppression. This is a panel-specific waveform sequence below the common
 lifecycle boundary, not a separate app-switch flow.
 
 ### Paper Pro Move

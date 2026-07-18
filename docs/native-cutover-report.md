@@ -429,8 +429,41 @@ old-equals-new suppression.
 Focused coverage derives the exact phase counts from the bound WBF, observes
 the white precondition, proves it occurs once, and proves the next identical
 `Text` job returns to the ordinary suppressed phase stream; all 80 RM2 native
-tests pass. This is development evidence until a clean release repeats the
-Motion Lab to Ink Lab and Validation Lab sequence on the tablet.
+tests pass.
+
+Exact clean candidate `b29e55838b3e82b8954974e1ae967136607a3516`,
+manifest SHA-256
+`1271e1706ac7f9372b2406a7c353408b1807ce69fc342e267aa8b27318342cad`,
+was then provisioned through the common CLI. The timed
+`analysis/native-cutover/diagnostics/rm2-handoff-white-b29e558/02-motion-to-ink-lab-camera.mp4`
+and immediate/late frames still showed Motion Lab residue over Ink Lab.
+Crucially, this did not disprove the white rail: after hibernation the exact
+incoming activation reported two jobs, 76 phases, `requested_pixels=2640000`,
+and `handoff_cleanup_jobs=0`. The physical panel has 2,628,288 pixels; the
+total is one panel plus a preceding 11,712-pixel Text job. That smaller job
+consumed the one-shot marker before the full-coverage job, so the new waveform
+sequence never ran. This candidate is rejected for its trigger semantics.
+
+### RM2 round 11: promote the first cross-app presenter job
+
+The renderer replays the complete retained app surface, but its scheduler may
+partition that reconciliation into several presenter jobs. RM2 therefore no
+longer infers cross-app cleanup from one request's damage area. The exact
+same-surface liveness contract is a single `{0,0,1,1}` `Fast` request; only
+that request consumes the marker without a flash. Every other first request
+after an accepted handoff is promoted inside the RM2 backend to one exact
+full-panel `Text` job, then runs the mode-6 white precondition and complete
+mode-2 content.
+
+The promotion reads the already validated full input surface and replaces only
+the backend job region and effective waveform class. It does not add a Flutter
+frame, public lifecycle state, buffer, traversal, install path, or app-switch
+flow. Focused coverage starts with a deliberately partial Text request, proves
+that a sample outside its damage is driven by the promoted white/content
+sequence exactly once, and separately proves the exact 1x1 same-surface probe
+does not arm a later cleanup. All 81 RM2 native tests pass. This remains
+development evidence until a newly frozen release repeats the physical
+Motion Lab to Ink Lab sequence.
 
 ### Lifecycle acceptance: reject early external wakes
 

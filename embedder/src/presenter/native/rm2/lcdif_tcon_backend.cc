@@ -2165,30 +2165,50 @@ private:
     job->region_count = 0;
     const std::uint64_t requested_pixels = rm2_damage_union_area(
         std::span<const PlutoRect>(request.damage, request.damage_count));
-    constexpr std::uint64_t kPanelPixels =
-        static_cast<std::uint64_t>(kRm2PanelWidth) * kRm2PanelHeight;
+    const PlutoRect &first_damage = request.damage[0];
+    const bool exact_same_surface_probe =
+        request.refresh_class == kPlutoRefreshFast &&
+        request.damage_count == 1 && first_damage.x == 0 &&
+        first_damage.y == 0 && first_damage.width == 1 &&
+        first_damage.height == 1;
+    // A cross-app replay may be split into several presenter jobs by the
+    // scheduler. Its first job is not guaranteed to cover every panel pixel,
+    // so equality against damage area can silently consume the cleanup marker
+    // before the large Text job. The one request with stronger semantics is
+    // the renderer's exact same-surface 1x1 Fast liveness proof. Promote every
+    // other first warm-handoff request to one exact full-panel Text job.
     job->completes_handoff_cleanup =
-        handoff_cleanup_pending_ && requested_pixels == kPanelPixels;
-    // The first cross-app renderer reconciliation is already one full-panel
-    // Text request. Preserve that common scheduling decision. The RM2 worker
-    // may prepend the AF/A2 exit-to-white rail required before mode-2 content;
-    // a same-app 1x1 resume proof stays Fast and consumes no precondition.
-    job->suppress_unchanged = request.refresh_class != kPlutoRefreshFull;
-    for (std::size_t index = 0; index < request.damage_count; ++index) {
-      const PlutoRect &damage = request.damage[index];
-      Rm2PanelRect candidate = panel_rect_for_damage(damage);
-      for (std::size_t region = 0; region < job->region_count;) {
-        if (!panel_rects_overlap(candidate, job->regions[region].panel_rect)) {
-          ++region;
-          continue;
+        handoff_cleanup_pending_ && !exact_same_surface_probe;
+    const PlutoRefreshClass effective_refresh_class =
+        job->completes_handoff_cleanup ? kPlutoRefreshText
+                                       : request.refresh_class;
+    job->suppress_unchanged = effective_refresh_class != kPlutoRefreshFull;
+    if (job->completes_handoff_cleanup) {
+      job->regions[0].panel_rect = {
+          .row_min = 0,
+          .row_max = static_cast<std::uint16_t>(kRm2PanelHeight - 1U),
+          .column_min = 0,
+          .column_max = static_cast<std::uint16_t>(kRm2PanelWidth - 1U),
+      };
+      job->region_count = 1;
+    } else {
+      for (std::size_t index = 0; index < request.damage_count; ++index) {
+        const PlutoRect &damage = request.damage[index];
+        Rm2PanelRect candidate = panel_rect_for_damage(damage);
+        for (std::size_t region = 0; region < job->region_count;) {
+          if (!panel_rects_overlap(candidate,
+                                   job->regions[region].panel_rect)) {
+            ++region;
+            continue;
+          }
+          candidate =
+              union_panel_rects(candidate, job->regions[region].panel_rect);
+          job->regions[region] = job->regions[job->region_count - 1U];
+          --job->region_count;
+          region = 0;
         }
-        candidate =
-            union_panel_rects(candidate, job->regions[region].panel_rect);
-        job->regions[region] = job->regions[job->region_count - 1U];
-        --job->region_count;
-        region = 0;
+        job->regions[job->region_count++].panel_rect = candidate;
       }
-      job->regions[job->region_count++].panel_rect = candidate;
     }
     std::sort(
         job->regions.begin(),
@@ -2212,7 +2232,7 @@ private:
           "panel temperature reached the burst safety limit");
       return false;
     }
-    if (!waveforms_.select(request.refresh_class, *temperature,
+    if (!waveforms_.select(effective_refresh_class, *temperature,
                            &job->waveform)) {
       report_present_failure("present.powered-temperature-waveform-select",
                              kPlutoStatusDeviceLost,
@@ -2281,7 +2301,7 @@ private:
           const std::uint8_t old_level = settled_levels_[state_offset] & 0x0fU;
           const std::uint8_t quantized_level = rgb565_to_rm2_level(pixel);
           const std::uint8_t new_level =
-              request.refresh_class == kPlutoRefreshFast
+              effective_refresh_class == kPlutoRefreshFast
                   ? rm2_fast_level(quantized_level)
                   : quantized_level;
           job->target_pixels[offset] = pixel;
