@@ -959,6 +959,8 @@ The performance gate is intentionally outcome-based:
   10,000-job soak has zero missed phases/underflows;
 - every LUT/pack has an on-device before/after table; unmeasured generated data
   does not ship merely because it looks faster;
+- every cross-app transition is camera-checked immediately after presentation;
+  a later ghost-maintenance cycle cannot make an earlier retained-app image pass;
 - final reports separate Flutter/raster, native CPU, driver/scanout, waveform,
   first optical change, and optical settle. No blended startup number is called
   rendering latency.
@@ -1259,6 +1261,9 @@ Owners: RM2 display, supervisor, ARMv7, optical validation.
 
 - Implement scan encoder, LCDIF device seam, phase loop, real completion, health,
   and lifecycle behind the common interfaces.
+- Keep cross-app optical cleanup inside the device presenter: RM2 may retain
+  complete transition cells for the common first full-panel warm-handoff replay,
+  but must not add a second app-switch, install, setup, or refresh flow.
 - Follow the bring-up ladder exactly; archive evidence at every rung.
 - Add RM2 input/profile/session behavior and common direct payload routing.
 - Run byte-oracle, scan timing, optical, failure, soak, lifecycle, and restore

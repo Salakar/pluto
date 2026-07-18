@@ -469,6 +469,7 @@ public:
     std::vector<std::uint16_t> target_pixels;
     Rm2WaveformSelection waveform;
     bool suppress_unchanged = true;
+    bool completes_handoff_cleanup = false;
   };
 
   Impl(const GeneratedDeviceProfile &profile,
@@ -927,6 +928,17 @@ public:
       finish_failed_admission(kPlutoStatusInternal, std::move(job));
       return kPlutoStatusInternal;
     }
+    if (handoff_cleanup_pending_) {
+      handoff_cleanup_pending_ = false;
+      if (job.completes_handoff_cleanup) {
+        ++handoff_cleanup_jobs_;
+        std::fprintf(
+            stderr,
+            "lcdif_tcon: warm handoff full-panel replay drives complete "
+            "mode-%u transitions\n",
+            job.waveform.mode);
+      }
+    }
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       pending_job_ = std::move(job);
@@ -1188,6 +1200,7 @@ public:
     incoming_renderer_info_ = {};
     handoff_decision_ = HandoffDecision::kAccepted;
     warm_handoff_accepted_ = true;
+    handoff_cleanup_pending_ = true;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       accepting_ = true;
@@ -1263,6 +1276,7 @@ public:
       handoff_lease_ = GlassHandoffLease{};
       clear_incoming_handoff_locked(HandoffDecision::kNone);
       warm_handoff_accepted_ = false;
+      handoff_cleanup_pending_ = false;
       handoff_saved_ = false;
       std::lock_guard<std::mutex> lock(state_mutex_);
       pending_job_.reset();
@@ -1570,6 +1584,7 @@ private:
     handoff_chain_next_ = 0;
     handoff_unlinked_ = true;
     warm_handoff_accepted_ = false;
+    handoff_cleanup_pending_ = false;
     return kPlutoStatusOk;
   }
 
@@ -1706,6 +1721,7 @@ private:
     handoff_decision_ = decision;
     if (decision != HandoffDecision::kAccepted) {
       warm_handoff_accepted_ = false;
+      handoff_cleanup_pending_ = false;
     }
   }
 
@@ -2035,12 +2051,13 @@ private:
         stderr,
         "lcdif_tcon: damage jobs=%llu requested_pixels=%llu "
         "encoded_pixels=%llu amplification_max_milli=%llu "
-        "buffer_growths=%llu\n",
+        "buffer_growths=%llu handoff_cleanup_jobs=%llu\n",
         static_cast<unsigned long long>(damage_jobs_),
         static_cast<unsigned long long>(damage_requested_pixels_),
         static_cast<unsigned long long>(damage_encoded_pixels_),
         static_cast<unsigned long long>(damage_amplification_max_milli_),
-        static_cast<unsigned long long>(job_buffer_growths_));
+        static_cast<unsigned long long>(job_buffer_growths_),
+        static_cast<unsigned long long>(handoff_cleanup_jobs_));
   }
 
   bool accept_pan_result(std::uint32_t slot, const Rm2PanResult &result) {
@@ -2153,9 +2170,20 @@ private:
     }
     job->frame_id = request.frame_id;
     job->region_count = 0;
-    job->suppress_unchanged = request.refresh_class != kPlutoRefreshFull;
     const std::uint64_t requested_pixels = rm2_damage_union_area(
         std::span<const PlutoRect>(request.damage, request.damage_count));
+    constexpr std::uint64_t kPanelPixels =
+        static_cast<std::uint64_t>(kRm2PanelWidth) * kRm2PanelHeight;
+    job->completes_handoff_cleanup =
+        handoff_cleanup_pending_ && requested_pixels == kPanelPixels;
+    // The first cross-app renderer reconciliation is already one full-panel
+    // Text request. RM2's Text and Full classes select the same vendor mode;
+    // Full differs only by retaining its old==new transition cells. Preserve
+    // that one-pass scheduling while driving those cells after a warm glass
+    // handoff so residual pigment from the previous app cannot survive in
+    // logically unchanged paper. A same-app 1x1 resume proof stays Fast.
+    job->suppress_unchanged = request.refresh_class != kPlutoRefreshFull &&
+                              !job->completes_handoff_cleanup;
     for (std::size_t index = 0; index < request.damage_count; ++index) {
       const PlutoRect &damage = request.damage[index];
       Rm2PanelRect candidate = panel_rect_for_damage(damage);
@@ -2647,6 +2675,7 @@ private:
   bool handoff_unlinked_ = true;
   bool handoff_saved_ = false;
   bool warm_handoff_accepted_ = false;
+  bool handoff_cleanup_pending_ = false;
   bool probed_ = false;
   bool started_ = false;
   bool accepting_ = false;
@@ -2676,6 +2705,7 @@ private:
   std::uint64_t damage_requested_pixels_ = 0;
   std::uint64_t damage_encoded_pixels_ = 0;
   std::uint64_t damage_amplification_max_milli_ = 0;
+  std::uint64_t handoff_cleanup_jobs_ = 0;
 };
 
 LcdifTconDisplayBackend::LcdifTconDisplayBackend(

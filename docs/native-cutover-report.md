@@ -363,6 +363,47 @@ attributes, and real pre/post-drive power loss; all 79 RM2 native tests pass.
 This correction is development evidence until a newly frozen release repeats
 the complete physical and performance gate.
 
+### RM2 round 9: warm-handoff pigment cleanup
+
+Exact candidate `a71aed6bf1d4e5dca6907795a339d9288bcd4b89` and universal
+manifest SHA-256
+`2570550b6a6318d13bd0b97d75d0cf748029d468614d96d57b97cf29d3f142fd`
+completed all ten scripted RM2 interaction stages and collected their process,
+health, timing, CPU, RSS, memory, thermal, framebuffer, and camera evidence
+under
+`analysis/native-cutover/final-acceptance/a71aed6/rm2-final/`. It is rejected:
+the camera showed Motion Lab's vertical pattern strongly retained over the
+following Ink Lab and Validation Lab screens.
+
+The pixel verifier correctly found a negative discrimination margin rather
+than merely failing on alignment. The intended Ink Lab camera/native pair
+scored `0.1929`, while the following ghost-contaminated Validation Lab camera
+matched the Ink Lab native frame at `0.2580`, a `-0.0650` margin. From the
+camera row, Ink Lab's intended match scored `0.1929` and the native Ink canvas
+scored `0.2511`, a `-0.0581` margin. The warm switcher later looked clean
+because its explicit full refresh drives the complete transition table.
+Automatic bleach also restored clean Home later, but took about `7.148 s`;
+a diagnostic SIGHUP black/white/blink/bleach/restore cycle took about
+`9.942 s`. Either delayed multi-flash sequence is too slow to make every
+ordinary app switch optically correct.
+
+RM2 maps both `Text` and `Full` to WBF mode 2 with 38 phases. The relevant
+difference is that ordinary `Text` encoding zeros old-equals-new transition
+cells, while `Full` retains the complete table. The retained correction marks
+an accepted warm handoff as needing one pigment cleanup. If the already
+scheduled first incoming job is the common full-panel reconciliation, that job
+uses complete mode-2 transitions; no second frame, full-surface traversal, or
+waveform is added. The marker is consumed by the first successful job, so a
+same-app sparse `Fast` resume and every later `Text` update keep unchanged-cell
+suppression.
+
+Focused host coverage proves that an unchanged sample cell is driven on the
+first full-panel `Text` replay and suppressed again on the second. It also
+checks explicit telemetry for exactly one cleanup job; all 80 RM2 native tests
+pass. This remains development evidence until a newly frozen release repeats
+the Motion Lab to Ink Lab and Validation Lab sequence on glass and passes the
+complete formal verifier.
+
 ### Lifecycle acceptance: reject early external wakes
 
 An intermediate RM1 soak entered deep suspend but woke early on later cycles.

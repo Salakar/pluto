@@ -165,6 +165,18 @@ after the post-drive sample succeeds. Diagnostic changes are counted and
 logged at a bounded rate so they remain observable without causing app restarts
 or unbounded hot-path I/O.
 
+An accepted cross-app warm handoff imports the outgoing app's exact optical
+state, then the common renderer reconciles the incoming app with one
+full-panel `Text` request. On RM2, `Text` and `Full` select the same WBF mode
+and phase count; the ordinary `Text` optimization differs by suppressing
+old-equals-new transition cells. Those cells can still carry residual pigment
+after a visually dissimilar app, so the RM2 backend retains the complete mode
+table for this first full-panel reconciliation only. It does not schedule
+another frame, traversal, or waveform. The next job returns to normal unchanged
+cell suppression, and the same-app sparse `Fast` resume proof is unchanged.
+This is a panel-specific encoding detail below the common lifecycle boundary,
+not a separate app-switch flow.
+
 ### Paper Pro Move
 
 Move keeps its established Gallery 3 program and DRM scanout implementation

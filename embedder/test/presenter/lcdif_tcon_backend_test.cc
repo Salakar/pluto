@@ -531,19 +531,20 @@ public:
   PlutoPresentRequest request{};
 };
 
-bool probe_and_start(LcdifTconDisplayBackend *backend,
-                     const LocalRm2Profile &fixture,
-                     CompletionState *completion = nullptr) {
-  if (backend == nullptr || !fixture.valid()) {
+bool probe_and_start_profile(LcdifTconDisplayBackend *backend,
+                             const GeneratedDeviceProfile &profile,
+                             std::string_view waveform_path,
+                             CompletionState *completion = nullptr) {
+  if (backend == nullptr || waveform_path.empty()) {
     return false;
   }
-  const PlutoStatus probe_status = backend->probe(fixture.profile());
+  const PlutoStatus probe_status = backend->probe(profile);
   if (probe_status != kPlutoStatusOk) {
     std::fprintf(stderr, "synthetic RM2 fixture probe failed: %d\n",
                  static_cast<int>(probe_status));
     return false;
   }
-  const std::string options = "wbf=" + fixture.waveform_path();
+  const std::string options = "wbf=" + std::string(waveform_path);
   const PlutoPresenterConfig config{
       .struct_size = sizeof(PlutoPresenterConfig),
       .backend_name = "native",
@@ -557,6 +558,14 @@ bool probe_and_start(LcdifTconDisplayBackend *backend,
                  static_cast<int>(start_status));
   }
   return start_status == kPlutoStatusOk;
+}
+
+bool probe_and_start(LcdifTconDisplayBackend *backend,
+                     const LocalRm2Profile &fixture,
+                     CompletionState *completion = nullptr) {
+  return fixture.valid() &&
+         probe_and_start_profile(backend, fixture.profile(),
+                                 fixture.waveform_path(), completion);
 }
 
 void draw_fast_pixel(LcdifTconDisplayBackend *backend, std::uint32_t x,
@@ -2737,6 +2746,105 @@ TEST(LcdifTconBackend,
             static_cast<std::uint8_t>(kLogicalPixel));
   EXPECT_EQ(restaged[restaged_presenter->offset + logical_index + 1u],
             static_cast<std::uint8_t>(kLogicalPixel >> 8u));
+}
+
+TEST(LcdifTconBackend,
+     FirstWarmHandoffFullPanelTextReplayDrivesUnchangedCellsOnce) {
+  LocalRm2Profile fixture;
+  if (!fixture.valid()) {
+    return;
+  }
+  IsolatedHandoffPath handoff_path;
+  OwnedHandoffPayload payload;
+  GeneratedDeviceProfile relaxed_profile = fixture.profile();
+  relaxed_profile.runtime.display.phase_interval_nanoseconds = 100'000'000U;
+  BackendFakeLcdifSyscalls outgoing_syscalls;
+  {
+    auto outgoing_device = std::make_unique<MxsLcdifDevice>(&outgoing_syscalls);
+    LcdifTconDisplayBackend outgoing(
+        relaxed_profile, std::move(outgoing_device),
+        [](std::string *) -> std::optional<int> { return 24000; },
+        blanked_baseline_then_power_good_reader(),
+        handoff_options(handoff_path.get()));
+    ASSERT_TRUE(probe_and_start_profile(&outgoing, relaxed_profile,
+                                        fixture.waveform_path()));
+    draw_fast_pixel(&outgoing, 17, 29, 0x7befU, 200);
+    ASSERT_EQ(outgoing.stage_handoff(&payload.payload, 3000), kPlutoStatusOk);
+    outgoing.stop();
+  }
+
+  constexpr std::size_t kSampleX = 700;
+  constexpr std::size_t kSampleY = 900;
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend incoming(
+      relaxed_profile, std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      blanked_baseline_then_power_good_reader(),
+      handoff_options(handoff_path.get()));
+  ScopedStderrCapture capture;
+  ASSERT_TRUE(capture.valid());
+  ASSERT_TRUE(probe_and_start_profile(&incoming, relaxed_profile,
+                                      fixture.waveform_path()));
+  PlutoHandoffPayload received{.struct_size = sizeof(PlutoHandoffPayload)};
+  ASSERT_EQ(incoming.get_handoff(&received), kPlutoStatusOk);
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+
+  syscalls.capture_phase_cells = true;
+  const std::size_t sampled_cell =
+      phase_cell_offset_for_user(kSampleX, kSampleY);
+  syscalls.phase_cell_offsets = {sampled_cell, sampled_cell, sampled_cell};
+  std::vector<std::uint16_t> pixels(kRm2PanelWidth * kRm2PanelHeight, 0xffffU);
+  const PlutoRect full{
+      .x = 0,
+      .y = 0,
+      .width = static_cast<std::int32_t>(kRm2PanelWidth),
+      .height = static_cast<std::int32_t>(kRm2PanelHeight),
+  };
+  PlutoPresentRequest request{
+      .struct_size = sizeof(PlutoPresentRequest),
+      .surface =
+          {
+              .pixels = reinterpret_cast<const std::uint8_t *>(pixels.data()),
+              .stride_bytes = kRm2PanelWidth * sizeof(std::uint16_t),
+              .width = static_cast<std::int32_t>(kRm2PanelWidth),
+              .height = static_cast<std::int32_t>(kRm2PanelHeight),
+              .format = kPlutoPixelFormatRgb565,
+          },
+      .damage = &full,
+      .damage_count = 1,
+      .refresh_class = kPlutoRefreshText,
+      .flags = 0,
+      .frame_id = 201,
+  };
+
+  syscalls.panned_phase_cells.clear();
+  ASSERT_EQ(incoming.submit(&request), kPlutoStatusOk);
+  ASSERT_EQ(incoming.wait_idle(5000), kPlutoStatusOk);
+  ASSERT_TRUE(!syscalls.panned_phase_cells.empty());
+  EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin(),
+                          syscalls.panned_phase_cells.end(),
+                          [](const std::array<std::uint16_t, 3> &samples) {
+                            return samples[0] != 0;
+                          }));
+
+  syscalls.panned_phase_cells.clear();
+  request.frame_id = 202;
+  ASSERT_EQ(incoming.submit(&request), kPlutoStatusOk);
+  ASSERT_EQ(incoming.wait_idle(5000), kPlutoStatusOk);
+  ASSERT_TRUE(!syscalls.panned_phase_cells.empty());
+  EXPECT_TRUE(std::all_of(syscalls.panned_phase_cells.begin(),
+                          syscalls.panned_phase_cells.end(),
+                          [](const std::array<std::uint16_t, 3> &samples) {
+                            return samples[0] == 0;
+                          }));
+
+  incoming.stop();
+  const std::string diagnostics = capture.finish();
+  EXPECT_TRUE(diagnostics.find("warm handoff full-panel replay drives "
+                               "complete mode-2 transitions") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("handoff_cleanup_jobs=1") != std::string::npos);
 }
 
 TEST(LcdifTconBackend, RendererRejectionDiscardsCandidateAndRunsInit) {
