@@ -140,23 +140,30 @@ known safe hold. Any identity, geometry, temperature, timing, allocation,
 underflow, rail, or phase fault stops the sequence and reports unhealthy state;
 it does not fall through to another waveform or panel path.
 
-The SY7636A exposes live power-good separately from a historical fault-event
-latch. `FBIOBLANK(POWERDOWN)` can complete shortly before the live power-good
-bit falls, so startup polls only that expected `ON` to `OFF` decay at 2 ms
-intervals for at most 250 ms before recording the exact fault latch. An
-unreadable or malformed attribute fails immediately. If power-good remains
-`ON`, startup accepts it only for an exact pending warm handoff whose untouched
-live LCDIF offset and bytes revalidate as the canonical safe-HOLD slot. It
-records a powered-safe-HOLD baseline, fills only the inactive slots, and leaves
-the live slot untouched. Cold starts, invalid/missing handoffs, or noncanonical
-live scanout still fail closed at the deadline. Pluto then requires live
-power-good and the unchanged latch before and after the powered temperature
-read, immediately before phase zero, and after the final safe-idle pan. A
-stable pre-existing latch is retained as telemetry; lost power-good or any
-latch transition fails closed. Cold INIT has the same post-drive gate.
-Software optical state and completion callbacks advance only after that final
-check, so a fault caused during a waveform cannot be reported as a successful
-frame.
+The official `zero-sugar` SY7636A MFD implements `state` and `power_good` as
+independent reads of the same fault register (`0x07`): `state` reports the
+upper bits and `power_good` reports bit zero. The two sysfs files are therefore
+not an atomic pair, and the state text can legitimately change while the live
+power-good bit remains `ON`. Pluto treats the known state strings as bounded
+diagnostic telemetry, never as a presenter-ownership baseline.
+
+Every production power sample reads `power_good`, then `state`, then
+`power_good` again. A powered check succeeds only when both live samples are
+readable, equal, and `ON`, and the state string is one of the 16 values exposed
+by the vendor driver. `FBIOBLANK(POWERDOWN)` can complete shortly before the
+live bit falls, so startup retries an expected unstable or `ON` sample at 2 ms
+intervals for at most 250 ms. If power-good remains `ON`, startup accepts it
+only for an exact pending warm handoff whose untouched live LCDIF offset and
+bytes revalidate as the canonical safe-HOLD slot; it fills only inactive slots
+and leaves the live slot untouched. Cold starts, invalid/missing handoffs,
+noncanonical scanout, unreadable or unknown attributes, a torn powered sample,
+or live power loss still fail closed.
+
+The stable-live-power checks enclose the powered temperature read, phase drive,
+and cold INIT. Software optical state and completion callbacks advance only
+after the post-drive sample succeeds. Diagnostic changes are counted and
+logged at a bounded rate so they remain observable without causing app restarts
+or unbounded hot-path I/O.
 
 ### Paper Pro Move
 

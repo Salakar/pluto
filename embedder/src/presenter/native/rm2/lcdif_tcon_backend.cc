@@ -158,7 +158,7 @@ enum class InitClearOutcome : std::uint8_t {
   kPowerStateFailure,
 };
 
-enum class PanelFaultBaselineOutcome : std::uint8_t {
+enum class PanelPowerdownOutcome : std::uint8_t {
   kFailed,
   kPoweredDown,
   kPoweredSafeHold,
@@ -675,16 +675,16 @@ public:
       return fail_powered_start("start.handoff-prepare",
                                 kPlutoStatusDeviceLost);
     }
-    const PanelFaultBaselineOutcome baseline_outcome =
-        capture_panel_fault_baseline(handoff_pending);
-    if (baseline_outcome == PanelFaultBaselineOutcome::kFailed) {
+    const PanelPowerdownOutcome powerdown_outcome =
+        await_panel_powerdown_or_safe_hold(handoff_pending);
+    if (powerdown_outcome == PanelPowerdownOutcome::kFailed) {
       return rollback_powered_start(kPlutoStatusDeviceLost);
     }
     // A retained-powered handoff is already scanning the validated final HOLD
     // slot. Do not rewrite that live slot; every active slot is still replaced
     // with the canonical HOLD template before it can be selected.
     const std::uint32_t slots_to_fill =
-        baseline_outcome == PanelFaultBaselineOutcome::kPoweredSafeHold
+        powerdown_outcome == PanelPowerdownOutcome::kPoweredSafeHold
             ? kRm2ActiveSlots
             : kRm2MappedSlots;
     for (std::uint32_t slot = 0; slot < slots_to_fill; ++slot) {
@@ -1334,49 +1334,45 @@ private:
     const Rm2PanelPowerState state = power_state_reader_(reason);
     if (!state.ready()) {
       if (reason->empty()) {
-        *reason = state.attributes_readable
-                      ? "panel power-good is not ON"
-                      : "panel power state is unavailable";
+        *reason = !state.attributes_readable
+                      ? "panel power state is unavailable"
+                      : (!state.power_good_stable
+                             ? "panel power-good sample is unstable"
+                             : "panel power-good is not ON");
       }
       return false;
     }
-    if (!validate_panel_fault_transition(state, stage, reason)) {
-      if (reason->empty()) {
-        *reason = "panel fault-event transition is unsafe";
-      }
-      return false;
-    }
+    observe_panel_fault_diagnostic(state, stage);
     return true;
   }
 
-  PanelFaultBaselineOutcome
-  capture_panel_fault_baseline(bool allow_powered_safe_hold) {
-    panel_fault_baseline_captured_ = false;
-    panel_fault_baseline_.clear();
-    last_latched_fault_event_.clear();
+  PanelPowerdownOutcome
+  await_panel_powerdown_or_safe_hold(bool allow_powered_safe_hold) {
+    have_last_fault_diagnostic_ = false;
+    last_fault_diagnostic_.clear();
     // This sample is deliberately taken after framebuffer initialization has
     // powered the panel down. The vendor FBIOBLANK ioctl can return shortly
-    // before the PMIC's live PG bit falls, so poll only that expected ON->OFF
-    // decay. Unreadable or malformed attributes still fail immediately, and a
-    // rail that remains ON past the fixed bound fails closed.
+    // before the PMIC's live PG bit falls. Production brackets the diagnostic
+    // state read with two PG reads, so an ON->OFF sample may be unstable during
+    // this expected decay and is retried. Unreadable or malformed attributes
+    // still fail immediately, and a rail that remains ON or unstable past the
+    // fixed bound fails closed.
     const auto settle_begin = std::chrono::steady_clock::now();
     const auto settle_deadline = settle_begin + panel_powerdown_settle_timeout_;
     std::size_t samples = 0;
     for (;;) {
       std::string error;
-      const Rm2PanelPowerState baseline = power_state_reader_(&error);
+      const Rm2PanelPowerState sample = power_state_reader_(&error);
       ++samples;
-      if (!baseline.attributes_readable) {
+      if (!sample.attributes_readable) {
         const std::string_view reason =
             error.empty() ? std::string_view("panel power state is unavailable")
                           : std::string_view(error);
-        report_startup_failure("start.panel-fault-baseline",
+        report_startup_failure("start.panel-powerdown-state",
                                kPlutoStatusDeviceLost, reason);
-        return PanelFaultBaselineOutcome::kFailed;
+        return PanelPowerdownOutcome::kFailed;
       }
-      if (!baseline.power_good) {
-        panel_fault_baseline_ = baseline.latched_fault_event;
-        panel_fault_baseline_captured_ = true;
+      if (sample.power_good_stable && !sample.power_good) {
         if (samples > 1) {
           const auto settle_us =
               std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1386,15 +1382,26 @@ private:
                        "samples=%zu elapsed_us=%lld\n",
                        samples, static_cast<long long>(settle_us.count()));
         }
-        if (!panel_fault_baseline_.empty()) {
+        if (!sample.fault_state.empty()) {
           std::fprintf(stderr,
-                       "lcdif_tcon: RM2 panel fault baseline power_good=OFF "
+                       "lcdif_tcon: RM2 powered-down fault diagnostic "
+                       "power_good=OFF "
                        "state=\"%s\"\n",
-                       panel_fault_baseline_.c_str());
+                       sample.fault_state.c_str());
         }
-        return PanelFaultBaselineOutcome::kPoweredDown;
+        return PanelPowerdownOutcome::kPoweredDown;
       }
       if (std::chrono::steady_clock::now() >= settle_deadline) {
+        if (!sample.power_good_stable) {
+          const std::string reason =
+              error.empty()
+                  ? "SY7636A panel power-good did not stabilize during "
+                    "framebuffer powerdown settle"
+                  : error;
+          report_startup_failure("start.panel-powerdown-state",
+                                 kPlutoStatusDeviceLost, reason);
+          return PanelPowerdownOutcome::kFailed;
+        }
         if (allow_powered_safe_hold) {
           // A successful outgoing handoff is written only after the prior
           // presenter has parked LCDIF on the canonical HOLD slot. The
@@ -1406,33 +1413,30 @@ private:
                                    kPlutoStatusDeviceLost,
                                    "retained-powered handoff is not on the "
                                    "canonical safe HOLD slot");
-            return PanelFaultBaselineOutcome::kFailed;
+            return PanelPowerdownOutcome::kFailed;
           }
-          panel_fault_baseline_ = baseline.latched_fault_event;
-          panel_fault_baseline_captured_ = true;
           const auto settle_us =
               std::chrono::duration_cast<std::chrono::microseconds>(
                   std::chrono::steady_clock::now() - settle_begin);
           const std::string_view state =
-              panel_fault_baseline_.empty()
-                  ? std::string_view("no fault event")
-                  : std::string_view(panel_fault_baseline_);
+              sample.fault_state.empty() ? std::string_view("no fault event")
+                                         : std::string_view(sample.fault_state);
           std::fprintf(
               stderr,
-              "lcdif_tcon: RM2 retained-powered safe-HOLD baseline "
+              "lcdif_tcon: RM2 retained-powered safe-HOLD accepted "
               "samples=%zu elapsed_us=%lld power_good=ON state=\"%.*s\""
               "\n",
               samples, static_cast<long long>(settle_us.count()),
               static_cast<int>(state.size()), state.data());
-          return PanelFaultBaselineOutcome::kPoweredSafeHold;
+          return PanelPowerdownOutcome::kPoweredSafeHold;
         }
         const std::string reason =
             "SY7636A panel power-good remained 'ON' after " +
             std::to_string(panel_powerdown_settle_timeout_.count()) +
             " ms framebuffer powerdown settle";
-        report_startup_failure("start.panel-fault-baseline",
+        report_startup_failure("start.panel-powerdown-state",
                                kPlutoStatusDeviceLost, reason);
-        return PanelFaultBaselineOutcome::kFailed;
+        return PanelPowerdownOutcome::kFailed;
       }
       std::this_thread::sleep_for(panel_powerdown_poll_interval_);
     }
@@ -1850,48 +1854,53 @@ private:
     report_present_failure(stage, kPlutoStatusDeviceLost, reason);
   }
 
-  bool validate_panel_fault_transition(const Rm2PanelPowerState &state,
-                                       std::string_view stage,
-                                       std::string *error) {
-    if (!panel_fault_baseline_captured_) {
-      if (error != nullptr) {
-        *error = "panel fault-event baseline was not captured";
+  void observe_panel_fault_diagnostic(const Rm2PanelPowerState &state,
+                                      std::string_view stage) noexcept {
+    ++fault_diagnostic_samples_;
+    if (!have_last_fault_diagnostic_) {
+      have_last_fault_diagnostic_ = true;
+      last_fault_diagnostic_ = state.fault_state;
+      if (state.fault_state.empty()) {
+        return;
       }
-      return false;
+      std::fprintf(stderr,
+                   "lcdif_tcon: RM2 panel fault-register diagnostic "
+                   "stage=%.*s previous=\"<unobserved>\" observed=\"%s\" "
+                   "changes=0; stable power_good=ON\n",
+                   static_cast<int>(stage.size()), stage.data(),
+                   state.fault_state.c_str());
+      return;
     }
-    if (state.latched_fault_event != panel_fault_baseline_) {
-      if (error != nullptr) {
-        const std::string_view baseline =
-            panel_fault_baseline_.empty()
-                ? std::string_view("no fault event")
-                : std::string_view(panel_fault_baseline_);
-        const std::string_view observed =
-            state.latched_fault_event.empty()
-                ? std::string_view("no fault event")
-                : std::string_view(state.latched_fault_event);
-        *error = "SY7636A fault-event transition during presenter ownership "
-                 "baseline='" +
-                 std::string(baseline) + "' observed='" +
-                 std::string(observed) + "'";
-      }
-      return false;
+    if (state.fault_state == last_fault_diagnostic_) {
+      return;
     }
-    if (state.latched_fault_event.empty()) {
-      last_latched_fault_event_.clear();
-      return true;
+    ++fault_diagnostic_changes_;
+    // PMIC diagnostic bits can change repeatedly during healthy panel drive.
+    // Preserve useful breadcrumbs without turning that activity into an
+    // unbounded logging and CPU cost.
+    const bool log_change =
+        fault_diagnostic_changes_ <= 4 ||
+        (fault_diagnostic_changes_ & (fault_diagnostic_changes_ - 1)) == 0;
+    if (!log_change) {
+      last_fault_diagnostic_ = state.fault_state;
+      return;
     }
-    ++latched_fault_observations_;
-    if (state.latched_fault_event == last_latched_fault_event_) {
-      return true;
-    }
-    last_latched_fault_event_ = state.latched_fault_event;
+    const std::string_view previous_view =
+        last_fault_diagnostic_.empty()
+            ? std::string_view("no fault event")
+            : std::string_view(last_fault_diagnostic_);
+    const std::string_view observed_view =
+        state.fault_state.empty() ? std::string_view("no fault event")
+                                  : std::string_view(state.fault_state);
     std::fprintf(stderr,
-                 "lcdif_tcon: RM2 panel fault event remains latched "
-                 "stage=%.*s power_good=ON state=\"%s\"; live rails are "
-                 "in regulation\n",
+                 "lcdif_tcon: RM2 panel fault-register diagnostic "
+                 "stage=%.*s previous=\"%.*s\" observed=\"%.*s\" "
+                 "changes=%llu; stable power_good=ON\n",
                  static_cast<int>(stage.size()), stage.data(),
-                 state.latched_fault_event.c_str());
-    return true;
+                 static_cast<int>(previous_view.size()), previous_view.data(),
+                 static_cast<int>(observed_view.size()), observed_view.data(),
+                 static_cast<unsigned long long>(fault_diagnostic_changes_));
+    last_fault_diagnostic_ = state.fault_state;
   }
 
   PlutoStatus
@@ -2008,7 +2017,8 @@ private:
         "lcdif_tcon: telemetry jobs=%llu phases=%llu encode_p50_us=%llu "
         "encode_p95_us=%llu encode_p99_us=%llu encode_max_us=%llu "
         "missed_deadlines=%llu underflows=%llu safe_holds=%llu "
-        "hardware_faults=%llu latched_fault_observations=%llu\n",
+        "hardware_faults=%llu fault_diagnostic_samples=%llu "
+        "fault_diagnostic_changes=%llu\n",
         static_cast<unsigned long long>(completed_jobs_),
         static_cast<unsigned long long>(presented_phases_),
         static_cast<unsigned long long>(encode_percentile(50)),
@@ -2019,7 +2029,8 @@ private:
         static_cast<unsigned long long>(underflows_),
         static_cast<unsigned long long>(safe_holds_),
         static_cast<unsigned long long>(hardware_faults_),
-        static_cast<unsigned long long>(latched_fault_observations_));
+        static_cast<unsigned long long>(fault_diagnostic_samples_),
+        static_cast<unsigned long long>(fault_diagnostic_changes_));
     std::fprintf(
         stderr,
         "lcdif_tcon: damage jobs=%llu requested_pixels=%llu "
@@ -2626,8 +2637,7 @@ private:
   std::vector<std::uint8_t> incoming_renderer_payload_;
   std::vector<std::uint8_t> incoming_settled_levels_;
   std::vector<std::uint16_t> incoming_mirror_;
-  std::string panel_fault_baseline_;
-  std::string last_latched_fault_event_;
+  std::string last_fault_diagnostic_;
   std::array<std::uint64_t, kEncodeHistogramBuckets> encode_histogram_{};
   PlutoPresentCompleteCallback callback_ = nullptr;
   void *callback_user_data_ = nullptr;
@@ -2648,13 +2658,14 @@ private:
   bool worker_configured_ = false;
   bool telemetry_active_ = false;
   bool telemetry_emitted_ = false;
-  bool panel_fault_baseline_captured_ = false;
+  bool have_last_fault_diagnostic_ = false;
   bool cpu_frequency_release_armed_ = false;
   std::chrono::steady_clock::time_point cpu_frequency_release_deadline_{};
   std::chrono::steady_clock::time_point cpu_thermal_retry_deadline_{};
   std::uint64_t completed_jobs_ = 0;
   std::uint64_t hardware_faults_ = 0;
-  std::uint64_t latched_fault_observations_ = 0;
+  std::uint64_t fault_diagnostic_samples_ = 0;
+  std::uint64_t fault_diagnostic_changes_ = 0;
   std::uint64_t presented_phases_ = 0;
   std::uint64_t missed_deadlines_ = 0;
   std::uint64_t underflows_ = 0;

@@ -226,40 +226,24 @@ same PID. The fixed attempt count still bounds sysfs work, with at most 127 ms
 of explicit retry delay per sample. Final release standby and render acceptance
 remains part of the same-revision table below.
 
-### RM2 round 5: live power versus retained fault state
+### RM2 round 5: the retained-fault hypothesis
 
 A physical multi-app run rendered Pluto Home and Ink, then failed closed during
 a later switch. After stock recovery the SY7636A reported live
-`power_good=OFF` with retained state `UVP at VN rail`; during the failed Pluto
-start, the live rails had reached power-good while the same state remained
-latched. Treating that historical event as a current rail failure made every
-subsequent healthy power-up inadmissible.
-
-The vendor MFD and regulator contracts expose two different facts: power-good
-is live, while the fault-event code persists until a physical PMIC-enable
-reset. Pluto captures the exact event code after LCDIF powerdown, requires
-power-good on every powered check, and permits only that unchanged baseline as
-diagnostic telemetry. An unreadable value, unknown vendor string, power-good
-loss, latch creation, latch clearing, or code-to-code change fails closed.
-
-The checks enclose the actual drive, not only admission. They run around the
-powered temperature read, on the worker immediately before phase zero, and
-after the final safe-idle pan before phase cells are cleared, logical state is
-committed, or a completion callback is issued. Cold INIT has both an immediate
-pre-drive gate after its three safe fills and a post-drive gate before blank or
-logical state is committed. Focused host coverage now exercises all 16 vendor
-state strings, unreadable attributes, stable historical state, pre-drive loss,
-faults injected only after real phase activity, post-blank decay, and retained
-powered safe-HOLD handoff; 79/79 RM2 native tests pass. This is development
-evidence until the corrected frozen release repeats the physical switch and
-soak.
+`power_good=OFF` with state `UVP at VN rail`; during the failed Pluto start,
+the live rails had reached power-good while the same text remained visible.
+That established that the text was not, by itself, proof of a current rail
+failure. The intermediate implementation still assumed it would remain
+unchanged during one presenter ownership interval. Round 8 rejects that
+remaining hypothesis using both real-panel evidence and the official driver
+source.
 
 ### RM2 round 6: post-blank rail decay
 
 The first universal-release candidate
 `22e26a0673b1a623225d93715cae7e84fd82f7e7` presented Home, Counter, and
 Motion Lab on the physical RM2, then rejected Ink Lab startup at
-`start.panel-fault-baseline`: the framebuffer was logically blanked while the
+`start.panel-powerdown-state`: the framebuffer was logically blanked while the
 SY7636A still reported live `power_good=ON`. The supervisor recovered to Pluto
 Home, so the tablet was not left UI-less, but the candidate correctly failed
 final acceptance.
@@ -289,13 +273,13 @@ The retained startup contract polls the expected post-blank `ON` to `OFF`
 decay at 2 ms intervals for at most 250 ms. At the deadline, `ON` is admissible
 only when the strict incoming handoff is valid and the untouched live LCDIF
 offset and bytes revalidate as the canonical safe-HOLD slot. Pluto records that
-powered-safe-HOLD fault baseline, fills only inactive slots, and never rewrites
-the scanned HOLD slot. A cold start, invalid or missing handoff, noncanonical
-live slot, unreadable attribute, unknown state, later power loss, or latch
-transition still fails closed. Host coverage includes transient `ON, ON, OFF`,
-persistent `ON` without a handoff, retained-powered valid HOLD, tampered HOLD,
-and unreadable sequences; all 79 RM2 native tests pass. Physical acceptance
-must repeat on the next frozen release.
+powered-safe-HOLD state, fills only inactive slots, and never rewrites the
+scanned HOLD slot. A cold start, invalid or missing handoff, noncanonical live
+slot, unreadable attribute, unknown state, or later power loss still fails
+closed. Host coverage includes transient `ON, ON, OFF`, persistent `ON` without
+a handoff, retained-powered valid HOLD, tampered HOLD, and unreadable sequences;
+all 79 RM2 native tests pass. Physical acceptance must repeat on the next
+frozen release.
 
 ### RM2 round 7: warm switcher acceptance and Ink proof timing
 
@@ -338,6 +322,46 @@ the four-second bound and produced:
 The candidate is not final because its host acceptance predicate changed after
 assembly. The replacement exact release must repeat the complete camera and
 metrics gate from fresh evidence directories.
+
+### RM2 round 8: fault-register text is a non-atomic diagnostic
+
+Exact candidate `9aafb309e394d26e24cecf7db0383207d545d0c0` passed its clean
+host, sanitizer, cross-ABI, and universal-release gates. In the formal physical
+run, Counter rendered on RM2, but Motion Lab was then cold-restarted repeatedly.
+The presenter rejected changes among `UVP at VN rail`, `UVP at VNEG rail`,
+`UVP at VEE rail`, and `no fault event` at powered temperature and post-drive
+checks even though every paired log reported `power_good=ON`, live rails in
+regulation, zero underflows, and zero missed deadlines. The attempt under
+`analysis/native-cutover/final-acceptance/9aafb30/rm2-attempt2/` is therefore
+quarantined and cannot contribute final evidence.
+
+The official reMarkable `zero-sugar` kernel at
+`2be45d43a07299fcd7a19d4cb914880c53b054de` explains the observation.
+`drivers/mfd/sy7636a.c` implements both `state_show` and `powergood_show` with
+independent `regmap_read` calls to `SY7636A_REG_FAULT_FLAG` (`0x07`).
+`state_show` shifts the sampled byte right by one and maps it to one of 16 text
+values; `powergood_show` independently masks bit zero. The files are not an
+atomic pair, and the driver provides no contract that the upper-bit text is
+stable across panel phases or a presenter lifetime. Equality with a
+powered-down text sample was therefore an invalid safety predicate.
+
+The corrected reader samples `power_good`, then `state`, then `power_good`
+again. Powered work proceeds only when both live samples are readable, equal,
+and `ON`; a torn sample, unknown string, unreadable attribute, or live
+power-good loss fails closed. During the expected post-blank rail decay, a torn
+sample is retried only within the existing 250 ms bound. The 16 known state
+strings remain diagnostic telemetry: changes are counted and logged at a
+bounded rate, but no text-to-text transition restarts an otherwise healthy
+app.
+
+The same stable-live-power gates still enclose the powered temperature read,
+cold INIT, phase zero, and the final safe-idle pan. No logical state or
+completion callback advances before the post-drive gate. Focused host coverage
+proves a deterministic torn `ON`-to-`OFF` sample, changing diagnostics during
+cold start and multiple jobs, powered-down-to-powered text changes, unreadable
+attributes, and real pre/post-drive power loss; all 79 RM2 native tests pass.
+This correction is development evidence until a newly frozen release repeats
+the complete physical and performance gate.
 
 ### Lifecycle acceptance: reject early external wakes
 

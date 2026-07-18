@@ -534,6 +534,14 @@ Never use `/dev/mem`, hard-coded Xochitl addresses, raw GPIO, or direct I2C/PMIC
 writes. Use framebuffer, regulator, thermal, and sysfs/kernel interfaces whose
 behavior is validated against the official kernel.
 
+The official `zero-sugar` driver reads SY7636A `state` and `power_good`
+independently from the same register. Pluto therefore brackets each diagnostic
+state read with live power-good reads. Powered work requires both samples to be
+valid, equal, and `ON`; a torn sample, unknown state, unreadable attribute, or
+power loss fails closed. Known state strings are telemetry and may change
+without creating a second lifecycle flow or restarting a healthy app. The
+same check encloses temperature access, cold INIT, and every phase drive.
+
 ### 7.5 Bring-up ladder
 
 Each rung must pass and produce evidence before the next is attempted:
@@ -1501,6 +1509,7 @@ Authoritative and original sources for implementation work:
 - [Official RM1 device tree at the audited commit](https://github.com/reMarkable/linux/blob/d54fe67bf86e918468b936f97a2ec39f4f87a3d9/arch/arm/boot/dts/zero-gravitas-factory.dts)
 - [Official RM2 device tree at the audited commit](https://github.com/reMarkable/linux/blob/d54fe67bf86e918468b936f97a2ec39f4f87a3d9/arch/arm/boot/dts/zero-sugar.dts)
 - [Official LCDIF framebuffer driver at the audited commit](https://github.com/reMarkable/linux/blob/d54fe67bf86e918468b936f97a2ec39f4f87a3d9/drivers/video/fbdev/mxsfb.c)
+- [Official zero-sugar SY7636A MFD at the audited commit](https://github.com/reMarkable/linux/blob/2be45d43a07299fcd7a19d4cb914880c53b054de/drivers/mfd/sy7636a.c)
 - [reMarkable official Move Linux repository](https://github.com/reMarkable/linux-imx-rm)
 - [yobert/swtcon, an MIT standalone RM2 reference](https://github.com/yobert/swtcon)
 - [timower/rM2-stuff, GPL-3.0 research reference](https://github.com/timower/rM2-stuff)

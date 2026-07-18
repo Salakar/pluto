@@ -1568,7 +1568,7 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
-     StablePreexistingPanelFaultLatchIsDiagnosticWhilePowerGood) {
+     ChangingPanelFaultDiagnosticsRemainNonFatalWhilePowerGoodStable) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -1576,8 +1576,8 @@ TEST(LcdifTconBackend,
   BackendFakeLcdifSyscalls syscalls;
   CompletionState completion;
   int power_samples = 0;
-  bool baseline_followed_powerdown = false;
-  bool baseline_preceded_any_pan = true;
+  bool sample_followed_powerdown = false;
+  bool sample_preceded_any_pan = true;
   auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
   LcdifTconDisplayBackend backend(
       fixture.profile(), std::move(device),
@@ -1585,12 +1585,25 @@ TEST(LcdifTconBackend,
       [&](std::string *) {
         ++power_samples;
         if (power_samples == 1) {
-          baseline_followed_powerdown =
+          sample_followed_powerdown =
               syscalls.blank_values.size() == 1U &&
               syscalls.blank_values.back() == uapi::kBlankPowerdown;
-          baseline_preceded_any_pan = !syscalls.panned_offsets.empty();
+          sample_preceded_any_pan = !syscalls.panned_offsets.empty();
+          return Rm2PanelPowerState{true, false, "UVP at VNEG rail"};
         }
-        return Rm2PanelPowerState{true, power_samples != 1, "UVP at VNEG rail"};
+        constexpr std::array<std::string_view, 4> kChangingDiagnostics = {
+            "UVP at VNEG rail",
+            "UVP at VN rail",
+            "no fault event",
+            "UVP at VEE rail",
+        };
+        const std::string_view diagnostic =
+            kChangingDiagnostics[static_cast<std::size_t>(power_samples - 2) %
+                                 kChangingDiagnostics.size()];
+        return Rm2PanelPowerState{true, true,
+                                  diagnostic == "no fault event"
+                                      ? std::string{}
+                                      : std::string(diagnostic)};
       },
       Rm2HandoffOptions{.path = ""});
 
@@ -1604,26 +1617,27 @@ TEST(LcdifTconBackend,
   EXPECT_EQ(backend.health().completed_jobs, 3U);
   EXPECT_EQ(backend.health().hardware_faults, 0U);
   EXPECT_EQ(power_samples, 17);
-  EXPECT_TRUE(baseline_followed_powerdown);
-  EXPECT_FALSE(baseline_preceded_any_pan);
+  EXPECT_TRUE(sample_followed_powerdown);
+  EXPECT_FALSE(sample_preceded_any_pan);
   backend.stop();
   const std::string diagnostics = capture.finish();
 
   EXPECT_TRUE(diagnostics.find(
-                  "panel fault baseline power_good=OFF state=\"UVP at VNEG "
-                  "rail\"") != std::string::npos);
+                  "powered-down fault diagnostic power_good=OFF state=\"UVP "
+                  "at VNEG rail\"") != std::string::npos);
   EXPECT_TRUE(
-      diagnostics.find("panel fault event remains latched "
+      diagnostics.find("panel fault-register diagnostic "
                        "stage=start.cold-initialize.powered-temperature-power-"
-                       "precheck power_good=ON state=\"UVP at VNEG rail\"") !=
-      std::string::npos);
-  EXPECT_TRUE(diagnostics.find("latched_fault_observations=16") !=
+                       "precheck previous=\"<unobserved>\" observed=\"UVP at "
+                       "VNEG rail\"") != std::string::npos);
+  EXPECT_TRUE(diagnostics.find("fault_diagnostic_samples=16 "
+                               "fault_diagnostic_changes=15") !=
               std::string::npos);
   EXPECT_TRUE(diagnostics.find("RM2 present failure") == std::string::npos);
 }
 
 TEST(LcdifTconBackend,
-     BlankedPanelPowerGoodContradictionFailsBaselineWithExactStage) {
+     BlankedPanelPowerGoodContradictionFailsPowerdownWithExactStage) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -1661,7 +1675,7 @@ TEST(LcdifTconBackend,
   EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
   const std::string diagnostics = capture.finish();
 
-  EXPECT_TRUE(diagnostics.find("stage=start.panel-fault-baseline status=4") !=
+  EXPECT_TRUE(diagnostics.find("stage=start.panel-powerdown-state status=4") !=
               std::string::npos);
   EXPECT_TRUE(diagnostics.find(
                   "reason=\"SY7636A panel power-good remained 'ON' after 2 ms "
@@ -1669,7 +1683,7 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
-     BlankedPanelPowerGoodDecaySettlesBeforeFaultBaselineCapture) {
+     BlankedPanelPowerGoodDecayRetriesUnstableSampleThenSettles) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -1682,8 +1696,13 @@ TEST(LcdifTconBackend,
       [](std::string *) -> std::optional<int> { return 24000; },
       [&](std::string *) {
         ++power_samples;
-        if (power_samples <= 2) {
+        if (power_samples == 1) {
           return Rm2PanelPowerState{true, true, {}};
+        }
+        if (power_samples == 2) {
+          Rm2PanelPowerState changing{true, false, "UVP at VN rail"};
+          changing.power_good_stable = false;
+          return changing;
         }
         return Rm2PanelPowerState{true, power_samples != 3, {}};
       },
@@ -1705,12 +1724,12 @@ TEST(LcdifTconBackend,
 
   EXPECT_TRUE(diagnostics.find("RM2 panel powerdown settled samples=3") !=
               std::string::npos);
-  EXPECT_TRUE(diagnostics.find("stage=start.panel-fault-baseline status=") ==
+  EXPECT_TRUE(diagnostics.find("stage=start.panel-powerdown-state status=") ==
               std::string::npos);
 }
 
 TEST(LcdifTconBackend,
-     ValidWarmHandoffMayRetainPoweredCanonicalSafeHoldAtBaseline) {
+     ValidWarmHandoffMayRetainPoweredCanonicalSafeHoldAfterSettleWindow) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -1757,7 +1776,7 @@ TEST(LcdifTconBackend,
   const std::string diagnostics = capture.finish();
 
   EXPECT_TRUE(
-      diagnostics.find("RM2 retained-powered safe-HOLD baseline samples=") !=
+      diagnostics.find("RM2 retained-powered safe-HOLD accepted samples=") !=
       std::string::npos);
   EXPECT_TRUE(diagnostics.find("power_good=ON state=\"UVP at VNEG rail\"") !=
               std::string::npos);
@@ -1810,7 +1829,7 @@ TEST(LcdifTconBackend, PoweredWarmHandoffStillRejectsNoncanonicalLiveIdleSlot) {
 }
 
 TEST(LcdifTconBackend,
-     UnreadablePanelFaultBaselineFailsExactStageBeforeAnyPan) {
+     UnreadablePanelPowerdownStateFailsExactStageBeforeAnyPan) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -1824,7 +1843,7 @@ TEST(LcdifTconBackend,
       [&](std::string *error) {
         ++power_samples;
         if (error != nullptr) {
-          *error = "synthetic unreadable panel-fault baseline";
+          *error = "synthetic unreadable panel powerdown state";
         }
         return Rm2PanelPowerState{};
       },
@@ -1847,10 +1866,10 @@ TEST(LcdifTconBackend,
   EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
   const std::string diagnostics = capture.finish();
 
-  EXPECT_TRUE(diagnostics.find("stage=start.panel-fault-baseline status=4") !=
+  EXPECT_TRUE(diagnostics.find("stage=start.panel-powerdown-state status=4") !=
               std::string::npos);
   EXPECT_TRUE(diagnostics.find(
-                  "reason=\"synthetic unreadable panel-fault baseline\"") !=
+                  "reason=\"synthetic unreadable panel powerdown state\"") !=
               std::string::npos);
 }
 
@@ -1940,7 +1959,7 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
-     NewPanelFaultTransitionOnThirdJobFailsClosedWithExactStage) {
+     NewPanelFaultDiagnosticOnThirdJobRemainsNonFatalWhilePowerGood) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -1968,31 +1987,26 @@ TEST(LcdifTconBackend,
   ASSERT_TRUE(probe_and_start(&backend, fixture, &completion));
   draw_fast_pixel(&backend, 3, 5, 0, 211);
   draw_fast_pixel(&backend, 4, 6, 0x7befU, 212);
-  OwnedPixelRequest third(5, 7, 0, 213);
-  EXPECT_EQ(backend.submit(&third.request), kPlutoStatusDeviceLost);
-  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 2);
-  EXPECT_EQ(backend.health().completed_jobs, 2U);
-  EXPECT_EQ(backend.health().hardware_faults, 1U);
-  EXPECT_EQ(power_samples, 14);
-  ASSERT_TRUE(!syscalls.blank_values.empty());
-  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  draw_fast_pixel(&backend, 5, 7, 0, 213);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 3);
+  EXPECT_EQ(backend.health().completed_jobs, 3U);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  EXPECT_EQ(power_samples, 17);
   backend.stop();
   const std::string diagnostics = capture.finish();
 
-  EXPECT_TRUE(
-      diagnostics.find(
-          "RM2 present failure "
-          "stage=present.powered-temperature-power-precheck status=4") !=
-      std::string::npos);
   EXPECT_TRUE(diagnostics.find(
-                  "reason=\"SY7636A fault-event transition during presenter "
-                  "ownership "
-                  "baseline='no fault event' observed='SCP at V COM rail'\"") !=
+                  "panel fault-register diagnostic "
+                  "stage=present.powered-temperature-power-precheck "
+                  "previous=\"no fault event\" observed=\"SCP at V COM rail\" "
+                  "changes=1; stable power_good=ON") != std::string::npos);
+  EXPECT_TRUE(diagnostics.find("fault_diagnostic_samples=16 "
+                               "fault_diagnostic_changes=1") !=
               std::string::npos);
+  EXPECT_TRUE(diagnostics.find("RM2 present failure") == std::string::npos);
 }
 
-TEST(LcdifTconBackend,
-     PreexistingPanelFaultLatchClearingFailsClosedWithExactStage) {
+TEST(LcdifTconBackend, PoweredDownFaultDiagnosticDoesNotBindPoweredColdStart) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -2011,31 +2025,21 @@ TEST(LcdifTconBackend,
         return Rm2PanelPowerState{true, true, {}};
       },
       Rm2HandoffOptions{.path = ""});
-  ASSERT_EQ(backend.probe(fixture.profile()), kPlutoStatusOk);
-  const std::string config_options = "wbf=" + fixture.waveform_path();
-  const PlutoPresenterConfig config{
-      .struct_size = sizeof(PlutoPresenterConfig),
-      .backend_name = "native",
-      .options = config_options.c_str(),
-  };
-
   ScopedStderrCapture capture;
   ASSERT_TRUE(capture.valid());
-  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
-  EXPECT_EQ(power_samples, 2);
-  EXPECT_EQ(backend.health().hardware_faults, 1U);
-  ASSERT_TRUE(!syscalls.blank_values.empty());
-  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+  EXPECT_EQ(power_samples, 5);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  backend.stop();
   const std::string diagnostics = capture.finish();
 
-  EXPECT_TRUE(
-      diagnostics.find("stage=start.cold-initialize.powered-temperature-power-"
-                       "precheck status=4") != std::string::npos);
-  EXPECT_TRUE(
-      diagnostics.find(
-          "reason=\"SY7636A fault-event transition during presenter ownership "
-          "baseline='UVP at VNEG rail' observed='no fault event'\"") !=
-      std::string::npos);
+  EXPECT_TRUE(diagnostics.find(
+                  "powered-down fault diagnostic power_good=OFF state=\"UVP "
+                  "at VNEG rail\"") != std::string::npos);
+  EXPECT_TRUE(diagnostics.find("fault_diagnostic_samples=4 "
+                               "fault_diagnostic_changes=0") !=
+              std::string::npos);
+  EXPECT_TRUE(diagnostics.find("RM2 startup failure") == std::string::npos);
 }
 
 TEST(LcdifTconBackend,
@@ -2172,7 +2176,7 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
-     ColdInitPostDriveTransitionFailsBeforeStateCommitAndLogsBlankFailure) {
+     ColdInitPostDriveFaultDiagnosticChangeStillCommitsState) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -2195,7 +2199,6 @@ TEST(LcdifTconBackend,
             syscalls.panned_offsets.back() == kRm2IdleSlot * kRm2ScanoutHeight;
         if (final_idle_after_drive) {
           injected_after_drive = true;
-          syscalls.fail_blank_on_call = syscalls.blank_count + 1;
           return Rm2PanelPowerState{true, true, "SCP at VPOS rail"};
         }
         return Rm2PanelPowerState{true, true, {}};
@@ -2211,32 +2214,27 @@ TEST(LcdifTconBackend,
 
   ScopedStderrCapture capture;
   ASSERT_TRUE(capture.valid());
-  EXPECT_EQ(backend.start(config), kPlutoStatusDeviceLost);
+  EXPECT_EQ(backend.start(config), kPlutoStatusOk);
   EXPECT_TRUE(injected_after_drive);
   EXPECT_EQ(power_samples, 5);
   EXPECT_GT(active_pan_count(syscalls), 0U);
   ASSERT_TRUE(!syscalls.panned_offsets.empty());
   EXPECT_EQ(syscalls.panned_offsets.back(), kRm2IdleSlot * kRm2ScanoutHeight);
-  EXPECT_FALSE(snapshot_pixel(&backend, 0, 0).has_value());
+  const std::optional<std::uint16_t> pixel = snapshot_pixel(&backend, 0, 0);
+  ASSERT_TRUE(pixel.has_value());
+  EXPECT_EQ(*pixel, 0xffffU);
   EXPECT_EQ(backend.health().completed_jobs, 0U);
-  EXPECT_EQ(backend.health().hardware_faults, 1U);
-  ASSERT_TRUE(!syscalls.blank_values.empty());
-  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  backend.stop();
   const std::string diagnostics = capture.finish();
 
-  EXPECT_TRUE(
-      diagnostics.find(
-          "stage=start.cold-initialize.post-drive-power-state status=4") !=
-      std::string::npos);
-  EXPECT_TRUE(
-      diagnostics.find(
-          "reason=\"SY7636A fault-event transition during presenter ownership "
-          "baseline='no fault event' observed='SCP at VPOS rail'\"") !=
-      std::string::npos);
   EXPECT_TRUE(diagnostics.find(
-                  "fail-safe blank failure "
-                  "source_stage=start.cold-initialize.post-drive-power-state "
-                  "status=4") != std::string::npos);
+                  "panel fault-register diagnostic "
+                  "stage=start.cold-initialize.post-drive-power-state "
+                  "previous=\"no fault event\" observed=\"SCP at VPOS rail\" "
+                  "changes=1; stable power_good=ON") != std::string::npos);
+  EXPECT_TRUE(diagnostics.find("RM2 startup failure") == std::string::npos);
+  EXPECT_TRUE(diagnostics.find("fail-safe blank failure") == std::string::npos);
 }
 
 TEST(LcdifTconBackend, WorkerPreDriveUnavailableStateFailsBeforePhaseOrCommit) {
@@ -2298,7 +2296,7 @@ TEST(LcdifTconBackend, WorkerPreDriveUnavailableStateFailsBeforePhaseOrCommit) {
 }
 
 TEST(LcdifTconBackend,
-     WorkerPostDriveFaultTransitionRunsPhasesButDoesNotCommitOrComplete) {
+     WorkerPostDriveFaultDiagnosticChangeStillCommitsAndCompletes) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -2336,28 +2334,25 @@ TEST(LcdifTconBackend,
   ScopedStderrCapture capture;
   ASSERT_TRUE(capture.valid());
   ASSERT_EQ(backend.submit(&request.request), kPlutoStatusOk);
-  EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusDeviceLost);
+  EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusOk);
   EXPECT_GT(active_pan_count(syscalls), active_pans_before);
   ASSERT_TRUE(!syscalls.panned_offsets.empty());
   EXPECT_EQ(syscalls.panned_offsets.back(), kRm2IdleSlot * kRm2ScanoutHeight);
-  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 0);
-  EXPECT_EQ(backend.health().completed_jobs, 0U);
-  EXPECT_EQ(backend.health().hardware_faults, 1U);
+  EXPECT_EQ(completion.count.load(std::memory_order_acquire), 1);
+  EXPECT_EQ(backend.health().completed_jobs, 1U);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
   const std::optional<std::uint16_t> pixel = snapshot_pixel(&backend, 13, 17);
   ASSERT_TRUE(pixel.has_value());
-  EXPECT_EQ(*pixel, 0xffffU);
-  ASSERT_TRUE(!syscalls.blank_values.empty());
-  EXPECT_EQ(syscalls.blank_values.back(), uapi::kBlankPowerdown);
+  EXPECT_EQ(*pixel, 0U);
+  backend.stop();
   const std::string diagnostics = capture.finish();
 
-  EXPECT_TRUE(
-      diagnostics.find("stage=present.post-drive-power-state status=4") !=
-      std::string::npos);
-  EXPECT_TRUE(
-      diagnostics.find(
-          "reason=\"SY7636A fault-event transition during presenter ownership "
-          "baseline='no fault event' observed='SCP at V COM rail'\"") !=
-      std::string::npos);
+  EXPECT_TRUE(diagnostics.find(
+                  "panel fault-register diagnostic "
+                  "stage=present.post-drive-power-state "
+                  "previous=\"no fault event\" observed=\"SCP at V COM rail\" "
+                  "changes=1; stable power_good=ON") != std::string::npos);
+  EXPECT_TRUE(diagnostics.find("RM2 present failure") == std::string::npos);
 }
 
 TEST(LcdifTconBackend,

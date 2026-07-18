@@ -26,26 +26,32 @@ struct Rm2WaveformSelection {
   std::span<const std::uint8_t> partial_drive_lut;
 };
 
-// The vendor MFD exposes the live SY7636A power-good bit separately from its
-// fault-event latch. The latter records a historical event until the PMIC EN
-// pin is retoggled, so a non-empty latched_fault_event is diagnostic evidence,
-// not proof that rails which are currently power-good are unsafe.
+// The vendor MFD's `state` and `power_good` sysfs attributes each perform an
+// independent read of the same SY7636A fault register. A production sample
+// brackets the diagnostic state read with power-good reads: ready() is true
+// only when both live power samples agree and are ON. `fault_state` is useful
+// diagnostic evidence, but it is neither atomic with power-good nor a stable
+// presenter-ownership baseline.
 struct Rm2PanelPowerState {
   bool attributes_readable = false;
   bool power_good = false;
-  std::string latched_fault_event;
+  bool power_good_stable = false;
+  std::string fault_state;
 
   Rm2PanelPowerState() = default;
   // Keeps injected host readers terse while still distinguishing their live
   // power result from a production sysfs-read failure.
   Rm2PanelPowerState(bool current_power_good)
-      : attributes_readable(true), power_good(current_power_good) {}
+      : attributes_readable(true), power_good(current_power_good),
+        power_good_stable(true) {}
   Rm2PanelPowerState(bool readable, bool current_power_good,
-                     std::string fault_event)
+                     std::string diagnostic_state)
       : attributes_readable(readable), power_good(current_power_good),
-        latched_fault_event(std::move(fault_event)) {}
+        power_good_stable(readable), fault_state(std::move(diagnostic_state)) {}
 
-  bool ready() const { return attributes_readable && power_good; }
+  bool ready() const {
+    return attributes_readable && power_good_stable && power_good;
+  }
 };
 
 class Rm2WaveformProgram final {
@@ -87,9 +93,9 @@ private:
 std::optional<int> read_rm2_panel_temperature_millidegrees(std::string *error);
 
 // Finds exactly one SY7636A I2C parent by address and driver identity, then
-// returns the live power-good value and the independent historical fault-event
-// latch. Missing, ambiguous, or unreadable attributes return an unavailable
-// state and an exact error.
+// samples power_good, state, and power_good again. Missing, ambiguous,
+// malformed, or unstable attributes return a non-ready state and an exact
+// error. A stable non-ON power sample is readable but not ready.
 Rm2PanelPowerState read_rm2_panel_power_state(
     std::string *error,
     std::string_view i2c_devices_root = "/sys/bus/i2c/devices");

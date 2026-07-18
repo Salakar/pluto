@@ -7,9 +7,11 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace pluto::native::rm2 {
@@ -21,7 +23,7 @@ void write_text(const std::filesystem::path &path, std::string_view value) {
 }
 
 TEST(Rm2WaveformProgram,
-     DiscoversExactSy7636aAndSeparatesLivePowerFromFaultLatch) {
+     DiscoversExactSy7636aAndBracketsLivePowerAroundDiagnosticState) {
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() /
                         ("pluto_rm2_power_state_" +
@@ -39,13 +41,15 @@ TEST(Rm2WaveformProgram,
   EXPECT_TRUE(power.ready()) << error;
   EXPECT_TRUE(power.attributes_readable);
   EXPECT_TRUE(power.power_good);
-  EXPECT_TRUE(power.latched_fault_event.empty());
+  EXPECT_TRUE(power.power_good_stable);
+  EXPECT_TRUE(power.fault_state.empty());
 
   write_text(device / "power_good", "OFF");
   power = read_rm2_panel_power_state(&error, root.string());
   EXPECT_FALSE(power.ready());
   EXPECT_TRUE(power.attributes_readable);
   EXPECT_FALSE(power.power_good);
+  EXPECT_TRUE(power.power_good_stable);
   EXPECT_EQ(error, "SY7636A panel power-good='OFF' state='no fault event'");
 
   constexpr std::array<std::string_view, 16> kAcceptedFaultStates = {
@@ -61,11 +65,36 @@ TEST(Rm2WaveformProgram,
     write_text(device / "state", state);
     power = read_rm2_panel_power_state(&error, root.string());
     EXPECT_TRUE(power.ready()) << state << ": " << error;
-    EXPECT_EQ(power.latched_fault_event,
+    EXPECT_EQ(power.fault_state,
               state == "no fault event" ? std::string{} : std::string(state));
     EXPECT_TRUE(error.empty()) << state;
   }
 
+  fs::remove(device / "power_good", filesystem_error);
+  ASSERT_EQ(::mkfifo((device / "power_good").c_str(), 0600), 0);
+  std::thread changing_power_writer([&] {
+    {
+      std::ofstream first(device / "power_good");
+      first << "ON\n";
+    }
+    {
+      std::ofstream second(device / "power_good");
+      second << "OFF\n";
+    }
+  });
+  write_text(device / "state", "UVP at VN rail");
+  power = read_rm2_panel_power_state(&error, root.string());
+  changing_power_writer.join();
+  EXPECT_FALSE(power.ready());
+  EXPECT_TRUE(power.attributes_readable);
+  EXPECT_FALSE(power.power_good);
+  EXPECT_FALSE(power.power_good_stable);
+  EXPECT_EQ(power.fault_state, "UVP at VN rail");
+  EXPECT_EQ(error,
+            "SY7636A panel power-good changed during state sample first='ON' "
+            "second='OFF' state='UVP at VN rail'");
+
+  fs::remove(device / "power_good", filesystem_error);
   write_text(device / "power_good", "MAYBE");
   power = read_rm2_panel_power_state(&error, root.string());
   EXPECT_FALSE(power.ready());

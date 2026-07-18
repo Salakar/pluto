@@ -461,18 +461,26 @@ read_rm2_panel_power_state(std::string *error,
     return unavailable_power_state(error, "SY7636A I2C parent was not found");
   }
 
-  const std::optional<std::string> power_good =
+  const std::optional<std::string> power_good_before =
       read_trimmed_file(*sy7636a_path / "power_good");
   const std::optional<std::string> state =
       read_trimmed_file(*sy7636a_path / "state");
-  if (!power_good.has_value() || !state.has_value()) {
+  const std::optional<std::string> power_good_after =
+      read_trimmed_file(*sy7636a_path / "power_good");
+  if (!power_good_before.has_value() || !state.has_value() ||
+      !power_good_after.has_value()) {
     return unavailable_power_state(
         error, "SY7636A power/fault attributes are unreadable");
   }
-  if (*power_good != "ON" && *power_good != "OFF") {
+  if (*power_good_before != "ON" && *power_good_before != "OFF") {
     return unavailable_power_state(
-        error,
-        "SY7636A power-good attribute has unknown value='" + *power_good + "'");
+        error, "SY7636A power-good attribute has unknown value='" +
+                   *power_good_before + "'");
+  }
+  if (*power_good_after != "ON" && *power_good_after != "OFF") {
+    return unavailable_power_state(
+        error, "SY7636A power-good attribute has unknown value='" +
+                   *power_good_after + "'");
   }
   if (std::find(kSy7636aFaultStates.begin(), kSy7636aFaultStates.end(),
                 std::string_view(*state)) == kSy7636aFaultStates.end()) {
@@ -480,19 +488,29 @@ read_rm2_panel_power_state(std::string *error,
         error,
         "SY7636A fault-state attribute has unknown value='" + *state + "'");
   }
-  const std::string latched_fault_event =
+  const std::string fault_state =
       *state == "no fault event" ? std::string{} : *state;
-  if (*power_good != "ON") {
+  Rm2PanelPowerState result{true, *power_good_after == "ON",
+                            std::move(fault_state)};
+  result.power_good_stable = *power_good_before == *power_good_after;
+  if (!result.power_good_stable) {
     if (error != nullptr) {
-      *error = "SY7636A panel power-good='" + *power_good + "' state='" +
-               *state + "'";
+      *error = "SY7636A panel power-good changed during state sample first='" +
+               *power_good_before + "' second='" + *power_good_after +
+               "' state='" + *state + "'";
     }
-    return {true, false, latched_fault_event};
+    return result;
+  }
+  if (!result.power_good) {
+    if (error != nullptr) {
+      *error = "SY7636A panel power-good='OFF' state='" + *state + "'";
+    }
+    return result;
   }
   if (error != nullptr) {
     error->clear();
   }
-  return {true, true, latched_fault_event};
+  return result;
 }
 
 } // namespace pluto::native::rm2

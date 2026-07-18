@@ -55,8 +55,9 @@ Those are inputs to Flutter's normal logical-pixel model, not three separately
 authored app canvases. The same release Home, shared application, and Ink
 layouts reflow from the resulting constraints. An intermediate release
 rendered Home and Ink on the physical RM2 before a later switch failed closed
-on retained PMIC fault telemetry. The corrected frozen release must repeat the
-complete optical and lifecycle gate.
+on changing PMIC diagnostic text despite stable live power-good. The corrected
+reader brackets that non-atomic text sample with live power checks; a newly
+frozen release must repeat the complete optical and lifecycle gate.
 
 ## One public workflow
 
