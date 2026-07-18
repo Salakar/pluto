@@ -544,8 +544,11 @@ if [[ "${metadata_values[9]}" == 0 ]]; then
   [[ "$metrics_dart_binary" == "$dart" &&
     "$metrics_dart_sha256" == "$(sha256_file "$dart")" ]] ||
     die "production metrics did not use the exact pinned Dart runtime"
-  recomputed_proof="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/pluto-manifest-proof.XXXXXX")"
-  trap 'rm -f "$recomputed_proof"' EXIT
+  recomputed_proof_dir="$(
+    /usr/bin/mktemp -d "${TMPDIR:-/tmp}/pluto-manifest-proof.XXXXXX"
+  )"
+  recomputed_proof="$recomputed_proof_dir/manifest-proof.json"
+  trap '/bin/rm -rf "$recomputed_proof_dir"' EXIT
   "$dart" --packages="$packages" "$MANIFEST_VERIFIER" \
     --manifest "$release_manifest" \
     --pins "$ROOT/tools/pluto/pins" \
@@ -556,7 +559,7 @@ if [[ "${metadata_values[9]}" == 0 ]]; then
     die "exact installed-byte proof could not be recomputed"
   /usr/bin/cmp -s "$recomputed_proof" "$proof" ||
     die "stored installed-byte proof differs from a fresh pinned-Dart proof"
-  rm -f "$recomputed_proof"
+  /bin/rm -rf "$recomputed_proof_dir"
   trap - EXIT
 fi
 
