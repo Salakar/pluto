@@ -177,8 +177,30 @@ chmod 0755 "$TMP/bin/mv"
 cat > "$TMP/bin/journalctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == *'-o cat'* && "$*" == *'--no-pager'* ]]
-while IFS= read -r epoch; do
+[[ "$*" == *'--no-pager'* ]]
+if [[ "$*" == *'--show-cursor'* && "$*" == *'-n 0'* ]]; then
+  # The fixture cursor is a monotonic journal sequence, not the number of
+  # retained lines. This lets the test vacuum old entries without invalidating
+  # a cursor captured immediately before the next suspend request.
+  # shellcheck disable=SC1090
+  . "$STATE_DIR/state"
+  printf -- '-- No entries --\n-- cursor: fixture-%s\n' "$wakes"
+  exit 0
+fi
+[[ "$*" == *'-o cat'* ]]
+after=0
+for arg in "$@"; do
+  case "$arg" in
+    --after-cursor=fixture-*)
+      after=${arg#--after-cursor=fixture-}
+      [[ "$after" =~ ^[0-9]+$ ]] || exit 64
+      ;;
+  esac
+done
+index=0
+while read -r sequence epoch extra; do
+  [[ "$sequence" =~ ^[0-9]+$ && -z "${extra:-}" ]] || exit 64
+  ((sequence > after)) || continue
   printf '[pluto-session 02:03:04] suspend-wake-receipt rtc=rtc0 since_epoch=%s\n' \
     "$epoch"
   printf '[pluto-session 02:03:04] suspend target completed after wake\n'
@@ -259,21 +281,27 @@ complete_suspend() {
   esac
   save
 }
+append_wake_receipt() {
+  local epoch="$1"
+  wakes=$((wakes + 1))
+  printf '%s %s\n' "$wakes" "$epoch" >> "$STATE_DIR/wake-receipts"
+  if [[ "${JOURNAL_FIXTURE_ROTATE:-0}" == 1 ]]; then
+    tail -n 1 "$STATE_DIR/wake-receipts" > "$STATE_DIR/wake-receipts.new"
+    mv -f "$STATE_DIR/wake-receipts.new" "$STATE_DIR/wake-receipts"
+  fi
+}
 complete_fixture_wake() {
   accepted_alarm=$(cat "$STATE_DIR/rtc0/wakealarm") || exit 66
   [[ "$accepted_alarm" =~ ^[0-9]+$ ]] || exit 66
   case "${WAKE_FIXTURE_MODE:-rtc}" in
     rtc | rtc-reachable)
-      printf '%s\n' "$accepted_alarm" >> "$STATE_DIR/wake-receipts"
-      wakes=$((wakes + 1))
+      append_wake_receipt "$accepted_alarm"
       printf '%s\n' "$accepted_alarm" > "$STATE_DIR/rtc0/since_epoch"
       : > "$STATE_DIR/rtc0/wakealarm"
       ;;
     early-delayed)
       ((accepted_alarm >= 30)) || exit 66
-      printf '%s\n' "$((accepted_alarm - 30))" >> \
-        "$STATE_DIR/wake-receipts"
-      wakes=$((wakes + 1))
+      append_wake_receipt "$((accepted_alarm - 30))"
       # SSH observation is deliberately later than the deadline. Only the
       # supervisor's immutable wake receipt can still prove the early wake.
       printf '%s\n' "$((accepted_alarm + 30))" > \
@@ -281,16 +309,20 @@ complete_fixture_wake() {
       : > "$STATE_DIR/rtc0/wakealarm"
       ;;
     late-delayed)
-      printf '%s\n' "$((accepted_alarm + 30))" >> \
-        "$STATE_DIR/wake-receipts"
-      wakes=$((wakes + 1))
+      append_wake_receipt "$((accepted_alarm + 30))"
       printf '%s\n' "$((accepted_alarm + 60))" > \
         "$STATE_DIR/rtc0/since_epoch"
       : > "$STATE_DIR/rtc0/wakealarm"
       ;;
     malformed)
-      printf 'not-an-epoch\n' >> "$STATE_DIR/wake-receipts"
       wakes=$((wakes + 1))
+      printf '%s not-an-epoch\n' "$wakes" >> "$STATE_DIR/wake-receipts"
+      printf '%s\n' "$accepted_alarm" > "$STATE_DIR/rtc0/since_epoch"
+      : > "$STATE_DIR/rtc0/wakealarm"
+      ;;
+    duplicate)
+      append_wake_receipt "$accepted_alarm"
+      append_wake_receipt "$accepted_alarm"
       printf '%s\n' "$accepted_alarm" > "$STATE_DIR/rtc0/since_epoch"
       : > "$STATE_DIR/rtc0/wakealarm"
       ;;
@@ -313,10 +345,9 @@ case "$command" in
   *'proc_start_ticks()'*)
     verify_receipt_query
     receipt_count=$(wc -l < "$STATE_DIR/wake-receipts" | tr -d ' ')
-    valid_receipt_count=$(grep -Ec '^[0-9]+$' \
+    valid_receipt_count=$(grep -Ec '^[0-9]+ [0-9]+$' \
       "$STATE_DIR/wake-receipts" || true)
-    [[ "$receipt_count" == "$wakes" &&
-      "$valid_receipt_count" == "$receipt_count" ]] || exit 90
+    [[ "$valid_receipt_count" == "$receipt_count" ]] || exit 90
     if [[ "$crashed" == 1 ]]; then
       seq=$((seq + 1))
       mono=$((mono + 1000))
@@ -392,11 +423,17 @@ case "$command" in
     ink_mono=$mono
     save
     ;;
+  *'probe_kind=release-lifecycle-suspend-cursor'*)
+    [[ "$command" == *'--show-cursor'* ]] || exit 66
+    /bin/sh -c "$command"
+    ;;
   *'probe_kind=release-lifecycle-suspend-progress'*)
     if [[ "$suspended" == 1 && "${WAKE_FIXTURE_MODE:-rtc}" != never ]]; then
       complete_fixture_wake
       case "${WAKE_FIXTURE_MODE:-rtc}" in
-        rtc | early-delayed | late-delayed | malformed | missing) exit 1 ;;
+        rtc | early-delayed | late-delayed | malformed | duplicate | missing)
+          exit 1
+          ;;
       esac
     fi
     verify_receipt_query
@@ -826,6 +863,16 @@ SLEEP_LOG="$TMP/dwell-sleeps" PLUTO_TEST_NO_SLEEP=1 ACCEPTANCE_CYCLES=2 \
 [[ "$(grep -c '^3$' "$TMP/dwell-sleeps")" == 1 ]] ||
   fail 'multi-cycle lifecycle flow did not dwell once between two wakes'
 
+reset_state "$TMP/journal-rotation"
+JOURNAL_FIXTURE_ROTATE=1 PLUTO_TEST_NO_SLEEP=1 ACCEPTANCE_CYCLES=3 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/journal-rotation" \
+    > "$TMP/journal-rotation.out" ||
+  fail 'cursor-bound lifecycle proof failed after old journal receipts rotated'
+[[ "$(grep -c 'PASS cycle=' "$TMP/journal-rotation.out")" == 3 &&
+  "$(wc -l < "$TMP/journal-rotation/wake-receipts" | tr -d ' ')" == 1 ]] ||
+  fail 'journal-rotation fixture did not retain only the newest receipt'
+
 reset_state "$TMP/rtc-reachable"
 WAKE_FIXTURE_MODE=rtc-reachable PLUTO_TEST_NO_SLEEP=1 \
   PLUTO_LIFECYCLE_CRASH_TEST=0 \
@@ -874,6 +921,18 @@ fi
 grep -q 'returned malformed post-wake progress evidence' \
   "$TMP/malformed-wake-receipt.err" ||
   fail 'malformed supervisor wake epoch did not fail closed'
+
+reset_state "$TMP/duplicate-wake-receipt"
+if WAKE_FIXTURE_MODE=duplicate PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=0 \
+  run_smoke normal "$TMP/duplicate-wake-receipt" >/dev/null \
+    2>"$TMP/duplicate-wake-receipt.err"; then
+  fail 'duplicate cursor-bound supervisor wake receipts passed acceptance'
+fi
+grep -q \
+  'published too many completed suspend receipts after its journal cursor (expected=1 actual=2)' \
+  "$TMP/duplicate-wake-receipt.err" ||
+  fail 'duplicate cursor-bound receipts did not fail closed'
 
 reset_state "$TMP/missing-wake-receipt"
 if WAKE_FIXTURE_MODE=missing PLUTO_TEST_NO_SLEEP=1 \

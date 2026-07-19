@@ -8,8 +8,13 @@ TMP=${TMPDIR:-/tmp}/pluto-session-rm2-panel-boundary-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
 SESSION_PID=""
+BLANK_WATCHER_PID=""
 
 cleanup() {
+  if [ -n "$BLANK_WATCHER_PID" ]; then
+    kill "$BLANK_WATCHER_PID" 2>/dev/null || true
+    wait "$BLANK_WATCHER_PID" 2>/dev/null || true
+  fi
   [ -z "$SESSION_PID" ] || kill "$SESSION_PID" 2>/dev/null || true
   for pid_file in "$CTL/warm-apps"/*.pid; do
     [ -f "$pid_file" ] || continue
@@ -74,6 +79,7 @@ mkdir -p "$TMP/bin" "$ROOT/bin" "$ROOT/engine/release" \
 : > "$ROOT/apps/dev.example.paper/bundle/icudtl.dat"
 printf '100.0 0.0\n' > "$TMP/uptime"
 printf 'OFF\n' > "$TMP/power-good"
+: > "$TMP/fb-blank"
 
 cat > "$TMP/bin/systemctl" <<'SYSTEMCTL'
 #!/bin/sh
@@ -116,6 +122,9 @@ resume() {
      [ "$(cat "$PLUTO_TEST_PANEL_POWER_GOOD_FILE")" != OFF ]; then
     : > "$PLUTO_TEST_PREMATURE_RESUME"
   fi
+  if [ "$PLUTO_APP_ID" = dev.example.paper ]; then
+    printf 'ON\n' > "$PLUTO_TEST_PANEL_POWER_GOOD_FILE"
+  fi
   rm -f "$marker"
 }
 
@@ -128,6 +137,17 @@ EMBEDDER
 chmod +x "$TMP/bin/systemctl" "$ROOT/bin/pluto-rm2-cpufreq-restore.sh" \
   "$ROOT/bin/pluto-embedder"
 mkdir -p "$TMP/starts"
+(
+  while :; do
+    if [ "$(cat "$TMP/fb-blank" 2>/dev/null || true)" = 4 ]; then
+      printf 'OFF\n' > "$TMP/power-good"
+      : > "$TMP/fb-blank"
+      : > "$TMP/crash-powerdown-observed"
+    fi
+    sleep 0.01
+  done
+) &
+BLANK_WATCHER_PID=$!
 
 PATH="$TMP/bin:$PATH" \
 PLUTO_ROOT="$ROOT" \
@@ -138,6 +158,7 @@ PLUTO_RUN_DIR="$CTL" \
 PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
 PLUTO_UPTIME_FILE="$TMP/uptime" \
 PLUTO_TEST_PANEL_POWER_GOOD_FILE="$TMP/power-good" \
+PLUTO_TEST_PANEL_BLANK_FILE="$TMP/fb-blank" \
 PLUTO_GLASS_HANDOFF_FILE="$CTL/glass.handoff" \
 PLUTO_PANEL_POWERDOWN_ATTEMPTS=80 \
 PLUTO_PANEL_POWERDOWN_INTERVAL=0.01 \
@@ -179,6 +200,27 @@ wait_for_absent "$CTL/hibernated/$launcher_pid" ||
   fail "cold panel fence restarted the warm launcher process"
 grep -q 'RM2 cold panel boundary confirmed power_good=OFF' "$TMP/session.log" ||
   fail "stable power-good boundary was not logged"
+
+printf 'dev.example.paper\n' > "$CTL/launch"
+wait_for_value "$CTL/embedder.pid" "$paper_pid" ||
+  fail "warm temporary owner did not resume for the crash test"
+wait_for_value "$TMP/power-good" ON ||
+  fail "crash-test owner did not power the panel"
+kill -KILL "$paper_pid"
+wait_for_value "$CTL/embedder.pid" "$launcher_pid" ||
+  fail "warm launcher did not recover after the foreground crash"
+wait_for_absent "$CTL/hibernated/$launcher_pid" ||
+  fail "crash recovery did not consume the launcher resume acknowledgement"
+[ -e "$TMP/crash-powerdown-observed" ] ||
+  fail "foreground crash did not request fbdev POWERDOWN"
+[ "$(cat "$TMP/power-good")" = OFF ] ||
+  fail "foreground crash recovery did not reach the cold PMIC boundary"
+grep -q 'RM2 crash recovery requested FBIOBLANK(POWERDOWN)' \
+  "$TMP/session.log" ||
+  fail "foreground crash powerdown was not logged"
+grep -q 'RM2 crash recovery completed at stable power_good=OFF' \
+  "$TMP/session.log" ||
+  fail "foreground crash completion was not logged"
 
 : > "$CTL/stock"
 for _ in $(seq 1 160); do

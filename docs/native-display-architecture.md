@@ -211,6 +211,29 @@ commits only after content. The next job returns to ordinary unchanged-cell
 suppression. This is a panel-specific waveform sequence below the common
 lifecycle boundary, not a separate app-switch flow.
 
+The bounded warm-handoff chain is deliberately finite. When its last member
+closes, there is no successor bundle and the next presenter must start cold.
+On RM2, the common supervisor therefore discovers the unique readable
+SY7636A `power_good` attribute during exact profile validation and, only when
+no handoff file exists, requires two consecutive `OFF` samples before
+launching the next presenter. The samples are 20 ms apart and the whole
+observation is bounded to five seconds. An unreadable value, a second PMIC
+candidate, a persistent `ON`, or a torn `ON`/`OFF` boundary fails closed. This
+preserves the finite-chain safety limit while allowing the hibernated Flutter
+process to resume with the same PID after the physical panel owner has
+actually released its rails.
+
+An uncatchable foreground death is a different boundary: the renderer cannot
+run its destructor and may leave LCDIF and the SY7636A powered. After the
+supervisor has reaped that exact child, it discards any incomplete handoff and,
+only for the exact `lcdif_tcon` profile bound to `/dev/fb0` and the
+`mxs-lcdif` sysfs driver, writes `FB_BLANK_POWERDOWN` through the kernel's
+root-owned framebuffer `blank` attribute. The same two-sample PMIC-OFF fence
+must then pass before a stopped Home process or a cold replacement can resume.
+An unavailable blank control, rejected write, unreadable power state, or
+persistent `ON` remains fatal; the supervisor never starts a second powered
+owner.
+
 ### Paper Pro Move
 
 Move keeps its established Gallery 3 program and DRM scanout implementation

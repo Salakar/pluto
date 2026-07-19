@@ -579,16 +579,34 @@ wait_matching() {
   return 1
 }
 
-suspend_progress() {
-  local unit="$1" receipt_index="$2"
+# journald may vacuum old boot entries during a long hardware soak, so a
+# whole-boot line count is not a monotonic receipt identity. Capture a cursor
+# immediately before publication and require exactly one receipt after it.
+suspend_cursor() {
+  local unit="$1"
   case "$unit" in
     xochitl.service | pluto-session-once.service) ;;
     *) return 1 ;;
   esac
-  [[ "$receipt_index" =~ ^[1-9][0-9]*$ ]] || return 1
+  remote "probe_kind=release-lifecycle-suspend-cursor
+cursor_line=\$(journalctl -u '$unit' -b -n 0 --show-cursor --no-pager \
+  2>/dev/null | sed -n 's/^-- cursor: //p') || exit 90
+case \"\$cursor_line\" in
+  ''|*[!A-Za-z0-9_.=\\;:-]*) exit 90 ;;
+esac
+printf '%s\\n' \"\$cursor_line\""
+}
+
+suspend_progress() {
+  local unit="$1" cursor="$2"
+  case "$unit" in
+    xochitl.service | pluto-session-once.service) ;;
+    *) return 1 ;;
+  esac
+  [[ "$cursor" =~ ^[A-Za-z0-9_.=\;:-]+$ ]] || return 1
   remote "probe_kind=release-lifecycle-suspend-progress
-receipt_index=$receipt_index
-wake_journal=\$(journalctl -u '$unit' -b -o cat --no-pager \
+wake_journal=\$(journalctl -u '$unit' -b -o cat \\
+  --after-cursor='$cursor' --no-pager \
   2>/dev/null) || {
   printf 'reachable|malformed|malformed\\n'
   exit 0
@@ -620,9 +638,8 @@ if [ \"\$wake_count\" -ne \"\$wake_valid_count\" ]; then
   exit 0
 fi
 wake_epoch=none
-if [ \"\$wake_count\" -ge \"\$receipt_index\" ]; then
-  wake_epoch=\$(printf '%s\\n' \"\$wake_epochs\" |
-    sed -n \"\${receipt_index}p\")
+if [ \"\$wake_count\" -eq 1 ]; then
+  wake_epoch=\$(printf '%s\\n' \"\$wake_epochs\" | sed -n '1p')
   case \"\$wake_epoch\" in ''|*[!0-9]*) wake_epoch=malformed ;; esac
 fi
 printf 'reachable|%s|%s\\n' \"\$wake_count\" \"\$wake_epoch\"
@@ -658,7 +675,7 @@ WAIT_WAKE_EPOCH=none
 WAIT_DOWN_OBSERVED_UNREACHABLE=0
 
 wait_down() {
-  local unit="$1" expected_wake="$2" accepted_alarm="$3"
+  local unit="$1" cursor="$2" accepted_alarm="$3"
   local elapsed=0 progress=""
   case "$unit" in
     xochitl.service | pluto-session-once.service) ;;
@@ -668,17 +685,17 @@ wait_down() {
   WAIT_WAKE_EPOCH=none
   WAIT_DOWN_OBSERVED_UNREACHABLE=0
   while ((elapsed < DOWN_TIMEOUT)); do
-    if ! progress="$(suspend_progress "$unit" "$expected_wake" 2>/dev/null)"; then
+    if ! progress="$(suspend_progress "$unit" "$cursor" 2>/dev/null)"; then
       WAIT_DOWN_OBSERVED_UNREACHABLE=1
       return 0
     fi
     parse_suspend_progress "$progress" || return 3
-    if ((PROGRESS_WAKE_COUNT > expected_wake)); then
+    if ((PROGRESS_WAKE_COUNT > 1)); then
       WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
       WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
       return 4
     fi
-    if ((PROGRESS_WAKE_COUNT == expected_wake)); then
+    if ((PROGRESS_WAKE_COUNT == 1)); then
       WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
       WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
       [[ "$PROGRESS_WAKE_EPOCH" =~ ^[0-9]+$ ]] || return 3
@@ -692,17 +709,17 @@ wait_down() {
 }
 
 wait_wake_receipt() {
-  local timeout="$1" unit="$2" expected_wake="$3" accepted_alarm="$4"
+  local timeout="$1" unit="$2" cursor="$3" accepted_alarm="$4"
   local elapsed=0 progress=""
   while ((elapsed < timeout)); do
-    if progress="$(suspend_progress "$unit" "$expected_wake" 2>/dev/null)"; then
+    if progress="$(suspend_progress "$unit" "$cursor" 2>/dev/null)"; then
       parse_suspend_progress "$progress" || return 3
-      if ((PROGRESS_WAKE_COUNT > expected_wake)); then
+      if ((PROGRESS_WAKE_COUNT > 1)); then
         WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
         WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
         return 4
       fi
-      if ((PROGRESS_WAKE_COUNT == expected_wake)); then
+      if ((PROGRESS_WAKE_COUNT == 1)); then
         WAIT_WAKE_COUNT="$PROGRESS_WAKE_COUNT"
         WAIT_WAKE_EPOCH="$PROGRESS_WAKE_EPOCH"
         [[ "$PROGRESS_WAKE_EPOCH" =~ ^[0-9]+$ ]] || return 3
@@ -912,6 +929,11 @@ for ((cycle = 1; cycle <= CYCLES; cycle += 1)); do
     exit 76
   }
 
+  before_wake_cursor="$(suspend_cursor "$before_unit")" || {
+    echo "release lifecycle smoke: cycle $cycle could not capture its pre-suspend journal cursor" >&2
+    exit 76
+  }
+
   receipt="$(remote "set -eu
 . /home/root/pluto/share/device-profiles.sh
 pluto_profile_probe
@@ -966,7 +988,6 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
   }
   echo "release lifecycle smoke: cycle=$cycle requested $receipt"
 
-  expected_wake=$((before_wake_count + 1))
   accepted_alarm="$(printf '%s\n' "$receipt" | tr ' ' '\n' |
     sed -n 's/^accepted=//p')"
   [[ "$accepted_alarm" =~ ^[0-9]+$ &&
@@ -976,7 +997,7 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
   }
 
   wait_down_status=0
-  wait_down "$before_unit" "$expected_wake" "$accepted_alarm" ||
+  wait_down "$before_unit" "$before_wake_cursor" "$accepted_alarm" ||
     wait_down_status=$?
   case "$wait_down_status" in
     0) ;;
@@ -993,7 +1014,7 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
       exit 78
       ;;
     4)
-      echo "release lifecycle smoke: cycle $cycle published too many completed suspend receipts (expected=$expected_wake actual=$WAIT_WAKE_COUNT)" >&2
+      echo "release lifecycle smoke: cycle $cycle published too many completed suspend receipts after its journal cursor (expected=1 actual=$WAIT_WAKE_COUNT)" >&2
       exit 78
       ;;
     5)
@@ -1007,7 +1028,7 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
   esac
 
   wake_receipt_status=0
-  wait_wake_receipt "$UP_TIMEOUT" "$before_unit" "$expected_wake" \
+  wait_wake_receipt "$UP_TIMEOUT" "$before_unit" "$before_wake_cursor" \
     "$accepted_alarm" || wake_receipt_status=$?
   case "$wake_receipt_status" in
     0) ;;
@@ -1024,7 +1045,7 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
       exit 78
       ;;
     4)
-      echo "release lifecycle smoke: cycle $cycle published too many completed suspend receipts (expected=$expected_wake actual=$WAIT_WAKE_COUNT)" >&2
+      echo "release lifecycle smoke: cycle $cycle published too many completed suspend receipts after its journal cursor (expected=1 actual=$WAIT_WAKE_COUNT)" >&2
       exit 78
       ;;
     5)
@@ -1038,7 +1059,7 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
   esac
 
   after="$(wait_matching "$UP_TIMEOUT" "$HOME_PID" "$LAUNCHER_APP_ID" \
-    "$before_health_seq" "$before_health_mono" "$expected_wake" \
+    "$before_health_seq" "$before_health_mono" any \
     "$INK_PID" T)" || {
     echo "release lifecycle smoke: cycle $cycle did not return healthy after wake" >&2
     exit 79
@@ -1068,11 +1089,11 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
     echo "release lifecycle smoke: cycle $cycle did not preserve and advance the foreground health receipt" >&2
     exit 81
   }
-  ((STATE_WAKE_COUNT == before_wake_count + 1)) || {
-    echo "release lifecycle smoke: cycle $cycle lacks exactly one completed suspend receipt (before=$before_wake_count after=$STATE_WAKE_COUNT)" >&2
+  [[ "$WAIT_WAKE_COUNT" == 1 ]] || {
+    echo "release lifecycle smoke: cycle $cycle lacks exactly one cursor-bound completed suspend receipt" >&2
     exit 81
   }
-  echo "release lifecycle smoke: PASS cycle=$cycle app=$STATE_APP_ID pid=$STATE_FOREGROUND_PID health_seq=$STATE_HEALTH_SEQ wake_receipts=$STATE_WAKE_COUNT wake_epoch=$WAIT_WAKE_EPOCH accepted=$accepted_alarm transport_down_observed=$WAIT_DOWN_OBSERVED_UNREACHABLE"
+  echo "release lifecycle smoke: PASS cycle=$cycle app=$STATE_APP_ID pid=$STATE_FOREGROUND_PID health_seq=$STATE_HEALTH_SEQ wake_receipts=$WAIT_WAKE_COUNT retained_journal_receipts=$STATE_WAKE_COUNT wake_epoch=$WAIT_WAKE_EPOCH accepted=$accepted_alarm transport_down_observed=$WAIT_DOWN_OBSERVED_UNREACHABLE"
   stage "lifecycle-wake-$cycle"
   if ((cycle < CYCLES)); then
     sleep "$POST_WAKE_DWELL_SECONDS"
@@ -1080,11 +1101,12 @@ printf 'cleared=1 rtc_now=%s system_now=%s clock_delta=%s accepted=%s arm_margin
 done
 
 "$CLI" run --release --device "$DEVICE" "$EXPECTED_APP_ID"
-restored="$(wait_matching "$UP_TIMEOUT" "$INK_PID" "$EXPECTED_APP_ID" \
-  "$INK_HEALTH_SEQ" "$INK_HEALTH_MONO" any any any)" || {
+restored=""
+if ! restored="$(wait_matching "$UP_TIMEOUT" "$INK_PID" "$EXPECTED_APP_ID" \
+  "$INK_HEALTH_SEQ" "$INK_HEALTH_MONO" any any any)"; then
   echo "release lifecycle smoke: stroked Ink process did not resume after the standby soak" >&2
   exit 82
-}
+fi
 parse_state "$restored"
 [[ "$STATE_UNIT" == "$INITIAL_UNIT" &&
   "$STATE_SUPERVISOR_PID" == "$INITIAL_SUPERVISOR_PID" &&

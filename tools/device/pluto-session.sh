@@ -105,6 +105,7 @@ DISPLAY_DEVICE="${PLUTO_DISPLAY_DEVICE:-}"
 BEZEL_REDRAW_IIO="${PLUTO_BEZEL_REDRAW_IIO:-}"
 BEZEL_REDRAW_ENABLE="${PLUTO_BEZEL_REDRAW_ENABLE:-}"
 PANEL_POWER_GOOD_FILE=""
+PANEL_BLANK_FILE=""
 PROFILE_CONFIGURED=0
 RECOVERY_BOUND=0
 RECOVERY_RETIRED=0
@@ -360,6 +361,25 @@ configure_profile() {
         return 78
       fi
     fi
+    if [ "${PLUTO_TESTING:-0}" = 1 ] &&
+       [ -n "${PLUTO_TEST_PANEL_BLANK_FILE:-}" ]; then
+      PANEL_BLANK_FILE="$PLUTO_TEST_PANEL_BLANK_FILE"
+    else
+      case "$DISPLAY_DEVICE" in
+        /dev/fb0) panel_fb_name=fb0 ;;
+        *)
+          log "profile rejected: RM2 display is not an exact fbdev node"
+          return 78
+          ;;
+      esac
+      panel_graphics_path="/sys/class/graphics/$panel_fb_name"
+      if [ "$(cat "$panel_graphics_path/name" 2>/dev/null || true)" != \
+           mxs-lcdif ]; then
+        log "profile rejected: RM2 fbdev is not the mxs-lcdif driver"
+        return 78
+      fi
+      PANEL_BLANK_FILE="$panel_graphics_path/blank"
+    fi
   fi
 
   if [ "${PLUTO_TESTING:-0}" != 1 ]; then
@@ -385,6 +405,10 @@ configure_profile() {
     if [ -n "$PANEL_POWER_GOOD_FILE" ] &&
        [ ! -r "$PANEL_POWER_GOOD_FILE" ]; then
       log "profile rejected: panel power-good path is unreadable: $PANEL_POWER_GOOD_FILE"
+      return 78
+    fi
+    if [ -n "$PANEL_BLANK_FILE" ] && [ ! -w "$PANEL_BLANK_FILE" ]; then
+      log "profile rejected: panel blank path is not writable: $PANEL_BLANK_FILE"
       return 78
     fi
     if [ -f "$BOOT_DROPIN" ] && [ ! -x "$BOOT_CONFIRM_DISPATCHER" ]; then
@@ -891,6 +915,40 @@ wait_for_cold_panel_boundary() {
   done
   log "cold panel boundary withheld: power_good=${panel_power_good:-unknown} after $PANEL_POWERDOWN_ATTEMPTS samples"
   return 75
+}
+
+recover_crashed_panel_owner() {
+  [ "$PLUTO_PROFILE_DISPLAY_DRIVER" = lcdif_tcon ] || return 0
+  [ -n "$PANEL_BLANK_FILE" ] && [ -w "$PANEL_BLANK_FILE" ] || {
+    log "RM2 crash recovery rejected: framebuffer blank control is unavailable"
+    return 75
+  }
+
+  # An uncontrolled exit cannot authorize a retained-powered handoff. The
+  # child has already been reaped, so withdraw any partial bundle before
+  # asking the kernel fbdev owner to perform the same POWERDOWN operation that
+  # the presenter's normal destructor would have issued.
+  rm -f "$GLASS_HANDOFF_FILE"
+  panel_power_good="$(cat "$PANEL_POWER_GOOD_FILE" 2>/dev/null || true)"
+  case "$panel_power_good" in
+    OFF) ;;
+    ON)
+      if ! printf '4\n' > "$PANEL_BLANK_FILE"; then
+        log "RM2 crash recovery failed: FBIOBLANK(POWERDOWN) sysfs request was rejected"
+        return 75
+      fi
+      log "RM2 crash recovery requested FBIOBLANK(POWERDOWN)"
+      ;;
+    *)
+      log "RM2 crash recovery rejected: unreadable power-good at $PANEL_POWER_GOOD_FILE"
+      return 75
+      ;;
+  esac
+  if ! wait_for_cold_panel_boundary; then
+    log "RM2 crash recovery failed: cold panel boundary was not observed"
+    return 75
+  fi
+  log "RM2 crash recovery completed at stable power_good=OFF"
 }
 
 suspend_after_standby_exit() {
@@ -1913,6 +1971,13 @@ start() {
       wait "$APP_PID" 2>/dev/null || true
       forget_warm_pid "$APP_ID" "$APP_PID"
       log "embedder for '$APP_ID' exited"
+      if [ "$controlled_exit" -eq 0 ] &&
+         ! recover_crashed_panel_owner; then
+        mark_boot_fatal "crashed foreground panel recovery failed" \
+          "$APP_READY_FILE" "$APP_HEALTH_FILE"
+        drain_warm_pool
+        return 74
+      fi
     fi
     if [ "$RECOVERY_BOUND" -eq 1 ] && ! boot_is_confirmed; then
       stop_boot_confirmer
