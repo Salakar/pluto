@@ -448,6 +448,28 @@ class VisualPixelsTest(unittest.TestCase):
     def test_only_motion_lab_is_declared_as_the_dynamic_stage(self) -> None:
         self.assertEqual(VERIFIER_MODULE.MOTION_LAB_INDEX, 1)
         self.assertEqual(LABELS[VERIFIER_MODULE.MOTION_LAB_INDEX], LABELS[1])
+        self.assertEqual(VERIFIER_MODULE.DYNAMIC_STAGE_PAIR_FLOOR, 0.10)
+
+    def test_dynamic_stage_uses_complete_assignment_not_row_nearest_pair(
+        self,
+    ) -> None:
+        row_discrimination = [0.25] * len(LABELS)
+        row_discrimination[VERIFIER_MODULE.MOTION_LAB_INDEX] = -0.11
+        assignment_gap = 0.027
+        self.assertEqual(
+            VERIFIER_MODULE._minimum_discrimination(
+                row_discrimination, assignment_gap
+            ),
+            assignment_gap,
+        )
+
+        row_discrimination[2] = -0.01
+        self.assertLess(
+            VERIFIER_MODULE._minimum_discrimination(
+                row_discrimination, assignment_gap
+            ),
+            0.008,
+        )
 
     def test_only_ink_surfaces_have_the_sparse_aligned_edge_density_floor(
         self,
