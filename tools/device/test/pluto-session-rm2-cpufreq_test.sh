@@ -32,6 +32,7 @@ mkdir -p "$TMP/bin" "$ROOT/bin" "$ROOT/engine/release" \
 : > "$ROOT/launcher/bundle/lib/app.so"
 : > "$ROOT/launcher/bundle/icudtl.dat"
 printf '100.0 0.0\n' > "$TMP/uptime"
+printf 'OFF\n' > "$TMP/power-good"
 
 cat > "$TMP/bin/systemctl" <<'SYSTEMCTL'
 #!/bin/sh
@@ -74,6 +75,9 @@ run_session() {
   PLUTO_PROFILE_FILE="$PROFILE_FILE" \
   PLUTO_TESTING=1 \
   PLUTO_TEST_PROFILE_ID="$profile" \
+  PLUTO_TEST_PANEL_POWER_GOOD_FILE="$TMP/power-good" \
+  PLUTO_PANEL_POWERDOWN_ATTEMPTS=2 \
+  PLUTO_PANEL_POWERDOWN_INTERVAL=0 \
   PLUTO_TEST_CPU_FREQUENCY_RESTORE="$ROOT/bin/pluto-rm2-cpufreq-restore.sh" \
   PLUTO_RUN_DIR="$CTL" \
   PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \

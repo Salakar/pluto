@@ -46,6 +46,7 @@ bash tools/device/test/pluto-rm2-cpufreq-restore_test.sh
 bash tools/device/test/pluto-session-once_test.sh
 bash tools/device/test/pluto-session-rm2-cpufreq_test.sh
 bash tools/device/test/pluto-session-warm-resume_test.sh
+bash tools/device/test/pluto-session-rm2-panel-boundary_test.sh
 bash tools/device/test/pluto-session-switcher_test.sh
 bash tools/device/test/pluto-session-power-menu_test.sh
 bash tools/device/test/pluto-release-activate_test.sh

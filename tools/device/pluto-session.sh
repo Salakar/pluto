@@ -65,6 +65,14 @@ UPTIME_FILE="${PLUTO_UPTIME_FILE:-/proc/uptime}"
 HEALTH_UPTIME_FILE="${PLUTO_HEALTH_UPTIME_FILE:-/proc/uptime}"
 VPDD_IDLE_ATTEMPTS="${PLUTO_VPDD_IDLE_ATTEMPTS:-20}"
 VPDD_IDLE_INTERVAL="${PLUTO_VPDD_IDLE_INTERVAL:-0.1}"
+# RM2's bounded glass-handoff chain deliberately ends with no successor
+# bundle. Before the next presenter opens cold, the common supervisor must
+# observe the PMIC rail boundary that FBIOBLANK(POWERDOWN) requested. Two
+# consecutive OFF reads reject a torn ON->OFF observation; the five-second
+# envelope is a fail-closed state fence, not a launch delay.
+PANEL_POWERDOWN_ATTEMPTS="${PLUTO_PANEL_POWERDOWN_ATTEMPTS:-250}"
+PANEL_POWERDOWN_INTERVAL="${PLUTO_PANEL_POWERDOWN_INTERVAL:-0.02}"
+GLASS_HANDOFF_FILE="${PLUTO_GLASS_HANDOFF_FILE:-$CTL/glass.handoff}"
 # `systemctl suspend` is intentionally asynchronous and returns as soon as the
 # job is queued. Starting the same target with --wait instead gives us the
 # post-resume receipt required before restoring light or launching an embedder.
@@ -96,6 +104,7 @@ POWER_KEY_DEVICE="${PLUTO_POWER_KEY_DEVICE:-}"
 DISPLAY_DEVICE="${PLUTO_DISPLAY_DEVICE:-}"
 BEZEL_REDRAW_IIO="${PLUTO_BEZEL_REDRAW_IIO:-}"
 BEZEL_REDRAW_ENABLE="${PLUTO_BEZEL_REDRAW_ENABLE:-}"
+PANEL_POWER_GOOD_FILE=""
 PROFILE_CONFIGURED=0
 RECOVERY_BOUND=0
 RECOVERY_RETIRED=0
@@ -334,6 +343,25 @@ configure_profile() {
     BEZEL_REDRAW_ENABLE="$PLUTO_PROFILE_BEZEL_REDRAW_ENABLE"
   select_profile_waveform || return $?
 
+  if [ "$PLUTO_PROFILE_DISPLAY_DRIVER" = lcdif_tcon ]; then
+    if [ "${PLUTO_TESTING:-0}" = 1 ] &&
+       [ -n "${PLUTO_TEST_PANEL_POWER_GOOD_FILE:-}" ]; then
+      PANEL_POWER_GOOD_FILE="$PLUTO_TEST_PANEL_POWER_GOOD_FILE"
+    else
+      panel_power_good_count=0
+      for panel_power_good_candidate in \
+        /sys/bus/i2c/drivers/sy7636a/*/power_good; do
+        [ -r "$panel_power_good_candidate" ] || continue
+        PANEL_POWER_GOOD_FILE="$panel_power_good_candidate"
+        panel_power_good_count=$((panel_power_good_count + 1))
+      done
+      if [ "$panel_power_good_count" -ne 1 ]; then
+        log "profile rejected: expected exactly one readable SY7636A power-good attribute"
+        return 78
+      fi
+    fi
+  fi
+
   if [ "${PLUTO_TESTING:-0}" != 1 ]; then
     [ -e "$DISPLAY_DEVICE" ] || {
       log "profile rejected: display device is missing: $DISPLAY_DEVICE"
@@ -352,6 +380,11 @@ configure_profile() {
     fi
     if [ -n "$VPDD_TIMEOUT_FILE" ] && [ ! -r "$VPDD_TIMEOUT_FILE" ]; then
       log "profile rejected: regulator idle path is unreadable: $VPDD_TIMEOUT_FILE"
+      return 78
+    fi
+    if [ -n "$PANEL_POWER_GOOD_FILE" ] &&
+       [ ! -r "$PANEL_POWER_GOOD_FILE" ]; then
+      log "profile rejected: panel power-good path is unreadable: $PANEL_POWER_GOOD_FILE"
       return 78
     fi
     if [ -f "$BOOT_DROPIN" ] && [ ! -x "$BOOT_CONFIRM_DISPATCHER" ]; then
@@ -812,6 +845,51 @@ wait_for_vpdd_idle() {
     fi
   done
   log "suspend withheld: VPDD cooldown still ${remaining}ms"
+  return 75
+}
+
+wait_for_cold_panel_boundary() {
+  [ "$PLUTO_PROFILE_DISPLAY_DRIVER" = lcdif_tcon ] || return 0
+  # A bundle authorizes the presenter to validate and claim retained powered
+  # safe-HOLD itself. The supervisor never parses or trusts its contents.
+  [ ! -e "$GLASS_HANDOFF_FILE" ] || return 0
+  case "$PANEL_POWERDOWN_ATTEMPTS" in
+    ''|*[!0-9]*|0)
+      log "cold panel boundary rejected: invalid attempt count '$PANEL_POWERDOWN_ATTEMPTS'"
+      return 64
+      ;;
+  esac
+  [ -n "$PANEL_POWER_GOOD_FILE" ] || {
+    log "cold panel boundary rejected: no power-good attribute"
+    return 75
+  }
+
+  attempt=0
+  off_samples=0
+  while [ "$attempt" -lt "$PANEL_POWERDOWN_ATTEMPTS" ]; do
+    panel_power_good="$(cat "$PANEL_POWER_GOOD_FILE" 2>/dev/null || true)"
+    case "$panel_power_good" in
+      OFF)
+        off_samples=$((off_samples + 1))
+        if [ "$off_samples" -ge 2 ]; then
+          log "RM2 cold panel boundary confirmed power_good=OFF samples=$((attempt + 1))"
+          return 0
+        fi
+        ;;
+      ON) off_samples=0 ;;
+      *)
+        log "cold panel boundary rejected: unreadable power-good at $PANEL_POWER_GOOD_FILE"
+        return 75
+        ;;
+    esac
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$PANEL_POWERDOWN_ATTEMPTS" ] || break
+    if ! sleep "$PANEL_POWERDOWN_INTERVAL"; then
+      log "cold panel boundary rejected: invalid poll interval '$PANEL_POWERDOWN_INTERVAL'"
+      return 64
+    fi
+  done
+  log "cold panel boundary withheld: power_good=${panel_power_good:-unknown} after $PANEL_POWERDOWN_ATTEMPTS samples"
   return 75
 }
 
@@ -1693,6 +1771,16 @@ start() {
   system_host=none
   fails=0
   while :; do
+    # The presenter handoff chain is intentionally finite. Its final owner
+    # removes the bundle and requests framebuffer powerdown. Keep a hibernated
+    # Dart isolate warm, but do not let any cold presenter open until RM2's
+    # independently observed PMIC boundary is stable.
+    if ! wait_for_cold_panel_boundary; then
+      mark_boot_fatal "cold panel ownership boundary was not observed" \
+        "$APP_READY_FILE" "$APP_HEALTH_FILE"
+      drain_warm_pool
+      return 74
+    fi
     # The prior foreground may have died after publishing a burst receipt but
     # before its destructor restored policy0. Do not resume or create another
     # panel owner until that exact stale lease is either absent or recovered.
