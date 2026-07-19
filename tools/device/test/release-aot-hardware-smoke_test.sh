@@ -219,6 +219,11 @@ case "$command" in
     printf 'release AOT smoke: PASS Ink stroke pid=202 response={"ok":true,"result":{"appId":"dev.pluto.ink","pid":202,"eventCount":24}}\n'
     ;;
   *'never published matching AOT receipts'*)
+    [[ "$command" == *'health_wait=2'* &&
+      "$command" == *'health_wait" -le 10'* &&
+      "$command" == *'health_advanced=1'* &&
+      "$command" == *'current_start_ticks=$(sed'* ]] ||
+      exit 67
     printf 'release AOT smoke: PASS app pid=203 present_after=1s\n'
     ;;
   *'debug/JIT state absent'*)

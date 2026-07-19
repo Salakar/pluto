@@ -595,9 +595,33 @@ set -- \$(cat \"\$health_file\" 2>/dev/null || true)
 [ \"\$#\" -eq 3 ] && [ \"\$1\" = \"pid=\$pid\" ] || exit 85
 seq_after=\${2#seq=}
 mono_after=\${3#mono_ms=}
-[ \"\$seq_after\" -gt \"\$seq_before\" ] &&
-  [ \"\$mono_after\" -gt \"\$mono_before\" ] || exit 86
-echo \"release AOT smoke: PASS $app_id pid=\$pid start_ticks=\$start_ticks ready=\$ready_file health=\$health_file present_after=\${i}s\"" || return $?
+health_wait=2
+health_advanced=0
+while [ \"\$health_wait\" -le 10 ]; do
+  case \"\$seq_after:\$mono_after\" in
+    *[!0-9:]*|:*|*:) ;;
+    *)
+      if [ \"\$seq_after\" -gt \"\$seq_before\" ] &&
+         [ \"\$mono_after\" -gt \"\$mono_before\" ]; then
+        health_advanced=1
+        break
+      fi
+      ;;
+  esac
+  [ \"\$health_wait\" -lt 10 ] || break
+  sleep 1
+  health_wait=\$((health_wait + 1))
+  kill -0 \"\$pid\"
+  [ \"\$(cat /run/pluto/embedder.pid 2>/dev/null)\" = \"\$pid\" ] || exit 85
+  current_start_ticks=\$(sed 's/^.*) //' \"/proc/\$pid/stat\" | cut -d ' ' -f 20)
+  [ \"\$current_start_ticks\" = \"\$start_ticks\" ] || exit 85
+  set -- \$(cat \"\$health_file\" 2>/dev/null || true)
+  [ \"\$#\" -eq 3 ] && [ \"\$1\" = \"pid=\$pid\" ] || exit 85
+  seq_after=\${2#seq=}
+  mono_after=\${3#mono_ms=}
+done
+[ \"\$health_advanced\" -eq 1 ] || exit 86
+echo \"release AOT smoke: PASS $app_id pid=\$pid start_ticks=\$start_ticks ready=\$ready_file health=\$health_file present_after=\${i}s health_after=\${health_wait}s\"" || return $?
   verify_common_supervisor || return $?
   if [[ -n "$stage_label" ]]; then
     stage "$stage_label" "$app_id" || return $?
