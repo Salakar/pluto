@@ -179,15 +179,16 @@ The RM2 backend gives the renderer's exact same-surface liveness request
 strong semantics: a single `{0,0,1,1}` `Fast` request consumes the handoff
 marker without a flash. Any other first request is promoted inside that
 backend to one exact full-panel `Text` job. A physical RM2 test rejected a
-white-only exit rail, so the promoted job drives one mode-6 black rail from the
-recorded source, one mode-6 white rail from black, then mode-2 content from
-white to the incoming target. A 256-byte phase-local LUT remap reuses the
-existing transition-key vector for all three stages, so there is no second
-Flutter frame, full-surface traversal, allocation, or copy. Safe-idle and
-stable-power boundaries separate the rails; logical state commits only after
-content. The next job returns to ordinary unchanged-cell suppression. This is
-a panel-specific waveform sequence below the common lifecycle boundary, not a
-separate app-switch flow.
+white-only exit rail and one black/white cycle still left faint stress-pattern
+residue. The promoted job therefore drives two mode-6 black/white cycles:
+recorded source to black, black to white, white to black, black to white, then
+mode-2 content from white to the incoming target. A 256-byte phase-local LUT
+remap reuses the existing transition-key vector for all five stages, so there
+is no second Flutter frame, full-surface traversal, allocation, or copy.
+Safe-idle and stable-power boundaries separate the rails; logical state
+commits only after content. The next job returns to ordinary unchanged-cell
+suppression. This is a panel-specific waveform sequence below the common
+lifecycle boundary, not a separate app-switch flow.
 
 ### Paper Pro Move
 

@@ -2416,8 +2416,9 @@ private:
       if (completed_handoff_cleanup) {
         std::fprintf(
             stderr,
-            "lcdif_tcon: warm handoff full-panel replay completed black/white "
-            "mode-%u precondition then complete mode-%u content\n",
+            "lcdif_tcon: warm handoff full-panel replay completed two "
+            "black/white mode-%u precondition cycles then complete mode-%u "
+            "content\n",
             job.handoff_precondition_waveform.mode, job.waveform.mode);
       }
       if (callback != nullptr) {
@@ -2477,6 +2478,7 @@ private:
     enum class TransitionRemap {
       kNone,
       kBlackFromRecordedSource,
+      kBlackFromWhite,
       kWhiteFromBlack,
       kRecordedTargetFromWhite,
     };
@@ -2513,6 +2515,9 @@ private:
               break;
             case TransitionRemap::kBlackFromRecordedSource:
               source_key = old_level;
+              break;
+            case TransitionRemap::kBlackFromWhite:
+              source_key = 15U;
               break;
             case TransitionRemap::kWhiteFromBlack:
               source_key = 15U * 16U;
@@ -2637,6 +2642,22 @@ private:
       });
       if (white_status != kPlutoStatusOk) {
         return white_status;
+      }
+      const PlutoStatus second_black_status = drive_stage(WaveformStage{
+          .waveform = &job.handoff_precondition_waveform,
+          .drive_lut = job.handoff_precondition_waveform.drive_lut,
+          .remap = TransitionRemap::kBlackFromWhite,
+      });
+      if (second_black_status != kPlutoStatusOk) {
+        return second_black_status;
+      }
+      const PlutoStatus second_white_status = drive_stage(WaveformStage{
+          .waveform = &job.handoff_precondition_waveform,
+          .drive_lut = job.handoff_precondition_waveform.drive_lut,
+          .remap = TransitionRemap::kWhiteFromBlack,
+      });
+      if (second_white_status != kPlutoStatusOk) {
+        return second_white_status;
       }
     }
     const std::span<const std::uint8_t> content_lut =

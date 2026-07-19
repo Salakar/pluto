@@ -493,7 +493,42 @@ every rail, and logical state commits only after final content succeeds.
 Focused coverage observes drive at a sample outside the original partial
 damage during both reset rails and content, proves the sequence occurs exactly
 once, and retains the flash-free exact 1x1 same-surface proof. Physical
-acceptance remains pending a newly frozen release.
+testing of exact clean candidate
+`05b350380d784c7e1745a5b4f0e707d422032e2a`, universal manifest SHA-256
+`56dbcfe61e86e6ca7d9558ab519cc48079d5a624f62c26dd5685c81e4285d478`,
+proved that the sequence ran but rejected one cycle as insufficient. The
+incoming activation logged
+`warm handoff full-panel replay completed black/white mode-6 precondition then complete mode-2 content`.
+After hibernation it reported one cleanup job, zero missed deadlines, zero
+underflows, and zero hardware faults. The camera frame at
+`analysis/native-cutover/diagnostics/rm2-handoff-black-white-05b3503/02-ink-lab-camera.jpg`
+was dramatically cleaner than the white-only attempt, but Motion Lab's
+vertical stress pattern remained faintly visible in Ink Lab's otherwise
+uniform drawing field. Native screenshots contained no such structure. This
+candidate is rejected optically rather than by timing, trigger, or logical
+content.
+
+### RM2 round 13: two bounded black/white rail cycles
+
+The common ghost-control path's successful bleach uses two black/white cycles,
+so the next candidate completes that same physical conditioning inside the
+already promoted presenter job: recorded source to black, black to white,
+white to black, black to white, then complete mode-2 content from white. At
+the measured 24 C table this is `10 + 10 + 10 + 10 + 38 = 78` phases.
+
+The first black rail selects `black | recorded-old`; the second selects the
+constant `black | white`. Both white rails select `white | black`, and content
+selects `target-new | white`. All five stages reuse the one transition-key
+vector and a 256-byte stack remap. No second panel buffer, allocation, surface
+walk, Flutter frame, lifecycle transition, setup path, or app-switch path is
+introduced. Existing safe-idle and stable-power checks remain between every
+stage, and failure before final content cannot commit logical state.
+
+Focused coverage derives all 78 phases from the bound WBF, observes drive in
+both rail cycles plus final content outside the originally requested partial
+damage, proves the sequence occurs exactly once, and retains the flash-free
+exact 1x1 same-surface proof. All 81 RM2 native tests pass. Physical acceptance
+remains pending an exact clean release and the same Motion-to-Ink camera test.
 
 ### Lifecycle acceptance: reject early external wakes
 

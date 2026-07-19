@@ -2749,7 +2749,7 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
-     FirstWarmHandoffPartialReplayPromotesAndBleachesExactlyOnce) {
+     FirstWarmHandoffPartialReplayPromotesAndBleachesTwoCyclesExactlyOnce) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -2833,27 +2833,27 @@ TEST(LcdifTconBackend,
   ASSERT_EQ(incoming.submit(&request), kPlutoStatusOk);
   ASSERT_EQ(incoming.wait_idle(5000), kPlutoStatusOk);
   ASSERT_EQ(syscalls.panned_phase_cells.size(),
-            expected_precondition.phase_count * 2U +
+            expected_precondition.phase_count * 4U +
                 expected_content.phase_count);
-  EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin(),
-                          syscalls.panned_phase_cells.begin() +
-                              expected_precondition.phase_count,
-                          [](const std::array<std::uint16_t, 3> &samples) {
-                            return samples[0] != 0;
-                          }));
-  EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin() +
-                              expected_precondition.phase_count,
-                          syscalls.panned_phase_cells.begin() +
-                              expected_precondition.phase_count * 2U,
-                          [](const std::array<std::uint16_t, 3> &samples) {
-                            return samples[0] != 0;
-                          }));
-  EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin() +
-                              expected_precondition.phase_count * 2U,
-                          syscalls.panned_phase_cells.end(),
-                          [](const std::array<std::uint16_t, 3> &samples) {
-                            return samples[0] != 0;
-                          }));
+  const auto stage_drove_sample = [&](std::size_t begin, std::size_t end) {
+    return std::any_of(syscalls.panned_phase_cells.begin() +
+                           static_cast<std::ptrdiff_t>(begin),
+                       syscalls.panned_phase_cells.begin() +
+                           static_cast<std::ptrdiff_t>(end),
+                       [](const std::array<std::uint16_t, 3> &samples) {
+                         return samples[0] != 0;
+                       });
+  };
+  const std::size_t precondition_phases = expected_precondition.phase_count;
+  EXPECT_TRUE(stage_drove_sample(0, precondition_phases));
+  EXPECT_TRUE(
+      stage_drove_sample(precondition_phases, precondition_phases * 2U));
+  EXPECT_TRUE(
+      stage_drove_sample(precondition_phases * 2U, precondition_phases * 3U));
+  EXPECT_TRUE(
+      stage_drove_sample(precondition_phases * 3U, precondition_phases * 4U));
+  EXPECT_TRUE(stage_drove_sample(precondition_phases * 4U,
+                                 syscalls.panned_phase_cells.size()));
 
   syscalls.panned_phase_cells.clear();
   damage = {
@@ -2875,8 +2875,9 @@ TEST(LcdifTconBackend,
   incoming.stop();
   const std::string diagnostics = capture.finish();
   EXPECT_TRUE(diagnostics.find("warm handoff full-panel replay completed "
-                               "black/white mode-6 precondition then complete "
-                               "mode-2 content") != std::string::npos);
+                               "two black/white mode-6 precondition cycles "
+                               "then complete mode-2 content") !=
+              std::string::npos);
   EXPECT_TRUE(diagnostics.find("handoff_cleanup_jobs=1") != std::string::npos);
 }
 
