@@ -201,13 +201,15 @@ strong semantics: a single `{0,0,1,1}` `Fast` request consumes the handoff
 marker without a flash. Any other first request is promoted inside that
 backend to one exact full-panel `Text` job. A physical RM2 test rejected a
 white-only exit rail and one black/white cycle still left faint stress-pattern
-residue. The promoted job therefore drives two mode-6 black/white cycles:
-recorded source to black, black to white, white to black, black to white, then
-mode-2 content from white to the incoming target. A 256-byte phase-local LUT
-remap reuses the existing transition-key vector for all five stages, so there
-is no second Flutter frame, full-surface traversal, allocation, or copy.
-Safe-idle and stable-power boundaries separate the rails; logical state
-commits only after content. The next job returns to ordinary unchanged-cell
+residue. Two cycles passed the initial controlled transition but later formal
+testing after repeated high-duty Motion Lab runs exposed visible retained
+stripes. The promoted job therefore drives three mode-6 black/white cycles:
+recorded source to black, alternating white and black rails, ending on white,
+then mode-2 content from white to the incoming target. A 256-byte phase-local
+LUT remap reuses the existing transition-key vector for all seven stages, so
+there is no second Flutter frame, full-surface traversal, allocation, or copy.
+Safe-idle and stable-power boundaries separate the rails; logical state commits
+only after content. The next job returns to ordinary unchanged-cell
 suppression. This is a panel-specific waveform sequence below the common
 lifecycle boundary, not a separate app-switch flow.
 

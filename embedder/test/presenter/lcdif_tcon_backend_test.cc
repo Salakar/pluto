@@ -2858,7 +2858,7 @@ TEST(LcdifTconBackend,
   ASSERT_EQ(incoming.submit(&request), kPlutoStatusOk);
   ASSERT_EQ(incoming.wait_idle(5000), kPlutoStatusOk);
   ASSERT_EQ(syscalls.panned_phase_cells.size(),
-            expected_precondition.phase_count * 4U +
+            expected_precondition.phase_count * 6U +
                 expected_content.phase_count);
   const auto stage_drove_sample = [&](std::size_t begin, std::size_t end) {
     return std::any_of(syscalls.panned_phase_cells.begin() +
@@ -2877,7 +2877,11 @@ TEST(LcdifTconBackend,
       stage_drove_sample(precondition_phases * 2U, precondition_phases * 3U));
   EXPECT_TRUE(
       stage_drove_sample(precondition_phases * 3U, precondition_phases * 4U));
-  EXPECT_TRUE(stage_drove_sample(precondition_phases * 4U,
+  EXPECT_TRUE(
+      stage_drove_sample(precondition_phases * 4U, precondition_phases * 5U));
+  EXPECT_TRUE(
+      stage_drove_sample(precondition_phases * 5U, precondition_phases * 6U));
+  EXPECT_TRUE(stage_drove_sample(precondition_phases * 6U,
                                  syscalls.panned_phase_cells.size()));
 
   syscalls.panned_phase_cells.clear();
@@ -2900,7 +2904,7 @@ TEST(LcdifTconBackend,
   incoming.stop();
   const std::string diagnostics = capture.finish();
   EXPECT_TRUE(diagnostics.find("warm handoff full-panel replay completed "
-                               "two black/white mode-6 precondition cycles "
+                               "3 black/white mode-6 precondition cycles "
                                "then complete mode-2 content") !=
               std::string::npos);
   EXPECT_TRUE(diagnostics.find("handoff_cleanup_jobs=1") != std::string::npos);

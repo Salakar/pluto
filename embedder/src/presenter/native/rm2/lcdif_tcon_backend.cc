@@ -52,6 +52,12 @@ constexpr std::size_t kEncodeHistogramBuckets = 20'000;
 constexpr std::size_t kPanHistogramBuckets = 1024;
 constexpr std::uint64_t kPanHistogramBucketWidthUs = 32;
 constexpr int kMaximumBurstTemperatureMillidegrees = 45'000;
+// Repeated formal app-switch testing showed that two mode-6 rail cycles can
+// leave the high-duty Motion Lab pattern visible after the panel has already
+// accumulated stress across earlier runs. Three cycles remain one bounded
+// presenter job and add only one black/white pair; all stages reuse the
+// existing transition-key vector and phase-local LUT remap.
+constexpr std::uint32_t kHandoffPreconditionCycles = 3;
 
 static_assert(kHandoffEngineStride == 1408u);
 
@@ -2468,10 +2474,11 @@ private:
       if (completed_handoff_cleanup) {
         std::fprintf(
             stderr,
-            "lcdif_tcon: warm handoff full-panel replay completed two "
+            "lcdif_tcon: warm handoff full-panel replay completed %u "
             "black/white mode-%u precondition cycles then complete mode-%u "
             "content\n",
-            job.handoff_precondition_waveform.mode, job.waveform.mode);
+            kHandoffPreconditionCycles, job.handoff_precondition_waveform.mode,
+            job.waveform.mode);
       }
       if (callback != nullptr) {
         try {
@@ -2679,37 +2686,25 @@ private:
     };
 
     if (job.completes_handoff_cleanup) {
-      const PlutoStatus black_status = drive_stage(WaveformStage{
-          .waveform = &job.handoff_precondition_waveform,
-          .drive_lut = job.handoff_precondition_waveform.drive_lut,
-          .remap = TransitionRemap::kBlackFromRecordedSource,
-      });
-      if (black_status != kPlutoStatusOk) {
-        return black_status;
-      }
-      const PlutoStatus white_status = drive_stage(WaveformStage{
-          .waveform = &job.handoff_precondition_waveform,
-          .drive_lut = job.handoff_precondition_waveform.drive_lut,
-          .remap = TransitionRemap::kWhiteFromBlack,
-      });
-      if (white_status != kPlutoStatusOk) {
-        return white_status;
-      }
-      const PlutoStatus second_black_status = drive_stage(WaveformStage{
-          .waveform = &job.handoff_precondition_waveform,
-          .drive_lut = job.handoff_precondition_waveform.drive_lut,
-          .remap = TransitionRemap::kBlackFromWhite,
-      });
-      if (second_black_status != kPlutoStatusOk) {
-        return second_black_status;
-      }
-      const PlutoStatus second_white_status = drive_stage(WaveformStage{
-          .waveform = &job.handoff_precondition_waveform,
-          .drive_lut = job.handoff_precondition_waveform.drive_lut,
-          .remap = TransitionRemap::kWhiteFromBlack,
-      });
-      if (second_white_status != kPlutoStatusOk) {
-        return second_white_status;
+      for (std::uint32_t cycle = 0; cycle < kHandoffPreconditionCycles;
+           ++cycle) {
+        const PlutoStatus black_status = drive_stage(WaveformStage{
+            .waveform = &job.handoff_precondition_waveform,
+            .drive_lut = job.handoff_precondition_waveform.drive_lut,
+            .remap = cycle == 0 ? TransitionRemap::kBlackFromRecordedSource
+                                : TransitionRemap::kBlackFromWhite,
+        });
+        if (black_status != kPlutoStatusOk) {
+          return black_status;
+        }
+        const PlutoStatus white_status = drive_stage(WaveformStage{
+            .waveform = &job.handoff_precondition_waveform,
+            .drive_lut = job.handoff_precondition_waveform.drive_lut,
+            .remap = TransitionRemap::kWhiteFromBlack,
+        });
+        if (white_status != kPlutoStatusOk) {
+          return white_status;
+        }
       }
     }
     const std::span<const std::uint8_t> content_lut =
