@@ -125,6 +125,17 @@ RGB565-to-optical table removes repeated component arithmetic from handoff state
 construction. The table is deterministic and exhaustively compared with the
 arithmetic definition in tests.
 
+Physical RM1 testing showed that a logically correct `GC16_FAST`/PARTIAL
+cross-app replay can leave a high-contrast previous app visible on glass. An
+accepted warm handoff therefore carries one presenter-local cleanup decision.
+The renderer's exact `{0,0,1,1}` Fast same-surface proof consumes it without a
+flash. Any other first physical request is promoted inside the backend to one
+full-panel GC16/FULL update using the already-rendered complete input surface.
+The existing mirror supplies rollback authority if the kernel rejects that
+submission. Later requests retain the ordinary regional DU or GC16_FAST
+policy, including pen-truth updates. This is a panel-specific waveform choice
+below the common handoff and scheduler boundary, not another app-switch flow.
+
 ### reMarkable 2
 
 RM2 exposes LCDIF scanout rather than the EPDC update API. Pluto reads the exact

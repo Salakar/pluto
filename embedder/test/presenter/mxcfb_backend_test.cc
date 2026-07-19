@@ -1222,10 +1222,134 @@ TEST(MxcfbBackend,
   ASSERT_EQ(incoming.submit(&next.request), kPlutoStatusOk);
   EXPECT_NE(::access(path.get().c_str(), F_OK), 0);
   ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(1));
+  const auto updates = incoming_syscalls.sent_updates();
+  ASSERT_EQ(updates.size(), 1U);
+  EXPECT_EQ(updates[0].update_region.top, 0U);
+  EXPECT_EQ(updates[0].update_region.left, 0U);
+  EXPECT_EQ(updates[0].update_region.width, kWidth);
+  EXPECT_EQ(updates[0].update_region.height, kHeight);
+  EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeGc16);
+  EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
+  EXPECT_EQ(updates[0].temperature, uapi::kTemperatureUseAmbient);
+  // Promotion replays the complete already-rendered surface, not just the
+  // scheduler's first regional fragment.
+  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
+            source_byte(next, 200U, 200U));
   incoming_syscalls.complete_one();
   ASSERT_TRUE(callbacks.wait_for_count(1));
   EXPECT_TRUE(callbacks.frame_ids() == std::vector<std::uint64_t>({92}));
   EXPECT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
+  const auto telemetry = incoming.damage_telemetry();
+  EXPECT_EQ(telemetry.accepted_updates, 1U);
+  EXPECT_EQ(telemetry.requested_pixels, 4U);
+  EXPECT_EQ(telemetry.driven_pixels,
+            static_cast<std::uint64_t>(kWidth) * kHeight);
+  EXPECT_EQ(telemetry.handoff_cleanup_jobs, 1U);
+}
+
+TEST(MxcfbBackend,
+     ExactSameSurfaceProbeStaysRegionalAndSuppressesLaterHandoffFlash) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 210, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               220, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+
+  OwnedRequest proof({{{.x = 0, .y = 0, .width = 1, .height = 1}}},
+                     kPlutoRefreshFast, 93);
+  ASSERT_EQ(incoming.submit(&proof.request), kPlutoStatusOk);
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(1));
+  auto updates = incoming_syscalls.sent_updates();
+  ASSERT_EQ(updates.size(), 1U);
+  EXPECT_EQ(updates[0].update_region.top, 0U);
+  EXPECT_EQ(updates[0].update_region.left, 0U);
+  EXPECT_EQ(updates[0].update_region.width, 1U);
+  EXPECT_EQ(updates[0].update_region.height, 1U);
+  EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeDirect);
+  EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModePartial);
+  incoming_syscalls.complete_one();
+  ASSERT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
+  EXPECT_EQ(incoming.damage_telemetry().handoff_cleanup_jobs, 0U);
+
+  OwnedRequest later({{{.x = 31, .y = 41, .width = 3, .height = 4}}},
+                     kPlutoRefreshUi, 94);
+  ASSERT_EQ(incoming.submit(&later.request), kPlutoStatusOk);
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(2));
+  updates = incoming_syscalls.sent_updates();
+  ASSERT_EQ(updates.size(), 2U);
+  EXPECT_EQ(updates[1].update_region.top, 41U);
+  EXPECT_EQ(updates[1].update_region.left, 31U);
+  EXPECT_EQ(updates[1].update_region.width, 3U);
+  EXPECT_EQ(updates[1].update_region.height, 4U);
+  EXPECT_EQ(updates[1].waveform_mode, uapi::kWaveformModeQuality);
+  EXPECT_EQ(updates[1].update_mode, uapi::kUpdateModePartial);
+  incoming_syscalls.complete_one();
+  ASSERT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
+  EXPECT_EQ(incoming.damage_telemetry().handoff_cleanup_jobs, 0U);
+}
+
+TEST(MxcfbBackend,
+     RejectedHandoffCleanupSendRollsBackFullSurfaceAndRetryStillCleans) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 230, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               240, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config();
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+  const std::vector<std::uint8_t> before = incoming_syscalls.mapped_storage;
+
+  OwnedRequest request({{{.x = 11, .y = 12, .width = 2, .height = 3}}},
+                       kPlutoRefreshUi, 95);
+  incoming_syscalls.send_error = EBUSY;
+  EXPECT_EQ(incoming.submit(&request.request), kPlutoStatusAgain);
+  EXPECT_TRUE(incoming.ready(kPlutoRefreshUi));
+  EXPECT_TRUE(incoming_syscalls.mapped_storage == before);
+  EXPECT_TRUE(incoming_syscalls.sent_updates().empty());
+  EXPECT_EQ(incoming.damage_telemetry().accepted_updates, 0U);
+
+  incoming_syscalls.send_error = 0;
+  ASSERT_EQ(incoming.submit(&request.request), kPlutoStatusOk);
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(1));
+  const auto updates = incoming_syscalls.sent_updates();
+  ASSERT_EQ(updates.size(), 1U);
+  EXPECT_EQ(updates[0].update_region.width, kWidth);
+  EXPECT_EQ(updates[0].update_region.height, kHeight);
+  EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeGc16);
+  EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
+  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
+            source_byte(request, 200U, 200U));
+  incoming_syscalls.complete_one();
+  ASSERT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
+  EXPECT_EQ(incoming.damage_telemetry().handoff_cleanup_jobs, 1U);
 }
 
 TEST(MxcfbBackend, GeneratedRgb565OpticalLutMatchesReferenceExhaustively) {
@@ -1617,6 +1741,23 @@ TEST(MxcfbBackend, ConsumedCandidateCannotReplayIntoAThirdPresenter) {
     claim.request.flags = kPlutoPresentFlagSparkle;
     ASSERT_EQ(consumer.submit(&claim.request), kPlutoStatusOk);
     ASSERT_NE(::access(path.get().c_str(), F_OK), 0);
+    EXPECT_TRUE(consumer_syscalls.sent_updates().empty());
+
+    // A maintenance no-op may consume the file claim but must not silently
+    // consume the optical cleanup owed by the first real cross-app replay.
+    OwnedRequest content({{{.x = 8, .y = 9, .width = 2, .height = 3}}},
+                         kPlutoRefreshUi, 94);
+    ASSERT_EQ(consumer.submit(&content.request), kPlutoStatusOk);
+    ASSERT_TRUE(consumer_syscalls.wait_for_wait_count(1));
+    const auto updates = consumer_syscalls.sent_updates();
+    ASSERT_EQ(updates.size(), 1U);
+    EXPECT_EQ(updates[0].update_region.width, kWidth);
+    EXPECT_EQ(updates[0].update_region.height, kHeight);
+    EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeGc16);
+    EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
+    consumer_syscalls.complete_one();
+    ASSERT_EQ(consumer.wait_idle(1000), kPlutoStatusOk);
+    EXPECT_EQ(consumer.damage_telemetry().handoff_cleanup_jobs, 1U);
     inherited_framebuffer = consumer_syscalls.mapped_storage;
     consumer.stop();
   }

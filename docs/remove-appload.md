@@ -1220,6 +1220,10 @@ Owners: legacy display, ARMv7, input.
 - Implement the mockable device seam, snapshot-mode presenter, damage-copy path,
   marker completion worker, health, lifecycle, and profile routing.
 - Capture/resolve the exact refresh-class waveform table.
+- Keep cross-app optical cleanup inside the RM1 presenter: preserve the exact
+  same-surface proof, but promote the first substantive post-handoff job to the
+  physically accepted full-panel cleanup tuple without adding another renderer
+  frame, lifecycle state, setup path, or app-switch flow.
 - Add RM1 evdev transforms, optional-capability behavior, and direct session
   ownership.
 - Build the native ARM release payload through the common supervisor root.

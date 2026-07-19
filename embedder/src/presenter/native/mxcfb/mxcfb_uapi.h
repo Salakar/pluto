@@ -108,10 +108,11 @@ inline constexpr std::uint32_t kFramebufferRotateClockwise = 1;
 
 inline constexpr std::uint32_t kUpdateModePartial = 0;
 inline constexpr std::uint32_t kUpdateModeFull = 1;
-// Exact mode numbers observed from stock Xochitl on the accepted RM1 panel
-// firmware. Their names below describe Pluto's controlled bring-up candidates;
-// camera fixtures must still accept that policy on real glass.
+// Direct and quality are the exact tuples observed from stock Xochitl on the
+// accepted RM1 panel firmware. GC16 is the canonical full-cleanup entry in the
+// same RM1 waveform table; camera fixtures still decide Pluto's final policy.
 inline constexpr std::uint32_t kWaveformModeDirect = 1;
+inline constexpr std::uint32_t kWaveformModeGc16 = 2;
 inline constexpr std::uint32_t kWaveformModeQuality = 3;
 inline constexpr std::uint32_t kWaveformModeAuto = 257;
 inline constexpr std::int32_t kTemperatureRemarkableDraw = 24;

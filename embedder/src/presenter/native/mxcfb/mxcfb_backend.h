@@ -40,6 +40,7 @@ struct MxcfbDamageTelemetry {
   std::uint64_t regional_full_quality_updates = 0;
   std::uint64_t legacy_full_screen_pixels_avoided = 0;
   std::uint64_t max_amplification_milli = 0;
+  std::uint64_t handoff_cleanup_jobs = 0;
 };
 
 // Conservative first native backend for the reMarkable 1 kernel EPDC path.

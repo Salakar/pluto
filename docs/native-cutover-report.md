@@ -113,6 +113,44 @@ app does not acknowledge native-resource quiescence.
 Final on-device CPU, RSS, zero-CPU stopped-process, switch latency, and optical
 transition measurements will be recorded in the release table below.
 
+### RM1 round 4: cross-app pigment cleanup
+
+Exact release `6d7009e97da51141f08af0fb1d9581c5366bdb43`, universal
+manifest SHA-256
+`f3c59ea8ee2398b2908040d2b4675301ab70fcc343ac37f5077b4c312af3593a`,
+completed all ten scripted RM1 interaction stages. Counter, Motion Lab, Ink
+Lab, Validation Lab, Ink, the real switcher, a PID-bound deterministic Ink
+stroke, and Home all ran as release AOT under the common supervisor. Native
+screenshots were correct, the Ink stroke changed decoded pixels, and the
+process/CPU/RSS/system-memory evidence bundle passed.
+
+The release is nevertheless rejected on RM1. The camera frames under
+`analysis/native-cutover/final-acceptance/6d7009e/rm1/` showed Motion Lab's
+high-contrast vertical pattern and spinner retained across the following Ink
+Lab and Validation Lab surfaces while their paired native screenshots were
+clean. The objective visual verifier rejected the bundle with a `-0.098`
+correct-pair discrimination margin. This proves that lifecycle, rendering, and
+framebuffer state were correct while the existing RM1 `GC16_FAST`/PARTIAL
+cross-app update was not a sufficient pigment cleanup.
+
+The bounded replacement stays inside the RM1 presenter seam. After an accepted
+handoff, the renderer's exact `{0,0,1,1}` Fast same-surface proof remains a
+regional DU/PARTIAL request and consumes the one-shot decision without a
+flash. Any other first physical request is promoted to one exact full-panel
+GC16/FULL update at ambient temperature using the request's already-rendered
+complete surface. Ordinary UI, Text, Full, and pen-truth requests keep their
+existing exact regional policy.
+
+The promotion adds no Flutter frame, scheduler branch, public lifecycle state,
+app buffer, setup path, or install flow. It reuses the required RM1
+framebuffer mirror for rejection rollback. Focused tests prove complete-surface
+copy beyond the original damage, exact-once cleanup, same-surface suppression,
+Sparkle no-op handling, EBUSY rollback and retry, claim-loss-before-write, and
+unchanged regional Full/pen behavior. All 64 RM1 tests pass normally and under
+ASan/UBSan and TSan; the ARMv7 hard-float ABI gate passes. The policy remains a
+camera-gated candidate until the same Motion-to-Ink transition succeeds on the
+physical RM1.
+
 ### RM2 round 1: select tables on the Cortex-A7
 
 The first exact-device encoder sweep compared the source-color conversion,
@@ -527,8 +565,25 @@ stage, and failure before final content cannot commit logical state.
 Focused coverage derives all 78 phases from the bound WBF, observes drive in
 both rail cycles plus final content outside the originally requested partial
 damage, proves the sequence occurs exactly once, and retains the flash-free
-exact 1x1 same-surface proof. All 81 RM2 native tests pass. Physical acceptance
-remains pending an exact clean release and the same Motion-to-Ink camera test.
+exact 1x1 same-surface proof. All 81 RM2 native tests pass.
+
+Exact clean release `6d7009e97da51141f08af0fb1d9581c5366bdb43`, universal
+manifest SHA-256
+`f3c59ea8ee2398b2908040d2b4675301ab70fcc343ac37f5077b4c312af3593a`,
+then passed the controlled physical Motion-to-Ink test. The camera video and
+paired stills under
+`analysis/native-cutover/diagnostics/rm2-handoff-two-cycle-6d7009e/` show the
+high-contrast Motion Lab source, two black/white cycles, and a clean Ink Lab
+target with no visible source stripes. Visible transition began at about
+`4.10 s` and was stable by about `5.10 s`.
+
+The exact activation logged one cleanup job and the expected two mode-6
+black/white cycles followed by complete mode-2 content. Across three jobs it
+recorded 126 phases, encode p50 `7.727 ms`, p95 `7.812 ms`, p99 `7.897 ms`,
+maximum `7.913 ms`, zero missed phases, zero underflows, zero hardware faults,
+and no buffer growth. This accepts the presenter-local optical sequence; the
+formal same-revision all-device table remains pending until RM1 and Move also
+pass.
 
 ### Lifecycle acceptance: reject early external wakes
 
