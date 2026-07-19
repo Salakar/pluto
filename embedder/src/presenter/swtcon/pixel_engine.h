@@ -17,6 +17,7 @@
 #include "presenter/swtcon/swtcon_temperature.h"
 #include "presenter/swtcon/swtcon_waveform.h"
 #include "presenter/swtcon/xochitl_history_state.h"
+#include "presenter/swtcon/xochitl_parallel.h"
 
 namespace pluto::swtcon {
 
@@ -34,6 +35,20 @@ class RowEmitter {
 public:
   virtual ~RowEmitter() = default;
   virtual void emit_row(int row, const PixelOp *ops, std::size_t count) = 0;
+  // True only when disjoint rows may be emitted concurrently during one
+  // begin/end frame. The production PhaseEmitter opts in for its write-once
+  // row-stage path; test/capture emitters remain serial by default.
+  virtual bool supports_parallel_rows() const noexcept { return false; }
+  // Parallel implementations may defer shared telemetry until the owner has
+  // joined every disjoint row. Defaults preserve ordinary capture emitters.
+  virtual void emit_row_parallel(int row, const PixelOp *ops,
+                                 std::size_t count) {
+    emit_row(row, ops, count);
+  }
+  virtual void finish_parallel_rows(std::uint64_t rows, std::uint64_t ops) {
+    (void)rows;
+    (void)ops;
+  }
 };
 
 // Hygiene hook points: the A2/DU HygieneFsm plugs in here at the next
@@ -474,11 +489,12 @@ struct PixelEngineHandoffState {
 // accounting on every emitted op; full-field band amortization; per-row
 // active counts + global clip with row-skip.
 //
-// Thread ownership: engine-thread confined — admit(), advance(),
-// pause() and every accessor run on one thread; no internal locking. The
-// CORE stage is single-step tickable and thread-free by construction:
-// advance() is one scan frame, pause() is one missed deadline. All planes
-// are pre-allocated at configure(); the advance loop allocates nothing.
+// Thread ownership: public state remains engine-thread confined — admit(),
+// advance(), pause() and every accessor run on one owner thread. For a large
+// ordinary sweep, advance() may lend disjoint tile-row bands to bounded
+// compute helpers and joins them before returning; mapped work and small/pen
+// regions stay serial. All planes and per-stripe scratch are pre-allocated at
+// configure(), so the phase loop performs no pixel-buffer allocation.
 class PixelEngine final {
 public:
   static constexpr std::uint8_t kFnumIdle = 0xff;
@@ -748,6 +764,8 @@ private:
     MappedState state = MappedState::kQueued;
     bool ever_emitted = false;
     bool reconcile_invalidated = false;
+    bool uniform_phase = false;
+    std::uint8_t uniform_phase_cursor = 0;
     std::uint32_t active_lanes = 0;
     std::vector<std::uint8_t> fnum;
     // Safe ledger backing for mapper guard lanes outside the 960x1696 wire
@@ -907,19 +925,20 @@ private:
   std::int32_t *sink_impulse_ = nullptr; // borrowed (impulse summary)
   std::uint8_t *sink_drive_ = nullptr;
 
-  // Pre-allocated advance-loop scratch (no per-frame heap): sized to one
-  // full row at configure(); the sweep kernels append through raw cursors.
-  std::vector<PixelOp> row_ops_;
-  // MappedSweep's terminal marks are per-call scratch: PixelEngine consumes
-  // only the returned completion count, never the individual bytes. Reuse one
-  // row-wide plane instead of allocating one byte per mapped lane.
-  std::vector<std::uint8_t> mapped_terminal_scratch_;
-  std::vector<std::uint32_t> completed_tiles_;
+  // Pre-allocated advance-loop scratch (no per-frame pixel-buffer heap):
+  // one full row per bounded compute stripe. Sweep kernels append through
+  // raw cursors; disjoint tile-row bands never share a row buffer.
+  static constexpr std::size_t kMaxSweepStripes = 3;
+  std::array<std::vector<PixelOp>, kMaxSweepStripes> stripe_row_ops_;
+  std::array<std::vector<std::uint32_t>, kMaxSweepStripes>
+      stripe_completed_tiles_;
   // Per-tile-row-band sweep invariants (advance() hot loop): the pinned
   // LUT record and renorm flag of each tile column, cached once per band
   // instead of per (row, tile) segment. Sized tile_cols_ at configure().
-  std::vector<const LutRecord *> band_records_;
-  std::vector<std::uint8_t> band_renorm_;
+  std::array<std::vector<const LutRecord *>, kMaxSweepStripes>
+      stripe_band_records_;
+  std::array<std::vector<std::uint8_t>, kMaxSweepStripes> stripe_band_renorm_;
+  xochitl_parallel::PersistentComputePair sweep_compute_pair_;
 };
 
 } // namespace pluto::swtcon

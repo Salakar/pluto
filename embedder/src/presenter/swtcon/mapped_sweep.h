@@ -33,8 +33,11 @@ struct MappedSweepArgs {
   std::uint8_t* fnum = nullptr;
   // Per-lane signed DC ledger, maintained with saturating charge.
   std::int8_t* dc = nullptr;
-  // Per-call completion marks.  Every lane in the segment is overwritten:
-  // one exactly when that active lane finishes this call, zero otherwise.
+  // Optional per-call completion marks. When non-null, every lane in the
+  // segment is overwritten: one exactly when that active lane finishes this
+  // call, zero otherwise. PixelEngine consumes only MappedSweepResult's
+  // completion count and passes null, avoiding a throwaway full-panel write
+  // on every phase.
   std::uint8_t* terminal = nullptr;
 
   int x0 = 0;
@@ -51,6 +54,10 @@ struct MappedSweepArgs {
   const std::int8_t* impulse_map = nullptr;
   // Non-negative symmetric clamp for the DC plane.
   std::int8_t dc_cap = 0;
+  // >=0 means every lane in this call shares this phase and `fnum` may be
+  // null. Full unmasked mapper journals use one operation-level cursor,
+  // avoiding a redundant byte load+store per panel lane per phase.
+  int uniform_phase = -1;
 };
 
 struct MappedSweepResult {

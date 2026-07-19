@@ -2694,8 +2694,7 @@ TEST(PixelEngineMappedTest,
   ASSERT_TRUE(h.engine.admit_mapped(mapped_request(&history, operation),
                                     &admitted));
   EXPECT_EQ(h.engine.mapped_guard_storage_bytes(), guard_lanes);
-  EXPECT_EQ(h.engine.mapped_runtime_lane_storage_bytes(),
-            execution_lanes + guard_lanes);
+  EXPECT_EQ(h.engine.mapped_runtime_lane_storage_bytes(), guard_lanes);
   EXPECT_LT(h.engine.mapped_guard_storage_bytes(), execution_lanes);
 
   CaptureEmitter capture;

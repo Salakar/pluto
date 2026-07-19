@@ -271,6 +271,54 @@ TEST(MappedSweepDispatch, UsesScalarContractOnNonNeonHosts) {
   EXPECT_EQ(op.code, 6);
   EXPECT_EQ(state.terminal[0], 1);
 }
+
+TEST(MappedSweepUniformPhase, MatchesPerLaneCursorMidSequenceAndTerminal) {
+  constexpr int kCount = 954;
+  constexpr int kPhaseCount = 128;
+  for (const int phase : {37, kPhaseCount - 1}) {
+    State reference;
+    reference.phase_count = kPhaseCount;
+    reference.x0 = 3;
+    reference.transitions.resize(kCount);
+    reference.fnum.assign(kCount, static_cast<std::uint8_t>(phase));
+    reference.dc.resize(kCount);
+    reference.terminal.assign(kCount, 0xa5u);
+    reference.codes.resize(static_cast<std::size_t>(kPhaseCount) *
+                           kWaveformMatrixCells);
+    reference.impulse_map = {0, -1, 1, -2, 2, -3, 3, 0};
+    for (int lane = 0; lane < kCount; ++lane) {
+      reference.transitions[static_cast<std::size_t>(lane)] =
+          static_cast<std::uint16_t>((lane * 29 + 17) & 1023);
+      reference.dc[static_cast<std::size_t>(lane)] =
+          static_cast<std::int8_t>((lane % 17) - 8);
+    }
+    for (std::size_t index = 0; index < reference.codes.size(); ++index) {
+      reference.codes[index] = static_cast<std::uint8_t>((index * 13 + 5) & 7u);
+    }
+
+    State uniform = reference;
+    std::vector<MappedPixelOp> reference_ops(kCount);
+    std::vector<MappedPixelOp> uniform_ops(kCount);
+    const MappedSweepResult expected =
+        mapped_sweep_scalar(reference.args(), reference_ops.data());
+    MappedSweepArgs uniform_args = uniform.args();
+    uniform_args.fnum = nullptr;
+    uniform_args.uniform_phase = phase;
+    const MappedSweepResult actual =
+        mapped_sweep(uniform_args, uniform_ops.data());
+
+    EXPECT_EQ(actual.emitted, expected.emitted);
+    EXPECT_EQ(actual.completed, expected.completed);
+    EXPECT_EQ(actual.saturations, expected.saturations);
+    EXPECT_EQ(actual.impulse, expected.impulse);
+    EXPECT_EQ(actual.drove, expected.drove);
+    EXPECT_TRUE(uniform.dc == reference.dc);
+    EXPECT_TRUE(uniform.terminal == reference.terminal);
+    EXPECT_EQ(std::memcmp(reference_ops.data(), uniform_ops.data(),
+                          expected.emitted * sizeof(MappedPixelOp)),
+              0);
+  }
+}
 #endif
 
 }  // namespace
