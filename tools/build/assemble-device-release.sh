@@ -104,10 +104,14 @@ case "$OUTPUT" in
     ;;
 esac
 
-for input in "$SLICE_WORKER" "$MANIFEST_TOOL" "$PACKAGES"; do
+for input in "$SLICE_WORKER" "$MANIFEST_TOOL"; do
   [[ -f "$input" ]] || die "missing release input: $input"
 done
-[[ -x "$DART" ]] || die "missing pinned Dart SDK; run tools/setup/setup.sh"
+if ((DRY_RUN == 0)); then
+  [[ -f "$PACKAGES" ]] ||
+    die "CLI dependencies are missing; run tools/setup/setup.sh"
+  [[ -x "$DART" ]] || die "missing pinned Dart SDK; run tools/setup/setup.sh"
+fi
 
 REVISION="$(git -C "$ROOT" rev-parse --verify HEAD)"
 [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || die "could not resolve a full Git revision"

@@ -239,7 +239,34 @@ ARM_STANDARD_IDS="$(printf '%s\n' "$ARM_STANDARD_DRY_RUN" |
   <(printf '%s\n' "$ARM_STANDARD_IDS"))" ]] ||
   fail "linux-arm selected an app unavailable on linux-arm64"
 
-RELEASE_DRY_RUN="$(bash "$RELEASE_SCRIPT" --dry-run)"
+RELEASE_FIXTURE="$TMP/release-fixture"
+install -d \
+  "$RELEASE_FIXTURE/tools/build" \
+  "$RELEASE_FIXTURE/tools/pluto/pins" \
+  "$RELEASE_FIXTURE/tools/pluto/tool"
+RELEASE_FIXTURE="$(cd "$RELEASE_FIXTURE" && pwd)"
+RELEASE_FIXTURE_SCRIPT="$RELEASE_FIXTURE/tools/build/assemble-device-release.sh"
+MISSING_RELEASE_SDK="$RELEASE_FIXTURE/missing-sdk"
+install -m 0755 "$RELEASE_SCRIPT" "$RELEASE_FIXTURE_SCRIPT"
+install -m 0755 "$PAYLOAD_SCRIPT" \
+  "$RELEASE_FIXTURE/tools/build/assemble-device-payload.sh"
+install -m 0644 "$ROOT/tools/pluto/pins/flutter.version" \
+  "$RELEASE_FIXTURE/tools/pluto/pins/flutter.version"
+install -m 0644 "$ROOT/tools/pluto/tool/write_release_manifest.dart" \
+  "$RELEASE_FIXTURE/tools/pluto/tool/write_release_manifest.dart"
+git -C "$RELEASE_FIXTURE" init -q
+git -C "$RELEASE_FIXTURE" config user.name "Pluto Test"
+git -C "$RELEASE_FIXTURE" config user.email "pluto-test@example.invalid"
+git -C "$RELEASE_FIXTURE" add tools
+git -C "$RELEASE_FIXTURE" -c commit.gpgsign=false commit -qm "fixture"
+[[ ! -e "$MISSING_RELEASE_SDK" ]] ||
+  fail "release dry-run fixture unexpectedly contains a Flutter SDK"
+[[ ! -e "$RELEASE_FIXTURE/tools/pluto/.dart_tool/package_config.json" ]] ||
+  fail "release dry-run fixture unexpectedly contains CLI dependencies"
+RELEASE_DRY_RUN="$(
+  PLUTO_SDK="$MISSING_RELEASE_SDK" \
+    bash "$RELEASE_FIXTURE_SCRIPT" --dry-run
+)"
 assert_contains "$RELEASE_DRY_RUN" "embedder-device.sh --dry-run"
 assert_contains "$RELEASE_DRY_RUN" "embedder-device-arm.sh --dry-run"
 assert_contains "$RELEASE_DRY_RUN" "--target-platform linux-arm64"
@@ -250,10 +277,14 @@ assert_contains "$RELEASE_DRY_RUN" "targets/linux-arm"
 assert_contains "$RELEASE_DRY_RUN" "write_release_manifest.dart"
 assert_contains "$RELEASE_DRY_RUN" "write-release-revision"
 assert_contains "$RELEASE_DRY_RUN" "--git-revision"
+assert_contains "$RELEASE_DRY_RUN" \
+  "$MISSING_RELEASE_SDK/bin/cache/dart-sdk/bin/dart"
+assert_contains "$RELEASE_DRY_RUN" \
+  "$RELEASE_FIXTURE/tools/pluto/.dart_tool/package_config.json"
 if bash "$RELEASE_SCRIPT" --dry-run --codex-bin /tmp/codex >/dev/null 2>&1; then
   fail "universal release still accepts an alternate Codex binary"
 fi
-EXPECTED_RELEASE_NEXT="Universal release handoff: pluto provision --payload-dir $ROOT/build/pluto-release"
+EXPECTED_RELEASE_NEXT="Universal release handoff: pluto provision --payload-dir $RELEASE_FIXTURE/build/pluto-release"
 [[ "$(printf '%s\n' "$RELEASE_DRY_RUN" | tail -1)" == "$EXPECTED_RELEASE_NEXT" ]] ||
   fail "universal release dry run did not end with the common provision command"
 grep -q 'diff --quiet' "$RELEASE_SCRIPT" ||

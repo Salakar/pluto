@@ -53,3 +53,4 @@ agents_wip.txt
 tmp/
 build-mapped-*
 **/__pycache__/**
+tools/build/.DS_Store
