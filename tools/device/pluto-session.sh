@@ -1361,6 +1361,19 @@ discard_unauthorized_poweroff() {
   log "refused power off request outside active launcher power menu"
 }
 
+consume_idempotent_foreground_launch() {
+  [ "${APP_MODE:-}" = release ] &&
+    [ "${APP_WARM:-0}" -eq 1 ] &&
+    [ "${standby:-0}" -eq 0 ] &&
+    [ "${system_host:-none}" = none ] &&
+    [ -s "$CTL/launch" ] || return 1
+  requested_app=$(sed -n '1p' "$CTL/launch" 2>/dev/null || true)
+  [ "$requested_app" = "$APP_ID" ] || return 1
+  rm -f "$CTL/launch"
+  log "foreground launch is already active: $APP_ID"
+  return 0
+}
+
 monitor_foreground() {
   # Keep this name distinct from lifecycle helpers, which are POSIX-sh
   # functions and therefore share variable scope with their caller.
@@ -1377,6 +1390,13 @@ monitor_foreground() {
     fi
     handle_force_stop_request || true
     discard_unauthorized_poweroff
+    # `pluto run` may be repeated by automation after a partially completed
+    # workflow. An ordinary release request for the exact foreground app is a
+    # no-op: hibernating and resuming it would briefly withdraw the control
+    # socket while its old health receipt still looked current.
+    if consume_idempotent_foreground_launch; then
+      continue
+    fi
     if [ -s "$CTL/launch" ] || [ -s "$CTL/debug-launch" ] ||
        [ -f "$CTL/home" ] || [ -f "$CTL/standby" ] ||
        [ -s "$CTL/switcher" ] || [ -s "$CTL/status" ] ||

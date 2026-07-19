@@ -160,6 +160,22 @@ grep -q "hibernated 'dev.pluto.launcher' pid=$launcher_pid" \
 kill -0 "$launcher_pid" 2>/dev/null ||
   fail "launcher process did not remain resident"
 
+# Repeating an ordinary release launch for the foreground app must be an
+# idempotent no-op. In particular it must not publish an old healthy receipt
+# while temporarily withdrawing the app's control surface.
+printf 'dev.example.paper\n' > "$CTL/launch"
+wait_for_absent "$CTL/launch" ||
+  fail "same-app release request was not consumed"
+[ "$(cat "$CTL/embedder.pid" 2>/dev/null || true)" = "$paper_pid" ] ||
+  fail "same-app release request changed foreground ownership"
+[ "$(cat "$TMP/starts/dev.example.paper")" -eq 1 ] ||
+  fail "same-app release request restarted the foreground app"
+[ ! -f "$CTL/hibernated/$paper_pid" ] ||
+  fail "same-app release request hibernated the foreground app"
+grep -q "foreground launch is already active: dev.example.paper" \
+  "$TMP/session.log" ||
+  fail "same-app release request was not logged as idempotent"
+
 : > "$CTL/home"
 wait_for_value "$CTL/embedder.pid" "$launcher_pid" ||
   fail "launcher did not resume with its original pid"
