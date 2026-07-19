@@ -198,9 +198,15 @@ start_foreground_fixture() {
       publish_fixture_health 1 100
       (
         while [[ ! -f "$ACTIVE" ]]; do sleep 0.01; done
-        for sequence in 2 3 4 5 6; do
+        # Keep the synthetic renderer progressing for the whole service
+        # lifetime so a loaded runner cannot begin observing after a fixed
+        # publication burst has already ended.
+        sequence=2
+        while [[ -f "$ACTIVE" ]]; do
           sleep 0.1
+          [[ -f "$ACTIVE" ]] || break
           publish_fixture_health "$sequence" "$((sequence * 100))"
+          sequence=$((sequence + 1))
         done
       ) &
       FIXTURE_UPDATER_PID=$!
@@ -225,9 +231,14 @@ start_foreground_fixture() {
           while [[ ! -f "$ACTIVE" ]]; do sleep 0.01; done
           sleep 0.1
           printf '%s\n' "$FIXTURE_PID" > "$RUN/embedder.pid"
-          for sequence in 2 3 4 5 6; do
+          # The replacement remains healthy until the service is stopped;
+          # its evidence must not expire according to host scheduling speed.
+          sequence=2
+          while [[ -f "$ACTIVE" ]]; do
             sleep 0.1
+            [[ -f "$ACTIVE" ]] || break
             publish_fixture_health "$sequence" "$((sequence * 100))"
+            sequence=$((sequence + 1))
           done
         ) &
         FIXTURE_UPDATER_PID=$!
@@ -305,7 +316,7 @@ UNIT="$UNITS/pluto-session-once.service"
 grep -q '^stale-pid-retired-before-start$' "$EVENTS" ||
   fail "stale foreground PID receipt survived until transient service start"
 [ -f "$UNIT" ] || fail "runtime-only service was not published"
-[ "$(stat -f '%Lp' "$UNIT" 2>/dev/null || stat -c '%a' "$UNIT")" = 644 ] ||
+[ "$(stat -c '%a' "$UNIT" 2>/dev/null || stat -f '%Lp' "$UNIT")" = 644 ] ||
   fail "runtime-only service mode is not 0644"
 grep -q '^Conflicts=xochitl.service$' "$UNIT" ||
   fail "one-shot service does not own the current stock session"

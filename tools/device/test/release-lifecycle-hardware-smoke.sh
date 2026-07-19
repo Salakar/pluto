@@ -147,9 +147,20 @@ if [[ -n "$FFMPEG_OVERRIDE" && "$ALLOW_TEST_HOOKS" != 1 ]]; then
   echo "release lifecycle smoke: PLUTO_ACCEPTANCE_FFMPEG_BIN requires PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1" >&2
   exit 64
 fi
-PYTHON_BIN=/usr/bin/python3
-[[ -f "$PYTHON_BIN" && ! -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || {
-  echo "release lifecycle smoke: pinned Python interpreter is unavailable: $PYTHON_BIN" >&2
+PYTHON_ENTRY=/usr/bin/python3
+[[ -f "$PYTHON_ENTRY" && -x "$PYTHON_ENTRY" ]] || {
+  echo "release lifecycle smoke: pinned Python interpreter is unavailable: $PYTHON_ENTRY" >&2
+  exit 66
+}
+PYTHON_BIN="$("$PYTHON_ENTRY" -I -c \
+  'import os, sys; print(os.path.realpath(sys.executable))')" || {
+  echo "release lifecycle smoke: cannot resolve pinned Python interpreter: $PYTHON_ENTRY" >&2
+  exit 66
+}
+[[ "$PYTHON_BIN" == /* && "$PYTHON_BIN" != *$'\n'* &&
+  "$PYTHON_BIN" != *$'\t'* && -f "$PYTHON_BIN" &&
+  ! -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || {
+  echo "release lifecycle smoke: pinned Python interpreter resolved to an unsafe executable: $PYTHON_BIN" >&2
   exit 66
 }
 ACCOUNT_HOME="$("$PYTHON_BIN" -I -c \

@@ -145,13 +145,18 @@ grep -Fqx \
   fail "launcher log is not bounded by its process activation token"
 
 printf 'dev.example.paper\n' > "$CTL/launch"
-for _ in $(seq 1 120); do
+# The fixture deliberately acknowledges hibernation after 6.2 seconds to
+# exercise the widened supervisor envelope. Keep the outer assertion wider
+# than that deliberate delay instead of depending on loop overhead.
+for _ in $(seq 1 180); do
   paper_pid=$(cat "$CTL/embedder.pid" 2>/dev/null || true)
   [ -n "$paper_pid" ] && [ "$paper_pid" != "$launcher_pid" ] && break
   sleep 0.05
 done
 [ -n "${paper_pid:-}" ] && [ "$paper_pid" != "$launcher_pid" ] ||
   fail "paper app never became foreground"
+wait_for_file "$TMP/starts/dev.example.paper.ready" ||
+  fail "paper app did not install signal handlers"
 [ -f "$CTL/hibernated/$launcher_pid" ] ||
   fail "launcher did not acknowledge native-resource quiesce"
 grep -q "hibernated 'dev.pluto.launcher' pid=$launcher_pid" \
@@ -200,6 +205,8 @@ for _ in $(seq 1 120); do
 done
 [ -n "${third_pid:-}" ] && [ "$third_pid" != "$launcher_pid" ] ||
   fail "third app never became foreground"
+wait_for_file "$TMP/starts/dev.example.third.ready" ||
+  fail "third app did not install signal handlers"
 for _ in $(seq 1 120); do
   kill -0 "$paper_pid" 2>/dev/null || break
   sleep 0.05
