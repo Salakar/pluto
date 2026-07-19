@@ -48,11 +48,29 @@ OUTPUT_DIR="${PLUTO_CAMERA_ACCEPTANCE_DIR:-}"
 SETTLE_SECONDS="${PLUTO_CAMERA_ACCEPTANCE_SETTLE:-1}"
 EXPECTED_PROFILE="${PLUTO_ACCEPTANCE_PROFILE_ID:-}"
 LABEL="${1:-}"
-PYTHON_BIN=/usr/bin/python3
 
 die() {
   echo "camera acceptance stage: $*" >&2
   exit 2
+}
+
+canonical_python_interpreter() {
+  local candidate=/usr/bin/python3
+  local resolved
+
+  # Ubuntu exposes the fixed system Python path as a symlink. Execute that
+  # trusted absolute entry point only to identify its canonical interpreter,
+  # then use and attest the non-symlink target for the acceptance run.
+  [[ -x "$candidate" && -f "$candidate" ]] ||
+    die "pinned Python interpreter is unavailable: $candidate"
+  resolved="$("$candidate" -I -c \
+    'import os, sys; print(os.path.realpath(sys.executable))')" ||
+    die "cannot resolve pinned Python interpreter: $candidate"
+  [[ "$resolved" == /* && "$resolved" != *$'\t'* &&
+    "$resolved" != *$'\n'* && -x "$resolved" && -f "$resolved" &&
+    ! -L "$resolved" ]] ||
+    die "pinned Python interpreter resolved to an unsafe executable: $resolved"
+  printf '%s\n' "$resolved"
 }
 
 sha256_file() {
@@ -214,8 +232,7 @@ fi
   die "camera capture command is not an executable regular file: $CAPTURE"
 CAMERA_PROFILE_ID=not-applicable
 if [[ "$CAPTURE_MODE" == repository ]]; then
-  [[ -f "$PYTHON_BIN" && ! -L "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] ||
-    die "pinned Python interpreter is unavailable: $PYTHON_BIN"
+  PYTHON_BIN="$(canonical_python_interpreter)"
   case "$EXPECTED_PROFILE" in
     rm1 | rm2 | move) ;;
     *) die "PLUTO_ACCEPTANCE_PROFILE_ID must be rm1, rm2, or move" ;;

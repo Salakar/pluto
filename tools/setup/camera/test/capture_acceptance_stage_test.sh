@@ -176,8 +176,16 @@ toolchain_value() {
   printf '%s\n' "$TOOLCHAIN_ROWS" | awk -F '\t' -v key="$key" \
     '$1 == key {print $2}'
 }
+CANONICAL_SYSTEM_PYTHON="$(toolchain_value camera_python_binary)"
+[[ "$CANONICAL_SYSTEM_PYTHON" == /* &&
+  -f "$CANONICAL_SYSTEM_PYTHON" && ! -L "$CANONICAL_SYSTEM_PYTHON" &&
+  -x "$CANONICAL_SYSTEM_PYTHON" ]] ||
+  fail "system Python was not resolved to a canonical executable"
+if [[ -L /usr/bin/python3 && "$CANONICAL_SYSTEM_PYTHON" == /usr/bin/python3 ]]; then
+  fail "system Python symlink was not resolved before provenance"
+fi
 assert_provenance_value "$REPOSITORY_PROVENANCE" camera_python_binary \
-  "$(toolchain_value camera_python_binary)"
+  "$CANONICAL_SYSTEM_PYTHON"
 assert_provenance_value "$REPOSITORY_PROVENANCE" camera_python_sha256 \
   "$(toolchain_value camera_python_sha256)"
 assert_provenance_value "$REPOSITORY_PROVENANCE" camera_ffmpeg_binary \

@@ -67,7 +67,10 @@ canonical_executable() {
   [[ "$candidate" == /* && "$candidate" != *$'\t'* &&
     "$candidate" != *$'\n'* && -x "$candidate" && -f "$candidate" ]] ||
     die "$label must be an absolute executable regular file: $candidate"
-  [[ -x /usr/bin/python3 && -f /usr/bin/python3 && ! -L /usr/bin/python3 ]] ||
+  # Linux distributions commonly expose this fixed system path as a symlink.
+  # The resolved executable below must still be regular, executable, and
+  # non-symlinked before its bytes are admitted into acceptance provenance.
+  [[ -x /usr/bin/python3 && -f /usr/bin/python3 ]] ||
     die "pinned path resolver is unavailable: /usr/bin/python3"
   resolved="$(/usr/bin/python3 -I -c \
     'import os, sys; print(os.path.realpath(sys.argv[1]))' "$candidate")" ||
