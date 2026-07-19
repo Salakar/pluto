@@ -1174,8 +1174,10 @@ TEST(MxcfbBackend,
   BlockingMxcfbSyscalls incoming_syscalls;
   incoming_syscalls.mapped_storage = inherited_framebuffer;
   CallbackCapture callbacks;
+  constexpr std::uint32_t kFirstMarker =
+      std::numeric_limits<std::uint32_t>::max() - 1U;
   MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
-                               200, handoff_options(path.get()));
+                               kFirstMarker, handoff_options(path.get()));
   ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
   const PlutoPresenterConfig config = presenter_config(&callbacks);
   ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
@@ -1203,6 +1205,7 @@ TEST(MxcfbBackend,
   EXPECT_TRUE(incoming_syscalls.sent_updates().empty());
   EXPECT_TRUE(incoming_syscalls.waited_markers().empty());
   ASSERT_EQ(::access(path.get().c_str(), F_OK), 0);
+  incoming_syscalls.block_initial_completion();
 
   std::vector<std::uint8_t> snapshot_bytes(kTightStride * kHeight, 0);
   PlutoSurface snapshot{
@@ -1231,11 +1234,49 @@ TEST(MxcfbBackend,
   EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeGc16);
   EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
   EXPECT_EQ(updates[0].temperature, uapi::kTemperatureUseAmbient);
+  EXPECT_EQ(updates[0].update_marker, kFirstMarker);
   // Promotion replays the complete already-rendered surface, not just the
   // scheduler's first regional fragment.
   EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
             source_byte(next, 200U, 200U));
   incoming_syscalls.complete_one();
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(2));
+  EXPECT_TRUE(callbacks.frame_ids().empty());
+  auto staged_updates = incoming_syscalls.sent_updates();
+  ASSERT_EQ(staged_updates.size(), 2U);
+  EXPECT_EQ(staged_updates[1].update_region.width, kWidth);
+  EXPECT_EQ(staged_updates[1].update_region.height, kHeight);
+  EXPECT_EQ(staged_updates[1].waveform_mode, uapi::kWaveformModeDirect);
+  EXPECT_EQ(staged_updates[1].update_mode, uapi::kUpdateModeFull);
+  EXPECT_EQ(staged_updates[1].temperature, uapi::kTemperatureRemarkableDraw);
+  EXPECT_EQ(staged_updates[1].update_marker,
+            std::numeric_limits<std::uint32_t>::max());
+  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U], 0x00);
+  incoming_syscalls.complete_one();
+
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(3));
+  EXPECT_TRUE(callbacks.frame_ids().empty());
+  staged_updates = incoming_syscalls.sent_updates();
+  ASSERT_EQ(staged_updates.size(), 3U);
+  EXPECT_EQ(staged_updates[2].waveform_mode, uapi::kWaveformModeDirect);
+  EXPECT_EQ(staged_updates[2].update_mode, uapi::kUpdateModeFull);
+  EXPECT_EQ(staged_updates[2].temperature, uapi::kTemperatureRemarkableDraw);
+  EXPECT_EQ(staged_updates[2].update_marker, 1U);
+  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U], 0xff);
+  incoming_syscalls.complete_one();
+
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(4));
+  EXPECT_TRUE(callbacks.frame_ids().empty());
+  staged_updates = incoming_syscalls.sent_updates();
+  ASSERT_EQ(staged_updates.size(), 4U);
+  EXPECT_EQ(staged_updates[3].waveform_mode, uapi::kWaveformModeGc16);
+  EXPECT_EQ(staged_updates[3].update_mode, uapi::kUpdateModeFull);
+  EXPECT_EQ(staged_updates[3].temperature, uapi::kTemperatureUseAmbient);
+  EXPECT_EQ(staged_updates[3].update_marker, 2U);
+  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
+            source_byte(next, 200U, 200U));
+  incoming_syscalls.complete_one();
+
   ASSERT_TRUE(callbacks.wait_for_count(1));
   EXPECT_TRUE(callbacks.frame_ids() == std::vector<std::uint64_t>({92}));
   EXPECT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
@@ -1325,6 +1366,7 @@ TEST(MxcfbBackend,
   const PlutoPresenterConfig config = presenter_config();
   ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
   ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+  incoming_syscalls.block_initial_completion();
   const std::vector<std::uint8_t> before = incoming_syscalls.mapped_storage;
 
   OwnedRequest request({{{.x = 11, .y = 12, .width = 2, .height = 3}}},
@@ -1347,9 +1389,54 @@ TEST(MxcfbBackend,
   EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
   EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
             source_byte(request, 200U, 200U));
+  for (std::size_t wait_count = 2; wait_count <= 4; ++wait_count) {
+    incoming_syscalls.complete_one();
+    ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(wait_count));
+  }
   incoming_syscalls.complete_one();
   ASSERT_EQ(incoming.wait_idle(1000), kPlutoStatusOk);
   EXPECT_EQ(incoming.damage_telemetry().handoff_cleanup_jobs, 1U);
+}
+
+TEST(MxcfbBackend,
+     RejectedHandoffConditioningRailRestoresTargetAndFailsClosed) {
+  IsolatedHandoffPath path;
+  OwnedHandoffPayload staged_payload;
+  BlockingMxcfbSyscalls outgoing_syscalls;
+  std::vector<std::uint8_t> inherited_framebuffer;
+  {
+    MxcfbDisplayBackend outgoing(rm1_profile(), fake_device(&outgoing_syscalls),
+                                 245, handoff_options(path.get()));
+    draw_and_stage_handoff(&outgoing, &outgoing_syscalls, &staged_payload);
+    inherited_framebuffer = outgoing_syscalls.mapped_storage;
+    outgoing.stop();
+  }
+
+  BlockingMxcfbSyscalls incoming_syscalls;
+  incoming_syscalls.mapped_storage = inherited_framebuffer;
+  CallbackCapture callbacks;
+  MxcfbDisplayBackend incoming(rm1_profile(), fake_device(&incoming_syscalls),
+                               250, handoff_options(path.get()));
+  ASSERT_EQ(incoming.probe(rm1_profile()), kPlutoStatusOk);
+  const PlutoPresenterConfig config = presenter_config(&callbacks);
+  ASSERT_EQ(incoming.start(config), kPlutoStatusOk);
+  ASSERT_EQ(incoming.confirm_handoff(true), kPlutoStatusOk);
+  incoming_syscalls.block_initial_completion();
+
+  OwnedRequest request({{{.x = 11, .y = 12, .width = 2, .height = 3}}},
+                       kPlutoRefreshUi, 96);
+  ASSERT_EQ(incoming.submit(&request.request), kPlutoStatusOk);
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(1));
+  incoming_syscalls.send_error = EBUSY;
+  incoming_syscalls.complete_one();
+
+  EXPECT_EQ(incoming.wait_idle(1000), kPlutoStatusDeviceLost);
+  EXPECT_TRUE(callbacks.frame_ids().empty());
+  EXPECT_EQ(static_cast<int>(incoming.health().state),
+            static_cast<int>(NativeBackendHealthState::kDeviceLost));
+  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
+            source_byte(request, 200U, 200U));
+  EXPECT_EQ(incoming.damage_telemetry().handoff_cleanup_jobs, 0U);
 }
 
 TEST(MxcfbBackend, GeneratedRgb565OpticalLutMatchesReferenceExhaustively) {
@@ -1736,6 +1823,7 @@ TEST(MxcfbBackend, ConsumedCandidateCannotReplayIntoAThirdPresenter) {
     const PlutoPresenterConfig config = presenter_config();
     ASSERT_EQ(consumer.start(config), kPlutoStatusOk);
     ASSERT_EQ(consumer.confirm_handoff(true), kPlutoStatusOk);
+    consumer_syscalls.block_initial_completion();
     OwnedRequest claim({{{.x = 0, .y = 0, .width = 1, .height = 1}}},
                        kPlutoRefreshFast, 93);
     claim.request.flags = kPlutoPresentFlagSparkle;
@@ -1755,6 +1843,10 @@ TEST(MxcfbBackend, ConsumedCandidateCannotReplayIntoAThirdPresenter) {
     EXPECT_EQ(updates[0].update_region.height, kHeight);
     EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeGc16);
     EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
+    for (std::size_t wait_count = 2; wait_count <= 4; ++wait_count) {
+      consumer_syscalls.complete_one();
+      ASSERT_TRUE(consumer_syscalls.wait_for_wait_count(wait_count));
+    }
     consumer_syscalls.complete_one();
     ASSERT_EQ(consumer.wait_idle(1000), kPlutoStatusOk);
     EXPECT_EQ(consumer.damage_telemetry().handoff_cleanup_jobs, 1U);

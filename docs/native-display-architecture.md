@@ -125,16 +125,24 @@ RGB565-to-optical table removes repeated component arithmetic from handoff state
 construction. The table is deterministic and exhaustively compared with the
 arithmetic definition in tests.
 
-Physical RM1 testing showed that a logically correct `GC16_FAST`/PARTIAL
-cross-app replay can leave a high-contrast previous app visible on glass. An
-accepted warm handoff therefore carries one presenter-local cleanup decision.
-The renderer's exact `{0,0,1,1}` Fast same-surface proof consumes it without a
-flash. Any other first physical request is promoted inside the backend to one
-full-panel GC16/FULL update using the already-rendered complete input surface.
-The existing mirror supplies rollback authority if the kernel rejects that
-submission. Later requests retain the ordinary regional DU or GC16_FAST
-policy, including pen-truth updates. This is a panel-specific waveform choice
-below the common handoff and scheduler boundary, not another app-switch flow.
+Physical RM1 testing showed that both the ordinary `GC16_FAST`/PARTIAL replay
+and a single full-panel GC16/FULL replay can retain a high-contrast previous
+app on glass. An accepted warm handoff therefore carries one presenter-local
+cleanup decision. The renderer's exact `{0,0,1,1}` Fast same-surface proof
+consumes it without a flash. Any other first physical request is promoted
+inside the backend to a full-panel GC16/FULL admission using the
+already-rendered complete input surface. After that accepted marker retains
+the target in the existing exact mirror, the same completion job drives a
+full-panel DU black/white conditioning pair and restores the target with
+GC16/FULL. The app receives one completion only after the final marker.
+
+This order preserves rollback without allocating another 5.0 MiB target
+surface: a rejected initial admission restores the outgoing mirror, while a
+rejected temporary rail restores the already-accepted incoming target from
+that mirror. Later requests retain the ordinary regional DU or GC16_FAST
+policy, including pen-truth updates. This is a camera-gated panel waveform
+sequence below the common handoff and scheduler boundary, not another
+app-switch flow.
 
 ### reMarkable 2
 

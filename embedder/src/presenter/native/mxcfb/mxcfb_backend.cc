@@ -159,7 +159,7 @@ bool build_handoff_identity(const GeneratedDeviceProfile &profile,
   }
 
   HandoffFingerprint waveform;
-  waveform.add_string("rm1-mxcfb-gc16-full-handoff-cleanup-v1");
+  waveform.add_string("rm1-mxcfb-gc16-du-black-white-gc16-handoff-cleanup");
   waveform.add_u32(uapi::kWaveformModeDirect);
   waveform.add_u32(uapi::kWaveformModeGc16);
   waveform.add_u32(uapi::kWaveformModeQuality);
@@ -614,7 +614,6 @@ public:
     }
 
     std::lock_guard<std::mutex> admission_lock(admission_mutex_);
-    std::uint32_t marker = 0;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (lost_) {
@@ -630,14 +629,6 @@ public:
     if (consume_handoff_before_admission_locked() != kPlutoStatusOk) {
       return kPlutoStatusDeviceLost;
     }
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      if (lost_ || !started_ || !accepting_ || outstanding_) {
-        return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
-      }
-      outstanding_ = true;
-      marker = allocate_marker_locked();
-    }
 
     const PlutoRect &first_damage = request->damage[0];
     const bool exact_same_surface_probe =
@@ -652,6 +643,22 @@ public:
     const bool consumes_handoff_cleanup = handoff_cleanup_pending_;
     const bool completes_handoff_cleanup =
         consumes_handoff_cleanup && !exact_same_surface_probe;
+
+    std::uint32_t marker = 0;
+    std::array<std::uint32_t, 3> cleanup_markers{};
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (lost_ || !started_ || !accepting_ || outstanding_) {
+        return lost_ ? kPlutoStatusDeviceLost : kPlutoStatusAgain;
+      }
+      outstanding_ = true;
+      marker = allocate_marker_locked();
+      if (completes_handoff_cleanup) {
+        for (std::uint32_t &cleanup_marker : cleanup_markers) {
+          cleanup_marker = allocate_marker_locked();
+        }
+      }
+    }
 
     uapi::UpdateData update{};
     update.update_region =
@@ -719,6 +726,7 @@ public:
       pending_job_ = CompletionJob{
           .frame_id = request->frame_id,
           .marker = marker,
+          .cleanup_markers = cleanup_markers,
           .completes_handoff_cleanup = completes_handoff_cleanup,
       };
     }
@@ -1059,6 +1067,7 @@ private:
   struct CompletionJob {
     std::uint64_t frame_id;
     std::uint32_t marker;
+    std::array<std::uint32_t, 3> cleanup_markers;
     bool completes_handoff_cleanup;
   };
 
@@ -1490,6 +1499,65 @@ private:
     std::atomic_thread_fence(std::memory_order_release);
   }
 
+  uapi::UpdateData full_panel_update(std::uint32_t marker) const {
+    return {
+        .update_region =
+            {
+                .top = 0,
+                .left = 0,
+                .width = static_cast<std::uint32_t>(profile_.panel.width),
+                .height = static_cast<std::uint32_t>(profile_.panel.height),
+            },
+        .waveform_mode = 0,
+        .update_mode = 0,
+        .update_marker = marker,
+        .temperature = 0,
+        .flags = 0,
+        .dither_mode = 0,
+        .quantization_bits = 0,
+        .alternate_buffer = {},
+    };
+  }
+
+  void fill_visible_framebuffer(std::byte value) {
+    std::span<std::byte> framebuffer = device_->framebuffer();
+    const std::size_t framebuffer_stride =
+        device_->framebuffer_info().stride_bytes;
+    for (int row = 0; row < profile_.panel.height; ++row) {
+      std::fill_n(framebuffer.data() +
+                      static_cast<std::size_t>(row) * framebuffer_stride,
+                  tight_stride(), value);
+    }
+  }
+
+  PlutoStatus send_handoff_conditioning_rail(std::uint32_t marker,
+                                             std::byte value) {
+    uapi::UpdateData update = full_panel_update(marker);
+    apply_stock_update_policy(kPlutoRefreshFast, &update);
+    update.update_mode = uapi::kUpdateModeFull;
+
+    std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+    fill_visible_framebuffer(value);
+    std::atomic_thread_fence(std::memory_order_release);
+    const PlutoStatus status = device_->send_update(&update);
+    if (status != kPlutoStatusOk) {
+      // The initial target update was already accepted, so mirror_ is the
+      // authoritative target. A rejected conditioning rail must not leave its
+      // temporary solid color in mapped memory.
+      restore_surface_from_mirror();
+    }
+    return status;
+  }
+
+  PlutoStatus send_handoff_target_restore(std::uint32_t marker) {
+    uapi::UpdateData update = full_panel_update(marker);
+    apply_handoff_cleanup_policy(&update);
+
+    std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+    restore_surface_from_mirror();
+    return device_->send_update(&update);
+  }
+
   void record_damage_telemetry(const PlutoPresentRequest &request,
                                const uapi::UpdateRegion &region) {
     const std::uint64_t requested = requested_damage_pixels(request);
@@ -1605,8 +1673,31 @@ private:
       }
 
       bool collision = false;
-      const PlutoStatus status =
+      PlutoStatus status =
           device_->wait_for_update_complete(job.marker, &collision);
+      if (status == kPlutoStatusOk && job.completes_handoff_cleanup) {
+        status = send_handoff_conditioning_rail(job.cleanup_markers[0],
+                                                std::byte{0x00});
+        if (status == kPlutoStatusOk) {
+          status = device_->wait_for_update_complete(job.cleanup_markers[0],
+                                                     &collision);
+        }
+        if (status == kPlutoStatusOk) {
+          status = send_handoff_conditioning_rail(job.cleanup_markers[1],
+                                                  std::byte{0xff});
+        }
+        if (status == kPlutoStatusOk) {
+          status = device_->wait_for_update_complete(job.cleanup_markers[1],
+                                                     &collision);
+        }
+        if (status == kPlutoStatusOk) {
+          status = send_handoff_target_restore(job.cleanup_markers[2]);
+        }
+        if (status == kPlutoStatusOk) {
+          status = device_->wait_for_update_complete(job.cleanup_markers[2],
+                                                     &collision);
+        }
+      }
       PlutoPresentCompleteCallback callback = nullptr;
       void *callback_user_data = nullptr;
       if (status == kPlutoStatusOk) {
@@ -1635,8 +1726,10 @@ private:
       }
       idle_cv_.notify_all();
       if (status == kPlutoStatusOk && job.completes_handoff_cleanup) {
-        std::fprintf(stderr, "mxcfb: warm handoff full-panel GC16/FULL cleanup "
-                             "completed\n");
+        std::fprintf(
+            stderr,
+            "mxcfb: warm handoff full-panel GC16 target, DU black/white "
+            "conditioning, and GC16 target restore completed\n");
       }
       if (status != kPlutoStatusOk) {
         work_cv_.notify_all();

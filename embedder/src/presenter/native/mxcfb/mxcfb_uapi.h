@@ -110,7 +110,8 @@ inline constexpr std::uint32_t kUpdateModePartial = 0;
 inline constexpr std::uint32_t kUpdateModeFull = 1;
 // Direct and quality are the exact tuples observed from stock Xochitl on the
 // accepted RM1 panel firmware. GC16 is the canonical full-cleanup entry in the
-// same RM1 waveform table; camera fixtures still decide Pluto's final policy.
+// same RM1 waveform table. Presenter-local conditioning sequences compose only
+// these exact entries and remain camera-gated on the physical panel.
 inline constexpr std::uint32_t kWaveformModeDirect = 1;
 inline constexpr std::uint32_t kWaveformModeGc16 = 2;
 inline constexpr std::uint32_t kWaveformModeQuality = 3;

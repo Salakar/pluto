@@ -133,23 +133,45 @@ correct-pair discrimination margin. This proves that lifecycle, rendering, and
 framebuffer state were correct while the existing RM1 `GC16_FAST`/PARTIAL
 cross-app update was not a sufficient pigment cleanup.
 
-The bounded replacement stays inside the RM1 presenter seam. After an accepted
-handoff, the renderer's exact `{0,0,1,1}` Fast same-surface proof remains a
-regional DU/PARTIAL request and consumes the one-shot decision without a
-flash. Any other first physical request is promoted to one exact full-panel
-GC16/FULL update at ambient temperature using the request's already-rendered
-complete surface. Ordinary UI, Text, Full, and pen-truth requests keep their
-existing exact regional policy.
+Exact candidate
+`63c0e0fe0826dcc633ec59eb05caceaffe2cb596` then tested a single
+full-panel GC16/FULL admission at ambient temperature. The controlled
+Motion-to-Ink Lab run under
+`analysis/native-cutover/diagnostics/rm1-handoff-gc16-63c0e0f/` logged
+`warm handoff full-panel GC16/FULL cleanup completed`. It removed the strong
+spinner, box, and dark line but left faint Motion Lab vertical bands across
+Ink Lab's settled field while the paired native screenshot contained only the
+intended sparse canvas grid. This candidate is rejected optically.
 
-The promotion adds no Flutter frame, scheduler branch, public lifecycle state,
-app buffer, setup path, or install flow. It reuses the required RM1
-framebuffer mirror for rejection rollback. Focused tests prove complete-surface
-copy beyond the original damage, exact-once cleanup, same-surface suppression,
-Sparkle no-op handling, EBUSY rollback and retry, claim-loss-before-write, and
-unchanged regional Full/pen behavior. All 64 RM1 tests pass normally and under
-ASan/UBSan and TSan; the ARMv7 hard-float ABI gate passes. The policy remains a
-camera-gated candidate until the same Motion-to-Ink transition succeeds on the
-physical RM1.
+A diagnostic SIGHUP then exercised the existing three-cycle pixel reset on
+that same settled Ink Lab surface. Its black/white/content sequence completed
+in `3450 ms` and removed the bands. The before/after camera stills and video in
+the same evidence directory prove the bands were retained pigment rather than
+camera lighting. The result also proves that using the entire 3.45-second
+maintenance reset for every switch is unnecessary and too expensive.
+
+The next bounded candidate remains inside the RM1 presenter seam. After an
+accepted handoff, the renderer's exact `{0,0,1,1}` Fast same-surface proof
+remains a regional DU/PARTIAL request and consumes the one-shot decision
+without a flash. Any other first physical request is promoted to a full-panel
+GC16/FULL admission using the request's already-rendered complete surface.
+After that marker completes, the same presenter job drives a full-panel DU
+black rail, a DU white rail, and a final GC16/FULL restore from the retained
+target mirror. The app receives one completion only after the final marker.
+Ordinary UI, Text, Full, and pen-truth requests keep their exact regional
+policy.
+
+The sequence adds no Flutter frame, scheduler branch, public lifecycle state,
+app buffer, setup path, or install flow. Retaining the first accepted target
+in the existing RM1 mirror avoids another roughly 5.0 MiB target allocation
+on the 512 MiB tablet. Focused tests prove complete-surface copy outside the
+original damage, exact waveform order, delayed single completion, same-surface
+suppression, Sparkle no-op handling, rejected-admission rollback and retry,
+temporary-rail rejection restoration and fail-closed behavior,
+claim-loss-before-write, and unchanged regional Full/pen behavior. Physical
+Motion-to-Ink testing decides whether one bounded DU conditioning pair is
+sufficient. All 65 RM1 native tests pass normally and under ASan/UBSan and
+TSan, and the exact ARMv7 hard-float, GLIBC, GLIBCXX, and CXXABI gates pass.
 
 ### RM2 round 1: select tables on the Cortex-A7
 
