@@ -332,16 +332,18 @@ EXPECTED_STOCK_PID=$SESSION_PID
 
 # This fixture intentionally holds the first launcher for three seconds and
 # crosses a whole-second mtime boundary before exercising seven process
-# handoffs. Keep this as a failure watchdog, not a near-zero scheduling margin.
+# handoffs. Wait for the final stock-handoff marker rather than process
+# liveness alone: an exited child may remain observable until it is reaped.
 session_wait_steps=0
-while [ "$session_wait_steps" -lt 200 ]; do
-  kill -0 "$SESSION_PID" 2>/dev/null || break
+while [ ! -s "$TMP/stock-pid" ] &&
+      kill -0 "$SESSION_PID" 2>/dev/null &&
+      [ "$session_wait_steps" -lt 300 ]; do
   sleep 0.1
   session_wait_steps=$((session_wait_steps + 1))
 done
-if kill -0 "$SESSION_PID" 2>/dev/null; then
+[ -s "$TMP/stock-pid" ] || {
   fail "supervisor did not finish the launch sequence"
-fi
+}
 wait "$SESSION_PID" || fail "supervisor returned failure"
 SESSION_PID=""
 unset PLUTO_TEST_HEALTH_REPLACE_AFTER_CONFIRM
