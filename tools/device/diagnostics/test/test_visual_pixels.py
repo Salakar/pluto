@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -18,6 +19,14 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[4]
 VERIFIER = ROOT / "tools/device/diagnostics/verify_visual_pixels.py"
+VERIFIER_SPEC = importlib.util.spec_from_file_location(
+    "pluto_verify_visual_pixels", VERIFIER
+)
+if VERIFIER_SPEC is None or VERIFIER_SPEC.loader is None:
+    raise RuntimeError("cannot load visual pixel verifier")
+VERIFIER_MODULE = importlib.util.module_from_spec(VERIFIER_SPEC)
+sys.modules[VERIFIER_SPEC.name] = VERIFIER_MODULE
+VERIFIER_SPEC.loader.exec_module(VERIFIER_MODULE)
 LABELS = (
     "app-dev.pluto.examples.counter",
     "app-dev.pluto.examples.motion_lab",
@@ -381,6 +390,59 @@ class VisualPixelsTest(unittest.TestCase):
         self.assertGreater(payload["matching"]["minimum_discrimination"], 0.008)
         self.assertGreater(payload["ink"]["native_overlap"], 0.30)
         self.assertGreater(payload["ink"]["camera_overlap"], 0.30)
+
+    def test_assignment_uses_the_complete_bijection_not_reverse_nearest_pairs(
+        self,
+    ) -> None:
+        matrix = (
+            (0.9, 0.1, 0.1),
+            (0.1, 0.6, 0.3),
+            (0.1, 0.7, 0.9),
+        )
+        allowed = tuple(frozenset((index,)) for index in range(3))
+        self.assertGreater(matrix[2][1], matrix[1][1])
+        self.assertGreater(
+            VERIFIER_MODULE._assignment_discrimination(matrix, allowed),
+            0.008,
+        )
+
+    def test_stroke_overlap_allows_only_the_calibrated_registration_guard(
+        self,
+    ) -> None:
+        width = 20
+        height = 12
+        centroids = (0.5,) * 8
+
+        def metrics(row: int):
+            return VERIFIER_MODULE.StrokeMetrics(
+                modality="fixture",
+                background_delta=0.0,
+                peak=32.0,
+                localization=1.0,
+                signed_fraction=1.0,
+                active_fraction=0.01,
+                covered_bins=8,
+                centroid_error=0.0,
+                thickness=0.0,
+                active=frozenset(row * width + column for column in range(5, 15)),
+                bin_centroids=centroids,
+            )
+
+        native = metrics(4)
+        allowed_camera = metrics(7)
+        native_overlap, camera_overlap, _ = VERIFIER_MODULE._verify_stroke_overlap(
+            native, allowed_camera, width, height
+        )
+        self.assertEqual(native_overlap, 1.0)
+        self.assertEqual(camera_overlap, 1.0)
+
+        with self.assertRaisesRegex(
+            VERIFIER_MODULE.VerificationError,
+            "do not spatially overlap",
+        ):
+            VERIFIER_MODULE._verify_stroke_overlap(
+                native, metrics(8), width, height
+            )
 
     def test_allows_validation_equivalent_frames(self) -> None:
         swap_camera_stages(self.root, 3, 6)

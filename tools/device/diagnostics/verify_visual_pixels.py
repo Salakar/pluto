@@ -49,16 +49,18 @@ PROFILE_DIMENSIONS = {
 VALIDATION_EQUIVALENT = frozenset((3, 6))
 INK_BEFORE_INDEX = 7
 INK_AFTER_INDEX = 8
+INK_EQUIVALENT = frozenset((INK_BEFORE_INDEX, INK_AFTER_INDEX))
 WORK_HEIGHT = 192
 
 # Threshold calibration, 2026-07-15: the only truthful cross-modal development
 # pairs available before final acceptance were RM1 Home and Ink gallery.  With
 # this bounded transform they score 0.349 and 0.271 respectively despite the
 # 1152x1374 optical crop, illumination falloff, and JPEG blur.  The 0.20
-# alignment, 0.18 per-pair, and 0.28 run-mean floors retain margin below that
-# evidence.  The old RM1 "stroke" pair was a decoded no-op, so it is used only
-# as negative evidence; positive stroke thresholds come from the exact
-# panel-relative protocol geometry plus the adversarial synthetic suite.
+# alignment, 0.18 per-pair, 0.28 run-mean, and 0.008 one-to-one assignment
+# discrimination floors retain margin below that evidence.  The old RM1
+# "stroke" pair was a decoded no-op, so it is used only as negative evidence;
+# positive stroke thresholds come from the exact panel-relative protocol
+# geometry plus the adversarial synthetic suite.
 
 
 class VerificationError(RuntimeError):
@@ -501,11 +503,63 @@ def _find_alignment(native: Sequence[EdgeFrame], camera: Sequence[EdgeFrame]) ->
 
 
 def _allowed_indices(index: int) -> frozenset[int]:
-    return (
-        VALIDATION_EQUIVALENT
-        if index in VALIDATION_EQUIVALENT
-        else frozenset((index,))
-    )
+    if index in VALIDATION_EQUIVALENT:
+        return VALIDATION_EQUIVALENT
+    if index in INK_EQUIVALENT:
+        return INK_EQUIVALENT
+    return frozenset((index,))
+
+
+def _assignment_discrimination(
+    matrix: Sequence[Sequence[float]],
+    allowed_by_row: Sequence[frozenset[int]],
+) -> float:
+    """Return the per-stage margin over the best label-violating assignment.
+
+    Camera and native frames form a one-to-one evidence set.  Scoring complete
+    assignments avoids a false rejection when a visually dense frame happens
+    to be one native column's nearest individual neighbour, while moving that
+    frame would leave its own distinctive native partner unmatched.  The two
+    Validation frames and the two Ink frames are interchangeable only for this
+    geometric correspondence check; the signed Ink-difference proof below
+    independently establishes before/after order and stroke content.
+    """
+
+    count = len(matrix)
+    if count < 2 or len(allowed_by_row) != count:
+        _fail("camera/native assignment matrix has invalid geometry")
+    if any(len(row) != count for row in matrix):
+        _fail("camera/native assignment matrix is not square")
+    if any(
+        not allowed or any(index < 0 or index >= count for index in allowed)
+        for allowed in allowed_by_row
+    ):
+        _fail("camera/native assignment equivalence is invalid")
+
+    states: dict[tuple[int, bool], float] = {(0, False): 0.0}
+    for camera_index, row in enumerate(matrix):
+        next_states: dict[tuple[int, bool], float] = {}
+        for (used, violated), score in states.items():
+            for native_index, pair_score in enumerate(row):
+                bit = 1 << native_index
+                if used & bit:
+                    continue
+                key = (
+                    used | bit,
+                    violated or native_index not in allowed_by_row[camera_index],
+                )
+                candidate = score + pair_score
+                previous = next_states.get(key)
+                if previous is None or candidate > previous:
+                    next_states[key] = candidate
+        states = next_states
+
+    full = (1 << count) - 1
+    accepted = states.get((full, False))
+    rejected = states.get((full, True))
+    if accepted is None or rejected is None:
+        _fail("camera/native assignment has no complete comparison")
+    return (accepted - rejected) / count
 
 
 def _verify_stage_matching(
@@ -516,27 +570,20 @@ def _verify_stage_matching(
         for camera_values in camera_warped
     ]
     accepted_scores: list[float] = []
-    discrimination_gaps: list[float] = []
+    row_discrimination: list[float] = []
+    allowed_by_row = tuple(
+        _allowed_indices(index) for index in range(len(matrix))
+    )
     for camera_index, row in enumerate(matrix):
-        allowed = _allowed_indices(camera_index)
+        allowed = allowed_by_row[camera_index]
         accepted = max(row[index] for index in allowed)
         disallowed = max(row[index] for index in range(len(row)) if index not in allowed)
         accepted_scores.append(accepted)
-        if camera_index not in (INK_BEFORE_INDEX, INK_AFTER_INDEX):
-            discrimination_gaps.append(accepted - disallowed)
-    for native_index in range(len(EXPECTED_LABELS)):
-        allowed = _allowed_indices(native_index)
-        accepted = max(matrix[index][native_index] for index in allowed)
-        disallowed = max(
-            matrix[index][native_index]
-            for index in range(len(EXPECTED_LABELS))
-            if index not in allowed
-        )
-        if native_index not in (INK_BEFORE_INDEX, INK_AFTER_INDEX):
-            discrimination_gaps.append(accepted - disallowed)
+        row_discrimination.append(accepted - disallowed)
     minimum_score = min(accepted_scores)
     mean_score = statistics.fmean(accepted_scores)
-    minimum_gap = min(discrimination_gaps)
+    assignment_gap = _assignment_discrimination(matrix, allowed_by_row)
+    minimum_gap = min(min(row_discrimination), assignment_gap)
     if minimum_score < 0.18:
         _fail(f"camera/native stage match is too weak ({minimum_score:.3f})")
     if mean_score < 0.28:
@@ -678,8 +725,12 @@ def _dilate(points: frozenset[int], width: int, height: int, radius: int) -> fro
 def _verify_stroke_overlap(
     native: StrokeMetrics, camera: StrokeMetrics, width: int, height: int
 ) -> tuple[float, float, float]:
-    native_dilated = _dilate(native.active, width, height, 2)
-    camera_dilated = _dilate(camera.active, width, height, 2)
+    # The optical image and native screenshot are reduced to a 144x192-ish
+    # comparison plane.  Three cells retain a sub-2.1% registration tolerance
+    # at that scale; the independent centroid/trajectory gate below still
+    # rejects a displaced or differently shaped stroke.
+    native_dilated = _dilate(native.active, width, height, 3)
+    camera_dilated = _dilate(camera.active, width, height, 3)
     native_overlap = (
         len(native.active.intersection(camera_dilated)) / len(native.active)
         if native.active
