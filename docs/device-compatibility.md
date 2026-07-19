@@ -13,17 +13,19 @@ to another firmware without validation.
 
 | Device | Codename | Tested reMarkable OS | CPU / target | Native panel path | Validation status |
 | --- | --- | --- | --- | --- | --- |
-| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | AArch64 / `linux-arm64` | Native Gallery3/DRM + SWTCON | ✅ Reference device; release platform, Ink, and Codex validated |
-| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ARMv7l / `linux-arm` | Native LCDIF/TCON | 🧪 Final release deployment, app switching, Ink stroke, screenshots, and camera acceptance required |
-| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ARMv7l / `linux-arm` | Native MXCFB/EPDC | 🧪 Final release deployment, app switching, Ink stroke, screenshots, and camera acceptance required |
+| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | AArch64 / `linux-arm64` | Native Gallery3/DRM + SWTCON | ✅ Fully accepted; release, common apps, Ink, lifecycle, camera, and Codex validated |
+| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ARMv7l / `linux-arm` | Native LCDIF/TCON | ✅ Fully accepted; release, common apps, Ink, lifecycle, recovery, and camera validated |
+| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ARMv7l / `linux-arm` | Native MXCFB/EPDC | ✅ Fully accepted; release, common apps, Ink, lifecycle, recovery, and camera validated |
 | reMarkable Paper Pro | `ferrari` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
 | reMarkable Paper Pure | `tatsu` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
 
-The two newly brought-up devices are not marked complete merely because the
-embedder starts. Their final acceptance requires the normal CLI workflow,
-visible Home and supported-app behavior, app switching, a deterministic Ink
-stroke, launch and return behavior, logs, screenshots, and measured
-responsiveness on the physical panel.
+The supported matrix is RM1, RM2, and Move on the exact firmware rows above.
+All three passed the normal CLI workflow, visible Home and target-supported
+apps, switching, deterministic Ink drawing, launch and return behavior, logs,
+screenshots, measured responsiveness, camera verification, twenty
+suspend/resume cycles, and foreground-crash recovery on the physical panel.
+Paper Codex is additionally accepted on Move; it is excluded from ARMv7
+releases because no upstream ARMv7 binary exists.
 
 ## One responsive application surface
 
@@ -42,8 +44,7 @@ controls, pen/touch coordinate mapping, and screenshots at the native metrics
 of each tested device.
 
 The generated exact-device profiles define these presenter metrics. Move, RM1,
-and RM2 have reported their rows from a running native embedder. RM2's run was
-an intermediate bring-up, not final compatibility acceptance:
+and RM2 reported their rows from the accepted native runtime:
 
 | Device | Native panel surface | Flutter device pixel ratio |
 | --- | ---: | ---: |
@@ -52,12 +53,12 @@ an intermediate bring-up, not final compatibility acceptance:
 | reMarkable 1 | 1404 x 1872 | 1.4125 |
 
 Those are inputs to Flutter's normal logical-pixel model, not three separately
-authored app canvases. The same release Home, shared application, and Ink
-layouts reflow from the resulting constraints. An intermediate release
-rendered Home and Ink on the physical RM2 before a later switch failed closed
-on changing PMIC diagnostic text despite stable live power-good. The corrected
-reader brackets that non-atomic text sample with live power checks; a newly
-frozen release must repeat the complete optical and lifecycle gate.
+authored app canvases. The same frozen-release Home, shared applications, and
+Ink layouts reflow from the resulting constraints. Final camera/native pairs
+confirmed full-surface use, reachable controls, correct input transforms, and
+responsive layout on every supported panel. The detailed frozen-release
+evidence is indexed in
+[`native-runtime-implementation-report.md`](native-runtime-implementation-report.md).
 
 ## One public workflow
 

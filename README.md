@@ -50,16 +50,17 @@ or a successful SSH connection. Exact validation details live in
 
 | Device | Codename | Tested reMarkable OS | Release status |
 | --- | --- | --- | --- |
-| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | ✅ Reference device; release platform, Ink, and Codex validated |
-| reMarkable 2 | `zero-sugar` | 3.28.0.162 | 🧪 Native CPU/scan pipeline verified; final supported-app acceptance pending |
-| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | 🧪 Runtime and real-panel path verified; final supported-app acceptance pending |
+| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | ✅ Fully accepted; native release, common apps, Ink, lifecycle, camera, and Codex validated |
+| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ✅ Fully accepted; native release, common apps, Ink, lifecycle, recovery, and camera validated |
+| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ✅ Fully accepted; native release, common apps, Ink, lifecycle, recovery, and camera validated |
 
-Only the first row currently represents completed end-to-end application
-acceptance. The two legacy tablets will be promoted only after the same frozen
-release passes visible Home, switching, the supported app set, and Ink runs;
-Paper Codex is not an RM1/RM2 requirement because upstream has no native ARMv7
-release. This README
-does not treat host tests, CPU-only bring-up, or a synthetic UI as panel
+All three rows represent completed end-to-end application and physical-panel
+acceptance on the same frozen universal release. Each passed visible Home, the
+target-supported common app set, switching, a deterministic Ink stroke,
+screenshots, logs, health checks, camera verification, twenty suspend/resume
+cycles, and foreground-crash recovery. Paper Codex is validated on Move only;
+it is not an RM1/RM2 requirement because upstream has no native ARMv7 release.
+Host tests, CPU-only bring-up, and synthetic UI are not treated as panel
 acceptance.
 
 ## Built-in apps
