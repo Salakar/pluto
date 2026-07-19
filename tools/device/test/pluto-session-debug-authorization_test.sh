@@ -330,11 +330,14 @@ PLUTO_TEST_RENDERER_HEALTH_STALE_SECONDS=6
 start_session
 EXPECTED_STOCK_PID=$SESSION_PID
 
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
-  21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 \
-  41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60; do
+# This fixture intentionally holds the first launcher for three seconds and
+# crosses a whole-second mtime boundary before exercising seven process
+# handoffs. Keep this as a failure watchdog, not a near-zero scheduling margin.
+session_wait_steps=0
+while [ "$session_wait_steps" -lt 200 ]; do
   kill -0 "$SESSION_PID" 2>/dev/null || break
   sleep 0.1
+  session_wait_steps=$((session_wait_steps + 1))
 done
 if kill -0 "$SESSION_PID" 2>/dev/null; then
   fail "supervisor did not finish the launch sequence"
