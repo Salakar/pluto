@@ -2749,7 +2749,7 @@ TEST(LcdifTconBackend,
 }
 
 TEST(LcdifTconBackend,
-     FirstWarmHandoffPartialReplayPromotesAndWhitePreconditionsExactlyOnce) {
+     FirstWarmHandoffPartialReplayPromotesAndBleachesExactlyOnce) {
   LocalRm2Profile fixture;
   if (!fixture.valid()) {
     return;
@@ -2781,8 +2781,7 @@ TEST(LcdifTconBackend,
         handoff_options(handoff_path.get()));
     ASSERT_TRUE(probe_and_start_profile(&outgoing, relaxed_profile,
                                         fixture.waveform_path()));
-    draw_fast_pixel(&outgoing, static_cast<std::uint32_t>(kSampleX),
-                    static_cast<std::uint32_t>(kSampleY), 0x0000U, 200);
+    draw_fast_pixel(&outgoing, 17, 29, 0x0000U, 200);
     ASSERT_EQ(outgoing.stage_handoff(&payload.payload, 3000), kPlutoStatusOk);
     outgoing.stop();
   }
@@ -2834,10 +2833,24 @@ TEST(LcdifTconBackend,
   ASSERT_EQ(incoming.submit(&request), kPlutoStatusOk);
   ASSERT_EQ(incoming.wait_idle(5000), kPlutoStatusOk);
   ASSERT_EQ(syscalls.panned_phase_cells.size(),
-            expected_precondition.phase_count + expected_content.phase_count);
+            expected_precondition.phase_count * 2U +
+                expected_content.phase_count);
   EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin(),
                           syscalls.panned_phase_cells.begin() +
                               expected_precondition.phase_count,
+                          [](const std::array<std::uint16_t, 3> &samples) {
+                            return samples[0] != 0;
+                          }));
+  EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin() +
+                              expected_precondition.phase_count,
+                          syscalls.panned_phase_cells.begin() +
+                              expected_precondition.phase_count * 2U,
+                          [](const std::array<std::uint16_t, 3> &samples) {
+                            return samples[0] != 0;
+                          }));
+  EXPECT_TRUE(std::any_of(syscalls.panned_phase_cells.begin() +
+                              expected_precondition.phase_count * 2U,
+                          syscalls.panned_phase_cells.end(),
                           [](const std::array<std::uint16_t, 3> &samples) {
                             return samples[0] != 0;
                           }));
@@ -2862,7 +2875,7 @@ TEST(LcdifTconBackend,
   incoming.stop();
   const std::string diagnostics = capture.finish();
   EXPECT_TRUE(diagnostics.find("warm handoff full-panel replay completed "
-                               "white mode-6 precondition then complete "
+                               "black/white mode-6 precondition then complete "
                                "mode-2 content") != std::string::npos);
   EXPECT_TRUE(diagnostics.find("handoff_cleanup_jobs=1") != std::string::npos);
 }

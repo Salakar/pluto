@@ -2246,7 +2246,7 @@ private:
       report_present_failure(
           "present.powered-temperature-handoff-precondition-select",
           kPlutoStatusDeviceLost,
-          "no white precondition waveform matches the warm handoff");
+          "no black/white precondition waveform matches the warm handoff");
       return false;
     }
     std::size_t pixels = 0;
@@ -2416,7 +2416,7 @@ private:
       if (completed_handoff_cleanup) {
         std::fprintf(
             stderr,
-            "lcdif_tcon: warm handoff full-panel replay completed white "
+            "lcdif_tcon: warm handoff full-panel replay completed black/white "
             "mode-%u precondition then complete mode-%u content\n",
             job.handoff_precondition_waveform.mode, job.waveform.mode);
       }
@@ -2476,7 +2476,8 @@ private:
 
     enum class TransitionRemap {
       kNone,
-      kWhiteFromRecordedSource,
+      kBlackFromRecordedSource,
+      kWhiteFromBlack,
       kRecordedTargetFromWhite,
     };
     struct WaveformStage {
@@ -2506,10 +2507,20 @@ private:
             const std::uint8_t old_level =
                 static_cast<std::uint8_t>(key & 0x0fU);
             const std::uint8_t new_level = static_cast<std::uint8_t>(key >> 4U);
-            const std::size_t source_key =
-                stage.remap == TransitionRemap::kWhiteFromRecordedSource
-                    ? 15U * 16U + old_level
-                    : static_cast<std::size_t>(new_level) * 16U + 15U;
+            std::size_t source_key = 0;
+            switch (stage.remap) {
+            case TransitionRemap::kNone:
+              break;
+            case TransitionRemap::kBlackFromRecordedSource:
+              source_key = old_level;
+              break;
+            case TransitionRemap::kWhiteFromBlack:
+              source_key = 15U * 16U;
+              break;
+            case TransitionRemap::kRecordedTargetFromWhite:
+              source_key = static_cast<std::size_t>(new_level) * 16U + 15U;
+              break;
+            }
             remapped_phase_lut[key] = source_phase_lut[source_key];
           }
           phase_lut = remapped_phase_lut;
@@ -2611,13 +2622,21 @@ private:
     };
 
     if (job.completes_handoff_cleanup) {
-      const PlutoStatus precondition_status = drive_stage(WaveformStage{
+      const PlutoStatus black_status = drive_stage(WaveformStage{
           .waveform = &job.handoff_precondition_waveform,
           .drive_lut = job.handoff_precondition_waveform.drive_lut,
-          .remap = TransitionRemap::kWhiteFromRecordedSource,
+          .remap = TransitionRemap::kBlackFromRecordedSource,
       });
-      if (precondition_status != kPlutoStatusOk) {
-        return precondition_status;
+      if (black_status != kPlutoStatusOk) {
+        return black_status;
+      }
+      const PlutoStatus white_status = drive_stage(WaveformStage{
+          .waveform = &job.handoff_precondition_waveform,
+          .drive_lut = job.handoff_precondition_waveform.drive_lut,
+          .remap = TransitionRemap::kWhiteFromBlack,
+      });
+      if (white_status != kPlutoStatusOk) {
+        return white_status;
       }
     }
     const std::span<const std::uint8_t> content_lut =

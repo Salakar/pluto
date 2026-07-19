@@ -1263,8 +1263,8 @@ Owners: RM2 display, supervisor, ARMv7, optical validation.
   and lifecycle behind the common interfaces.
 - Keep cross-app optical cleanup inside the device presenter: RM2 may promote
   the first non-probe reconciliation job to full-panel Text and prepend its
-  required white exit rail, but must not add a second app-switch, install,
-  setup, or refresh flow.
+  required black/white reset rails, but must not add a second app-switch,
+  install, setup, or refresh flow.
 - Follow the bring-up ladder exactly; archive evidence at every rung.
 - Add RM2 input/profile/session behavior and common direct payload routing.
 - Run byte-oracle, scan timing, optical, failure, soak, lifecycle, and restore

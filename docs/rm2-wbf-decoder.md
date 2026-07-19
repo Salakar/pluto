@@ -109,12 +109,13 @@ An exact cross-app warm handoff has one additional RM2 execution rule. The
 renderer may partition its complete retained-surface reconciliation into
 several presenter jobs, so the backend promotes the first request to an exact
 full-panel Text job unless it is the single `{0,0,1,1}` Fast same-surface
-liveness proof. The promoted job drives mode 6 to white from the recorded
-source levels, then mode 2 from white to the incoming content. This is the AF
-fast-mode exit protocol needed when logical target history cannot represent
-residual pigment. The worker remaps the existing transition keys through a
-256-byte phase-local LUT; it does not allocate another panel buffer, rewalk the
-Flutter surface, or expose a second lifecycle flow.
+liveness proof. A white-only rail failed physical RM2 verification, so the
+promoted job drives mode 6 from the recorded source to black, mode 6 from black
+to white, then mode 2 from white to the incoming content. This bounded reset is
+needed when logical target history cannot represent residual pigment. The
+worker remaps the existing transition keys through a 256-byte phase-local LUT;
+it does not allocate another panel buffer, rewalk the Flutter surface, or
+expose a second lifecycle flow.
 
 `LcdifTconDisplayBackend` consumes the selected immutable record, advances
 settled optical state only after completion, writes only within the exact

@@ -461,9 +461,39 @@ frame, public lifecycle state, buffer, traversal, install path, or app-switch
 flow. Focused coverage starts with a deliberately partial Text request, proves
 that a sample outside its damage is driven by the promoted white/content
 sequence exactly once, and separately proves the exact 1x1 same-surface probe
-does not arm a later cleanup. All 81 RM2 native tests pass. This remains
-development evidence until a newly frozen release repeats the physical
-Motion Lab to Ink Lab sequence.
+does not arm a later cleanup. All 81 RM2 native tests pass.
+
+Exact clean candidate `03ee403f1399d286cdd325311ddf12f5d598d0dc`,
+manifest SHA-256
+`780f4bbc319f2b911dac74fdd7540a2ec2ba0fb0f48e0fa9f348d24633b6f30a`,
+then proved the promotion and disproved the white-only waveform. The exact
+release logged
+`warm handoff full-panel replay completed white mode-6 precondition then complete mode-2 content`.
+After hibernation it reported three jobs, 96 phases,
+`handoff_cleanup_jobs=1`, zero missed deadlines, zero underflows, and zero
+hardware faults. Nevertheless,
+`analysis/native-cutover/diagnostics/rm2-handoff-promoted-03ee403/02-motion-to-ink-lab-camera.mp4`
+and the paired late still retained Motion Lab's stripes, spinner, line, and box
+strongly over the correct native Ink Lab frame. This candidate is rejected:
+one white rail is not a sufficient pigment reset.
+
+### RM2 round 12: bounded black/white rail pair
+
+The next candidate uses the cheap physical reset already exercised by the
+common ghost-control path, but executes it inside the same promoted RM2 job:
+mode 6 from the recorded source to black, mode 6 from black to white, then
+complete mode-2 content from white. At the measured 24 C table this is
+10 + 10 + 38 phases, not the multi-second, multi-frame bleach state machine.
+
+The same transition byte and 256-byte stack LUT are reused for all three
+stages. The remaps select `black | recorded-old`, then the constant
+`white | black`, then `target-new | white`; no new panel buffer or surface
+walk is introduced. Safe-idle and stable-power boundaries remain between
+every rail, and logical state commits only after final content succeeds.
+Focused coverage observes drive at a sample outside the original partial
+damage during both reset rails and content, proves the sequence occurs exactly
+once, and retains the flash-free exact 1x1 same-surface proof. Physical
+acceptance remains pending a newly frozen release.
 
 ### Lifecycle acceptance: reject early external wakes
 
