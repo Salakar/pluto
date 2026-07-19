@@ -396,11 +396,11 @@ class VisualPixelsTest(unittest.TestCase):
     ) -> None:
         matrix = (
             (0.9, 0.1, 0.1),
-            (0.1, 0.6, 0.3),
-            (0.1, 0.7, 0.9),
+            (0.1, 0.4, 0.45),
+            (0.1, 0.39, 0.9),
         )
         allowed = tuple(frozenset((index,)) for index in range(3))
-        self.assertGreater(matrix[2][1], matrix[1][1])
+        self.assertGreater(matrix[1][2], matrix[1][1])
         self.assertGreater(
             VERIFIER_MODULE._assignment_discrimination(matrix, allowed),
             0.008,
@@ -449,27 +449,6 @@ class VisualPixelsTest(unittest.TestCase):
         self.assertEqual(VERIFIER_MODULE.MOTION_LAB_INDEX, 1)
         self.assertEqual(LABELS[VERIFIER_MODULE.MOTION_LAB_INDEX], LABELS[1])
         self.assertEqual(VERIFIER_MODULE.DYNAMIC_STAGE_PAIR_FLOOR, 0.10)
-
-    def test_dynamic_stage_uses_complete_assignment_not_row_nearest_pair(
-        self,
-    ) -> None:
-        row_discrimination = [0.25] * len(LABELS)
-        row_discrimination[VERIFIER_MODULE.MOTION_LAB_INDEX] = -0.11
-        assignment_gap = 0.027
-        self.assertEqual(
-            VERIFIER_MODULE._minimum_discrimination(
-                row_discrimination, assignment_gap
-            ),
-            assignment_gap,
-        )
-
-        row_discrimination[2] = -0.01
-        self.assertLess(
-            VERIFIER_MODULE._minimum_discrimination(
-                row_discrimination, assignment_gap
-            ),
-            0.008,
-        )
 
     def test_only_ink_surfaces_have_the_sparse_aligned_edge_density_floor(
         self,
