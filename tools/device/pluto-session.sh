@@ -1456,11 +1456,18 @@ monitor_foreground() {
   # Keep this name distinct from lifecycle helpers, which are POSIX-sh
   # functions and therefore share variable scope with their caller.
   monitor_pid="$1"
+  # Control markers need the profile's 50/100 ms response. Health receipts do
+  # not: their contract is one-second production polling. Avoid spawning
+  # uptime/stat readers on every control tick, especially on RM1's only CPU.
+  monitor_health_elapsed_ms=1000
   while pid_alive "$monitor_pid"; do
-    if ! check_renderer_health; then
-      mark_boot_fatal "renderer health deadline expired for pid=$monitor_pid" \
-        "$APP_READY_FILE" "$APP_HEALTH_FILE"
-      return 74
+    if [ "$monitor_health_elapsed_ms" -ge 1000 ]; then
+      if ! check_renderer_health; then
+        mark_boot_fatal "renderer health deadline expired for pid=$monitor_pid" \
+          "$APP_READY_FILE" "$APP_HEALTH_FILE"
+        return 74
+      fi
+      monitor_health_elapsed_ms=0
     fi
     if boot_is_confirmed && [ -n "$BOOT_CONFIRM_PID" ]; then
       wait "$BOOT_CONFIRM_PID" 2>/dev/null || true
@@ -1488,6 +1495,7 @@ monitor_foreground() {
       return 0
     fi
     sleep_milliseconds "$SUPERVISOR_CONTROL_POLL_MS"
+    monitor_health_elapsed_ms=$((monitor_health_elapsed_ms + SUPERVISOR_CONTROL_POLL_MS))
   done
   return 0
 }
