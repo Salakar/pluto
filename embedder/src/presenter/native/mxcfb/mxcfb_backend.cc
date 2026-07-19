@@ -35,6 +35,10 @@ constexpr std::byte kSafeInitialByte{0xff};
 constexpr std::uint32_t kHandoffTilePixels = 32;
 constexpr std::size_t kMaximumRendererHandoffBytes = 32u << 20;
 constexpr std::uint8_t kPaperWhiteOpticalLevel = 30;
+constexpr std::array<std::byte, 4> kHandoffConditioningRails{
+    std::byte{0x00}, std::byte{0xff}, std::byte{0x00}, std::byte{0xff}};
+constexpr std::size_t kHandoffCleanupMarkerCount =
+    kHandoffConditioningRails.size() + 1;
 constexpr std::string_view kHandoffPipelineTag =
     "pluto-rm1-mxcfb-warm-handoff-presenter-payload";
 constexpr std::uint32_t kKnownPresentFlags =
@@ -159,7 +163,8 @@ bool build_handoff_identity(const GeneratedDeviceProfile &profile,
   }
 
   HandoffFingerprint waveform;
-  waveform.add_string("rm1-mxcfb-gc16-du-black-white-gc16-handoff-cleanup");
+  waveform.add_string(
+      "rm1-mxcfb-gc16-two-du-black-white-cycles-gc16-handoff-cleanup");
   waveform.add_u32(uapi::kWaveformModeDirect);
   waveform.add_u32(uapi::kWaveformModeGc16);
   waveform.add_u32(uapi::kWaveformModeQuality);
@@ -645,7 +650,7 @@ public:
         consumes_handoff_cleanup && !exact_same_surface_probe;
 
     std::uint32_t marker = 0;
-    std::array<std::uint32_t, 3> cleanup_markers{};
+    std::array<std::uint32_t, kHandoffCleanupMarkerCount> cleanup_markers{};
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (lost_ || !started_ || !accepting_ || outstanding_) {
@@ -1067,7 +1072,7 @@ private:
   struct CompletionJob {
     std::uint64_t frame_id;
     std::uint32_t marker;
-    std::array<std::uint32_t, 3> cleanup_markers;
+    std::array<std::uint32_t, kHandoffCleanupMarkerCount> cleanup_markers;
     bool completes_handoff_cleanup;
   };
 
@@ -1676,26 +1681,25 @@ private:
       PlutoStatus status =
           device_->wait_for_update_complete(job.marker, &collision);
       if (status == kPlutoStatusOk && job.completes_handoff_cleanup) {
-        status = send_handoff_conditioning_rail(job.cleanup_markers[0],
-                                                std::byte{0x00});
-        if (status == kPlutoStatusOk) {
-          status = device_->wait_for_update_complete(job.cleanup_markers[0],
-                                                     &collision);
+        for (std::size_t rail_index = 0;
+             status == kPlutoStatusOk &&
+             rail_index < kHandoffConditioningRails.size();
+             ++rail_index) {
+          status = send_handoff_conditioning_rail(
+              job.cleanup_markers[rail_index],
+              kHandoffConditioningRails[rail_index]);
+          if (status == kPlutoStatusOk) {
+            status = device_->wait_for_update_complete(
+                job.cleanup_markers[rail_index], &collision);
+          }
         }
         if (status == kPlutoStatusOk) {
-          status = send_handoff_conditioning_rail(job.cleanup_markers[1],
-                                                  std::byte{0xff});
-        }
-        if (status == kPlutoStatusOk) {
-          status = device_->wait_for_update_complete(job.cleanup_markers[1],
-                                                     &collision);
-        }
-        if (status == kPlutoStatusOk) {
-          status = send_handoff_target_restore(job.cleanup_markers[2]);
-        }
-        if (status == kPlutoStatusOk) {
-          status = device_->wait_for_update_complete(job.cleanup_markers[2],
-                                                     &collision);
+          const std::uint32_t restore_marker = job.cleanup_markers.back();
+          status = send_handoff_target_restore(restore_marker);
+          if (status == kPlutoStatusOk) {
+            status =
+                device_->wait_for_update_complete(restore_marker, &collision);
+          }
         }
       }
       PlutoPresentCompleteCallback callback = nullptr;
@@ -1728,8 +1732,8 @@ private:
       if (status == kPlutoStatusOk && job.completes_handoff_cleanup) {
         std::fprintf(
             stderr,
-            "mxcfb: warm handoff full-panel GC16 target, DU black/white "
-            "conditioning, and GC16 target restore completed\n");
+            "mxcfb: warm handoff full-panel GC16 target, two DU black/white "
+            "conditioning cycles, and GC16 target restore completed\n");
       }
       if (status != kPlutoStatusOk) {
         work_cv_.notify_all();

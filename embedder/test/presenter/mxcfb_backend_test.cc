@@ -1239,40 +1239,38 @@ TEST(MxcfbBackend,
   // scheduler's first regional fragment.
   EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
             source_byte(next, 200U, 200U));
-  incoming_syscalls.complete_one();
-  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(2));
-  EXPECT_TRUE(callbacks.frame_ids().empty());
+  constexpr std::array<std::uint8_t, 4> kExpectedRailBytes{0x00, 0xff, 0x00,
+                                                           0xff};
+  constexpr std::array<std::uint32_t, 4> kExpectedRailMarkers{
+      std::numeric_limits<std::uint32_t>::max(), 1U, 2U, 3U};
   auto staged_updates = incoming_syscalls.sent_updates();
-  ASSERT_EQ(staged_updates.size(), 2U);
-  EXPECT_EQ(staged_updates[1].update_region.width, kWidth);
-  EXPECT_EQ(staged_updates[1].update_region.height, kHeight);
-  EXPECT_EQ(staged_updates[1].waveform_mode, uapi::kWaveformModeDirect);
-  EXPECT_EQ(staged_updates[1].update_mode, uapi::kUpdateModeFull);
-  EXPECT_EQ(staged_updates[1].temperature, uapi::kTemperatureRemarkableDraw);
-  EXPECT_EQ(staged_updates[1].update_marker,
-            std::numeric_limits<std::uint32_t>::max());
-  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U], 0x00);
-  incoming_syscalls.complete_one();
+  for (std::size_t rail_index = 0; rail_index < kExpectedRailBytes.size();
+       ++rail_index) {
+    incoming_syscalls.complete_one();
+    ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(rail_index + 2U));
+    EXPECT_TRUE(callbacks.frame_ids().empty());
+    staged_updates = incoming_syscalls.sent_updates();
+    ASSERT_EQ(staged_updates.size(), rail_index + 2U);
+    const uapi::UpdateData &rail = staged_updates[rail_index + 1U];
+    EXPECT_EQ(rail.update_region.width, kWidth);
+    EXPECT_EQ(rail.update_region.height, kHeight);
+    EXPECT_EQ(rail.waveform_mode, uapi::kWaveformModeDirect);
+    EXPECT_EQ(rail.update_mode, uapi::kUpdateModeFull);
+    EXPECT_EQ(rail.temperature, uapi::kTemperatureRemarkableDraw);
+    EXPECT_EQ(rail.update_marker, kExpectedRailMarkers[rail_index]);
+    EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
+              kExpectedRailBytes[rail_index]);
+  }
 
-  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(3));
+  incoming_syscalls.complete_one();
+  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(6));
   EXPECT_TRUE(callbacks.frame_ids().empty());
   staged_updates = incoming_syscalls.sent_updates();
-  ASSERT_EQ(staged_updates.size(), 3U);
-  EXPECT_EQ(staged_updates[2].waveform_mode, uapi::kWaveformModeDirect);
-  EXPECT_EQ(staged_updates[2].update_mode, uapi::kUpdateModeFull);
-  EXPECT_EQ(staged_updates[2].temperature, uapi::kTemperatureRemarkableDraw);
-  EXPECT_EQ(staged_updates[2].update_marker, 1U);
-  EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U], 0xff);
-  incoming_syscalls.complete_one();
-
-  ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(4));
-  EXPECT_TRUE(callbacks.frame_ids().empty());
-  staged_updates = incoming_syscalls.sent_updates();
-  ASSERT_EQ(staged_updates.size(), 4U);
-  EXPECT_EQ(staged_updates[3].waveform_mode, uapi::kWaveformModeGc16);
-  EXPECT_EQ(staged_updates[3].update_mode, uapi::kUpdateModeFull);
-  EXPECT_EQ(staged_updates[3].temperature, uapi::kTemperatureUseAmbient);
-  EXPECT_EQ(staged_updates[3].update_marker, 2U);
+  ASSERT_EQ(staged_updates.size(), 6U);
+  EXPECT_EQ(staged_updates[5].waveform_mode, uapi::kWaveformModeGc16);
+  EXPECT_EQ(staged_updates[5].update_mode, uapi::kUpdateModeFull);
+  EXPECT_EQ(staged_updates[5].temperature, uapi::kTemperatureUseAmbient);
+  EXPECT_EQ(staged_updates[5].update_marker, 4U);
   EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
             source_byte(next, 200U, 200U));
   incoming_syscalls.complete_one();
@@ -1389,7 +1387,7 @@ TEST(MxcfbBackend,
   EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
   EXPECT_EQ(incoming_syscalls.mapped_storage[200U * kStride + 200U],
             source_byte(request, 200U, 200U));
-  for (std::size_t wait_count = 2; wait_count <= 4; ++wait_count) {
+  for (std::size_t wait_count = 2; wait_count <= 6; ++wait_count) {
     incoming_syscalls.complete_one();
     ASSERT_TRUE(incoming_syscalls.wait_for_wait_count(wait_count));
   }
@@ -1843,7 +1841,7 @@ TEST(MxcfbBackend, ConsumedCandidateCannotReplayIntoAThirdPresenter) {
     EXPECT_EQ(updates[0].update_region.height, kHeight);
     EXPECT_EQ(updates[0].waveform_mode, uapi::kWaveformModeGc16);
     EXPECT_EQ(updates[0].update_mode, uapi::kUpdateModeFull);
-    for (std::size_t wait_count = 2; wait_count <= 4; ++wait_count) {
+    for (std::size_t wait_count = 2; wait_count <= 6; ++wait_count) {
       consumer_syscalls.complete_one();
       ASSERT_TRUE(consumer_syscalls.wait_for_wait_count(wait_count));
     }

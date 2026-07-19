@@ -150,16 +150,29 @@ the same evidence directory prove the bands were retained pigment rather than
 camera lighting. The result also proves that using the entire 3.45-second
 maintenance reset for every switch is unnecessary and too expensive.
 
+Exact candidate
+`dbd7e7dba28335153e8f357646d1799fcc190bc3`, universal manifest SHA-256
+`b7dab5d0d1245273761c08b5923c3432916ba2487bff20202955e13df4bfd23c`,
+then ran one DU black/white pair between the accepted and restored GC16 target.
+The controlled transition appeared clean, but the complete ten-stage run under
+`analysis/native-cutover/final-acceptance/dbd7e7d/rm1/` found a short dark
+line from Motion Lab's lower-right fixture retained over the following Ink Lab
+field. The paired native screenshot contains no such line. All shared apps,
+the real switcher, the PID-bound Ink stroke, exact installed-byte proof, and
+CPU/RSS/memory/thermal/presenter metrics passed, but the release is rejected
+optically and has no visual-review receipt.
+
 The next bounded candidate remains inside the RM1 presenter seam. After an
 accepted handoff, the renderer's exact `{0,0,1,1}` Fast same-surface proof
 remains a regional DU/PARTIAL request and consumes the one-shot decision
 without a flash. Any other first physical request is promoted to a full-panel
 GC16/FULL admission using the request's already-rendered complete surface.
-After that marker completes, the same presenter job drives a full-panel DU
-black rail, a DU white rail, and a final GC16/FULL restore from the retained
-target mirror. The app receives one completion only after the final marker.
-Ordinary UI, Text, Full, and pen-truth requests keep their exact regional
-policy.
+After that marker completes, the same presenter job drives two full-panel DU
+black/white pairs and a final GC16/FULL restore from the retained target
+mirror. The second pair is the smallest escalation supported by the physical
+failure and mirrors the already accepted RM2 conditioning count. The app
+receives one completion only after the final marker. Ordinary UI, Text, Full,
+and pen-truth requests keep their exact regional policy.
 
 The sequence adds no Flutter frame, scheduler branch, public lifecycle state,
 app buffer, setup path, or install flow. Retaining the first accepted target
@@ -169,9 +182,10 @@ original damage, exact waveform order, delayed single completion, same-surface
 suppression, Sparkle no-op handling, rejected-admission rollback and retry,
 temporary-rail rejection restoration and fail-closed behavior,
 claim-loss-before-write, and unchanged regional Full/pen behavior. Physical
-Motion-to-Ink testing decides whether one bounded DU conditioning pair is
+Motion-to-Ink testing decides whether two bounded DU conditioning pairs are
 sufficient. All 65 RM1 native tests pass normally and under ASan/UBSan and
-TSan, and the exact ARMv7 hard-float, GLIBC, GLIBCXX, and CXXABI gates pass.
+TSan; the exact ARMv7 hard-float, GLIBC, GLIBCXX, and CXXABI gates and the
+complete 18-test host release suite pass for the two-pair candidate.
 
 ### RM2 round 1: select tables on the Cortex-A7
 

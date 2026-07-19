@@ -133,8 +133,10 @@ consumes it without a flash. Any other first physical request is promoted
 inside the backend to a full-panel GC16/FULL admission using the
 already-rendered complete input surface. After that accepted marker retains
 the target in the existing exact mirror, the same completion job drives a
-full-panel DU black/white conditioning pair and restores the target with
-GC16/FULL. The app receives one completion only after the final marker.
+full-panel DU black/white pair twice and restores the target with GC16/FULL.
+Physical RM1 evidence rejected one pair because a faint high-contrast line
+survived after the larger Motion Lab artifacts had cleared. The app receives
+one completion only after the final marker.
 
 This order preserves rollback without allocating another 5.0 MiB target
 surface: a rejected initial admission restores the outgoing mirror, while a
