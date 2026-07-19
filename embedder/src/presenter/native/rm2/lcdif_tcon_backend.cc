@@ -49,6 +49,8 @@ constexpr std::uint32_t kKnownPresentFlags =
     kPlutoPresentFlagRequiredSettle | kPlutoPresentFlagPenTruth |
     kPlutoPresentSparklePhaseMask;
 constexpr std::size_t kEncodeHistogramBuckets = 20'000;
+constexpr std::size_t kPanHistogramBuckets = 1024;
+constexpr std::uint64_t kPanHistogramBucketWidthUs = 32;
 constexpr int kMaximumBurstTemperatureMillidegrees = 45'000;
 
 static_assert(kHandoffEngineStride == 1408u);
@@ -2016,6 +2018,38 @@ private:
     return encode_histogram_.size() - 1U;
   }
 
+  void record_pan_duration(std::chrono::nanoseconds duration,
+                           std::chrono::nanoseconds nominal_interval) {
+    const auto nanoseconds = duration.count();
+    const std::uint64_t microseconds =
+        nanoseconds <= 0
+            ? 0U
+            : (static_cast<std::uint64_t>(nanoseconds) + 999U) / 1000U;
+    const std::size_t bucket = static_cast<std::size_t>(std::min<std::uint64_t>(
+        microseconds / kPanHistogramBucketWidthUs, kPanHistogramBuckets - 1U));
+    ++pan_histogram_[bucket];
+    ++pan_samples_;
+    pan_max_us_ = std::max(pan_max_us_, microseconds);
+    if (duration > nominal_interval + nominal_interval / 20) {
+      ++pan_late_observations_;
+    }
+  }
+
+  std::uint64_t pan_percentile(std::uint64_t percentile) const {
+    if (pan_samples_ == 0) {
+      return 0;
+    }
+    const std::uint64_t target = (pan_samples_ * percentile + 99U) / 100U;
+    std::uint64_t observed = 0;
+    for (std::size_t bucket = 0; bucket < pan_histogram_.size(); ++bucket) {
+      observed += pan_histogram_[bucket];
+      if (observed >= target) {
+        return bucket * kPanHistogramBucketWidthUs;
+      }
+    }
+    return (pan_histogram_.size() - 1U) * kPanHistogramBucketWidthUs;
+  }
+
   void emit_telemetry() {
     if (telemetry_emitted_) {
       return;
@@ -2040,6 +2074,16 @@ private:
         static_cast<unsigned long long>(hardware_faults_),
         static_cast<unsigned long long>(fault_diagnostic_samples_),
         static_cast<unsigned long long>(fault_diagnostic_changes_));
+    std::fprintf(stderr,
+                 "lcdif_tcon: pan timing samples=%llu pan_p50_us=%llu "
+                 "pan_p95_us=%llu pan_p99_us=%llu pan_max_us=%llu "
+                 "late_wake_observations=%llu\n",
+                 static_cast<unsigned long long>(pan_samples_),
+                 static_cast<unsigned long long>(pan_percentile(50)),
+                 static_cast<unsigned long long>(pan_percentile(95)),
+                 static_cast<unsigned long long>(pan_percentile(99)),
+                 static_cast<unsigned long long>(pan_max_us_),
+                 static_cast<unsigned long long>(pan_late_observations_));
     std::fprintf(
         stderr,
         "lcdif_tcon: damage jobs=%llu requested_pixels=%llu "
@@ -2063,7 +2107,15 @@ private:
     }
     const std::chrono::nanoseconds interval(
         *profile_.runtime.display.phase_interval_nanoseconds);
-    const std::chrono::nanoseconds limit = interval + interval / 20;
+    record_pan_duration(result.duration, interval);
+    // The kernel reports successful CUR_FRAME_DONE before returning from the
+    // ioctl, but it does not export the physical latch timestamp. The
+    // immediately following steady-clock sample can therefore include
+    // scheduler/IRQ wake latency. A measured 5% user-space overrun is useful
+    // telemetry, not proof that a phase repeated. Missing the next complete
+    // scan boundary would add another nominal interval, so fail closed at the
+    // midpoint between one and two scans.
+    const std::chrono::nanoseconds limit = interval + interval / 2;
     if (result.duration > limit) {
       ++underflows_;
       ++missed_deadlines_;
@@ -2461,7 +2513,7 @@ private:
     const std::chrono::nanoseconds phase_interval(
         *profile_.runtime.display.phase_interval_nanoseconds);
     const std::chrono::nanoseconds cadence_deadline =
-        phase_interval + phase_interval / 20;
+        phase_interval + phase_interval / 2;
 
     std::array<Rm2PhaseRegion, kMaximumDamageRects> phase_regions{};
     for (std::size_t index = 0; index < job.region_count; ++index) {
@@ -2794,6 +2846,7 @@ private:
   std::vector<std::uint16_t> incoming_mirror_;
   std::string last_fault_diagnostic_;
   std::array<std::uint64_t, kEncodeHistogramBuckets> encode_histogram_{};
+  std::array<std::uint64_t, kPanHistogramBuckets> pan_histogram_{};
   PlutoPresentCompleteCallback callback_ = nullptr;
   void *callback_user_data_ = nullptr;
   std::uint32_t handoff_chain_next_ = 0;
@@ -2827,6 +2880,9 @@ private:
   std::uint64_t underflows_ = 0;
   std::uint64_t safe_holds_ = 0;
   std::uint64_t encode_max_us_ = 0;
+  std::uint64_t pan_samples_ = 0;
+  std::uint64_t pan_max_us_ = 0;
+  std::uint64_t pan_late_observations_ = 0;
   std::uint64_t job_buffer_growths_ = 0;
   std::uint64_t damage_jobs_ = 0;
   std::uint64_t damage_requested_pixels_ = 0;

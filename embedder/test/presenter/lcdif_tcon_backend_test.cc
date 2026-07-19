@@ -2583,6 +2583,31 @@ TEST(LcdifTconBackend,
   backend.stop();
 }
 
+TEST(LcdifTconBackend, PanWakeJitterInsideOneBoundaryEnvelopeIsAccepted) {
+  LocalRm2Profile fixture;
+  ASSERT_TRUE(fixture.valid());
+  BackendFakeLcdifSyscalls syscalls;
+  auto device = std::make_unique<MxsLcdifDevice>(&syscalls);
+  LcdifTconDisplayBackend backend(
+      fixture.profile(), std::move(device),
+      [](std::string *) -> std::optional<int> { return 24000; },
+      blanked_baseline_then_power_good_reader(), {});
+  ASSERT_TRUE(probe_and_start(&backend, fixture));
+
+  // The exact RM2 produced a successful 13.003 ms ioctl return around its
+  // 11.763 ms nominal scan. This is beyond the old 5% user-wake allowance but
+  // far below the midpoint to a second complete scan boundary.
+  // Host sleep wake-up overhead lifts this 9 ms synthetic ioctl above the old
+  // 12.351 ms allowance while keeping it inside the one-boundary envelope.
+  syscalls.pan_delay = std::chrono::milliseconds(9);
+  OwnedPixelRequest request(3, 7, 0, 0x91U);
+  EXPECT_EQ(backend.submit(&request.request), kPlutoStatusOk);
+  EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusOk);
+  EXPECT_EQ(backend.health().completed_jobs, 1U);
+  EXPECT_EQ(backend.health().hardware_faults, 0U);
+  backend.stop();
+}
+
 TEST(LcdifTconBackend, PhysicalPanOverrunStillFailsClosed) {
   LocalRm2Profile fixture;
   ASSERT_TRUE(fixture.valid());
@@ -2594,10 +2619,10 @@ TEST(LcdifTconBackend, PhysicalPanOverrunStillFailsClosed) {
       blanked_baseline_then_power_good_reader(), {});
   ASSERT_TRUE(probe_and_start(&backend, fixture));
 
-  // Delivery jitter after CUR_FRAME_DONE is harmless, but a physical latch
-  // that exceeds the 5% ioctl-duration allowance remains a hardware fault.
-  syscalls.pan_delay = std::chrono::milliseconds(13);
-  OwnedPixelRequest request(3, 7, 0, 0x91U);
+  // Delivery jitter after CUR_FRAME_DONE is harmless, but an ioctl return past
+  // the midpoint to a second complete scan remains a fail-closed fault.
+  syscalls.pan_delay = std::chrono::milliseconds(18);
+  OwnedPixelRequest request(3, 7, 0, 0x92U);
   EXPECT_EQ(backend.submit(&request.request), kPlutoStatusDeviceLost);
   EXPECT_EQ(backend.wait_idle(3000), kPlutoStatusDeviceLost);
   EXPECT_EQ(backend.health().completed_jobs, 0U);
