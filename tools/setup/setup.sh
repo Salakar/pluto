@@ -267,6 +267,27 @@ validate_initialized_flutter() {
     "initialized Flutter reports engine ${actual_engine:-unknown}; expected $engine_version"
 }
 
+require_cached_dart_sdk() {
+  local sdk_dir="$1"
+  local dart="$sdk_dir/bin/cache/dart-sdk/bin/dart"
+
+  [[ -x "$dart" ]] || fail \
+    "pinned Flutter SDK is not initialized: missing $dart (run setup without --verify)"
+}
+
+initialize_flutter_sdk() {
+  local sdk_dir="$1"
+  local flutter_version="$2"
+  local engine_version="$3"
+  local flutter_version_json
+
+  printf 'Initializing Flutter SDK: %s\n' "$sdk_dir"
+  flutter_version_json="$("$sdk_dir/bin/flutter" --version --machine)"
+  validate_initialized_flutter \
+    "$flutter_version_json" "$flutter_version" "$engine_version"
+  require_cached_dart_sdk "$sdk_dir"
+}
+
 print_path_export() {
   local pluto_bin_dir="$1"
   local pub_cache="$2"
@@ -303,7 +324,6 @@ main() {
   local pub_cache
   local pluto_bin_dir
   local pluto_executable
-  local flutter_version_json
   local verify_only=0
 
   [[ "$#" -le 1 ]] || fail "expected at most one argument"
@@ -345,6 +365,15 @@ main() {
   validate_sdk "$sdk_dir" "$flutter_version" "$engine_version"
   sdk_dir="$(cd "$sdk_dir" && pwd)"
 
+  if [[ "$verify_only" -eq 0 ]]; then
+    export PATH="$sdk_dir/bin:$sdk_dir/bin/cache/dart-sdk/bin:$PATH"
+    initialize_flutter_sdk "$sdk_dir" "$flutter_version" "$engine_version"
+  else
+    # Verification is deliberately offline and must not initialize or download
+    # a partially installed SDK. A normal setup run materializes cached Dart.
+    require_cached_dart_sdk "$sdk_dir"
+  fi
+
   printf 'Validating generated device profiles\n'
   env HOME="${TMPDIR:-/tmp}" DART_DISABLE_ANALYTICS=1 \
     "$sdk_dir/bin/cache/dart-sdk/bin/dart" \
@@ -364,15 +393,8 @@ main() {
     return 0
   fi
 
-  export PATH="$sdk_dir/bin:$sdk_dir/bin/cache/dart-sdk/bin:$PATH"
   pub_cache="${PUB_CACHE:-$HOME/.pub-cache}"
   export PATH="$pub_cache/bin:$PATH"
-
-  printf 'Initializing Flutter SDK: %s\n' "$sdk_dir"
-  flutter_version_json="$("$sdk_dir/bin/flutter" --version --machine)"
-  validate_initialized_flutter "$flutter_version_json" "$flutter_version" "$engine_version"
-  [[ -x "$sdk_dir/bin/cache/dart-sdk/bin/dart" ]] || fail \
-    "Flutter did not install its pinned Dart SDK"
 
   "$sdk_dir/bin/cache/dart-sdk/bin/dart" pub global activate melos '^7.0.0'
   [[ -x "$pub_cache/bin/melos" ]] || fail \
