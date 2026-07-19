@@ -50,6 +50,7 @@ VALIDATION_EQUIVALENT = frozenset((3, 6))
 INK_BEFORE_INDEX = 7
 INK_AFTER_INDEX = 8
 INK_EQUIVALENT = frozenset((INK_BEFORE_INDEX, INK_AFTER_INDEX))
+MOTION_LAB_INDEX = 1
 WORK_HEIGHT = 192
 
 # Threshold calibration, 2026-07-15: the only truthful cross-modal development
@@ -60,7 +61,11 @@ WORK_HEIGHT = 192
 # discrimination floors retain margin below that evidence.  The old RM1
 # "stroke" pair was a decoded no-op, so it is used only as negative evidence;
 # positive stroke thresholds come from the exact panel-relative protocol
-# geometry plus the adversarial synthetic suite.
+# geometry plus the adversarial synthetic suite.  Motion Lab is the sole
+# dynamic stage: the native screenshot and later camera shutter intentionally
+# observe different animation phases.  Preserved clean RM1/RM2 runs measured
+# 0.159--0.264 there, so it has a 0.15 pair floor while all static stages retain
+# 0.18.  Complete-assignment discrimination remains mandatory for every stage.
 
 
 class VerificationError(RuntimeError):
@@ -580,12 +585,16 @@ def _verify_stage_matching(
         disallowed = max(row[index] for index in range(len(row)) if index not in allowed)
         accepted_scores.append(accepted)
         row_discrimination.append(accepted - disallowed)
+        floor = 0.15 if camera_index == MOTION_LAB_INDEX else 0.18
+        if accepted < floor:
+            _fail(
+                "camera/native stage match is too weak "
+                f"for {EXPECTED_LABELS[camera_index]} ({accepted:.3f})"
+            )
     minimum_score = min(accepted_scores)
     mean_score = statistics.fmean(accepted_scores)
     assignment_gap = _assignment_discrimination(matrix, allowed_by_row)
     minimum_gap = min(min(row_discrimination), assignment_gap)
-    if minimum_score < 0.18:
-        _fail(f"camera/native stage match is too weak ({minimum_score:.3f})")
     if mean_score < 0.28:
         _fail(f"mean camera/native stage match is too weak ({mean_score:.3f})")
     if minimum_gap < 0.008:

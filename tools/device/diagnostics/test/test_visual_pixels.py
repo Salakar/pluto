@@ -444,6 +444,10 @@ class VisualPixelsTest(unittest.TestCase):
                 native, metrics(8), width, height
             )
 
+    def test_only_motion_lab_is_declared_as_the_dynamic_stage(self) -> None:
+        self.assertEqual(VERIFIER_MODULE.MOTION_LAB_INDEX, 1)
+        self.assertEqual(LABELS[VERIFIER_MODULE.MOTION_LAB_INDEX], LABELS[1])
+
     def test_allows_validation_equivalent_frames(self) -> None:
         swap_camera_stages(self.root, 3, 6)
         result = self.run_verifier()
