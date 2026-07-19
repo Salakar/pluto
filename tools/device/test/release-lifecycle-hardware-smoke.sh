@@ -733,6 +733,15 @@ wait_wake_receipt() {
   return 1
 }
 
+no_wake_receipt_since_cursor() {
+  local unit="$1" cursor="$2"
+  local progress=""
+  progress="$(suspend_progress "$unit" "$cursor" 2>/dev/null)" ||
+    return 1
+  parse_suspend_progress "$progress" || return 1
+  ((PROGRESS_WAKE_COUNT == 0))
+}
+
 remote true >/dev/null || {
   echo "release lifecycle smoke: strict SSH preflight failed for $DEVICE" >&2
   exit 69
@@ -1131,23 +1140,29 @@ if [[ "$CRASH_TEST" == 1 ]]; then
   crash_supervisor="$STATE_SUPERVISOR_PID"
   crash_supervisor_start="$STATE_SUPERVISOR_START_TICKS"
   crash_boot="$STATE_BOOT_ID"
-  crash_wakes="$STATE_WAKE_COUNT"
   crash_revision="$STATE_RELEASE_REVISION"
   crash_profile="$STATE_PROFILE_ID"
+  crash_wake_cursor="$(suspend_cursor "$STATE_UNIT")" || {
+    echo "release lifecycle smoke: could not bind crash recovery to a journal cursor" >&2
+    exit 82
+  }
   remote "set -eu
 [ \"\$(cat /run/pluto/embedder.pid)\" = '$crash_pid' ]
 kill -KILL '$crash_pid'" >/dev/null
   after="$(wait_matching "$UP_TIMEOUT" any "$LAUNCHER_APP_ID" any any \
-    "$crash_wakes" none none)" || {
+    any none none)" || {
     echo "release lifecycle smoke: foreground crash did not recover" >&2
     exit 82
   }
   parse_state "$after"
+  no_wake_receipt_since_cursor "$STATE_UNIT" "$crash_wake_cursor" || {
+    echo "release lifecycle smoke: foreground crash fabricated or obscured a suspend/wake receipt" >&2
+    exit 83
+  }
   [[ "$STATE_SUPERVISOR_PID" == "$crash_supervisor" &&
     "$STATE_SUPERVISOR_START_TICKS" == "$crash_supervisor_start" &&
     "$STATE_BOOT_ID" == "$crash_boot" &&
     "$STATE_FOREGROUND_PID" != "$crash_pid" &&
-    "$STATE_WAKE_COUNT" == "$crash_wakes" &&
     "$STATE_RELEASE_REVISION" == "$crash_revision" &&
     "$STATE_PROFILE_ID" == "$crash_profile" &&
     "$STATE_APP_ID" == "$LAUNCHER_APP_ID" &&
@@ -1165,11 +1180,15 @@ kill -KILL '$crash_pid'" >/dev/null
   sleep "$CRASH_SETTLE_SECONDS"
   settled="$(wait_matching "$UP_TIMEOUT" "$replacement_pid" \
     "$LAUNCHER_APP_ID" "$replacement_seq" "$replacement_mono" \
-    "$crash_wakes" none none)" || {
+    any none none)" || {
     echo "release lifecycle smoke: replacement foreground stopped reporting health" >&2
     exit 84
   }
   parse_state "$settled"
+  no_wake_receipt_since_cursor "$STATE_UNIT" "$crash_wake_cursor" || {
+    echo "release lifecycle smoke: replacement foreground fabricated or obscured a suspend/wake receipt" >&2
+    exit 84
+  }
   [[ "$STATE_FOREGROUND_PID" == "$replacement_pid" &&
     "$STATE_FOREGROUND_START_TICKS" == "$replacement_start" &&
     "$STATE_READY_FILE" == "$replacement_ready_file" &&
@@ -1183,7 +1202,7 @@ kill -KILL '$crash_pid'" >/dev/null
     echo "release lifecycle smoke: replacement foreground health did not progress" >&2
     exit 84
   }
-  echo "release lifecycle smoke: PASS Ink crash old_pid=$crash_pid Home_pid=$STATE_FOREGROUND_PID supervisor=$STATE_SUPERVISOR_PID"
+  echo "release lifecycle smoke: PASS Ink crash old_pid=$crash_pid Home_pid=$STATE_FOREGROUND_PID supervisor=$STATE_SUPERVISOR_PID wake_receipts_after_crash=0"
   stage lifecycle-crash-home
 fi
 

@@ -1,11 +1,12 @@
 # Remove AppLoad: one native Pluto runtime for every supported reMarkable
 
-Status: live implementation and acceptance plan for a pre-release hard
-cutover. The source cut is implemented; the final clean-revision host,
-artifact, three-device optical, lifecycle, recovery, and residue gates remain
-open. This user-requested plan remains as the sole historical cutover inventory;
-when Phase 7 and the Definition of Done are complete its status changes to a
-completed record rather than becoming an active compatibility document.
+Status: completed implementation and acceptance record. Runtime revision
+`ed349d0b845412d77e9e83092472dffe39b60663` and its frozen universal release
+passed the artifact, three-device optical, lifecycle, recovery, performance,
+and residue gates. Later changes to the acceptance harness and reports are
+host-only and do not relabel the installed artifacts. This user-requested plan
+is retained as the sole historical cutover inventory rather than an active
+compatibility document.
 
 This document plans the work required to make reMarkable 1, reMarkable 2, and
 Paper Pro Move use one Pluto product path with device-aware native display

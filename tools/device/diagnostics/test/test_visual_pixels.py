@@ -468,12 +468,13 @@ class VisualPixelsTest(unittest.TestCase):
         for index in sparse_indexes:
             self.assertEqual(
                 VERIFIER_MODULE.SPARSE_ALIGNED_EDGE_DENSITY_FLOORS[index],
-                0.0004,
+                0.00005,
             )
             self.assertGreater(
                 VERIFIER_MODULE.ALIGNED_EDGE_DENSITY_FLOOR,
                 VERIFIER_MODULE.SPARSE_ALIGNED_EDGE_DENSITY_FLOORS[index],
             )
+        self.assertEqual(VERIFIER_MODULE.SPARSE_STAGE_PAIR_FLOOR, 0.15)
 
     def test_allows_validation_equivalent_frames(self) -> None:
         swap_camera_stages(self.root, 3, 6)

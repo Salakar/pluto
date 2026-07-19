@@ -543,6 +543,9 @@ fi'
     ;;
   *'kill -KILL'*)
     [[ "$app" == dev.pluto.ink ]]
+    if [[ "${JOURNAL_FIXTURE_VACUUM_ON_CRASH:-0}" == 1 ]]; then
+      : > "$STATE_DIR/wake-receipts"
+    fi
     ink_pid=none
     pid=$home_pid
     app=dev.pluto.launcher
@@ -762,6 +765,8 @@ SSH_ARGV_LOG="$TMP/strict-ssh-argv" \
   run_smoke normal "$TMP/pass" > "$TMP/pass.out"
 grep -q 'PASS cycles=1 crash_test=1' "$TMP/pass.out" ||
   fail 'same-process warm resume and crash recovery did not pass'
+grep -q 'wake_receipts_after_crash=0' "$TMP/pass.out" ||
+  fail 'crash recovery did not prove the absence of a cursor-bound wake receipt'
 grep -Eq \
   'requested cleared=1 rtc_now=[0-9]+ system_now=[0-9]+ clock_delta=-?[0-9]+ accepted=[0-9]+ arm_margin=60 publish_rtc=[0-9]+ publish_margin=60 frontlight=none' \
   "$TMP/pass.out" || fail 'RTC clock, accepted-alarm, and margin evidence was not emitted'
@@ -872,6 +877,17 @@ JOURNAL_FIXTURE_ROTATE=1 PLUTO_TEST_NO_SLEEP=1 ACCEPTANCE_CYCLES=3 \
 [[ "$(grep -c 'PASS cycle=' "$TMP/journal-rotation.out")" == 3 &&
   "$(wc -l < "$TMP/journal-rotation/wake-receipts" | tr -d ' ')" == 1 ]] ||
   fail 'journal-rotation fixture did not retain only the newest receipt'
+
+reset_state "$TMP/crash-journal-vacuum"
+JOURNAL_FIXTURE_VACUUM_ON_CRASH=1 PLUTO_TEST_NO_SLEEP=1 \
+  PLUTO_LIFECYCLE_CRASH_TEST=1 \
+  run_smoke normal "$TMP/crash-journal-vacuum" \
+    > "$TMP/crash-journal-vacuum.out" ||
+  fail 'crash recovery still depended on the retained whole-boot receipt count'
+grep -q 'PASS cycles=1 crash_test=1' "$TMP/crash-journal-vacuum.out" ||
+  fail 'cursor-bound crash recovery did not pass after journal vacuum'
+[[ ! -s "$TMP/crash-journal-vacuum/wake-receipts" ]] ||
+  fail 'crash journal-vacuum fixture retained an old wake receipt'
 
 reset_state "$TMP/rtc-reachable"
 WAKE_FIXTURE_MODE=rtc-reachable PLUTO_TEST_NO_SLEEP=1 \

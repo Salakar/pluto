@@ -3,11 +3,11 @@
 Date: 2026-07-19
 
 Runtime revision:
-`6aadd9886c0f5409eb575940f35e1349d88bbcb9`
+`ed349d0b845412d77e9e83092472dffe39b60663`
 
-Status: final acceptance is being serialized across the three USB-connected
-tablets. The release and the RM1/Move optical runs are accepted; the remaining
-RM2 optical and final lifecycle rows are intentionally not pre-declared here.
+Status: complete. The frozen release, all three optical runs, the serialized
+lifecycle/crash gates, the final installed-state audit, and the host quality
+gate are accepted.
 
 ## Outcome
 
@@ -32,13 +32,13 @@ passed the target ABI, engine-pin, product-AOT, and release-manifest gates.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| universal release manifest | `99a865fa47656758639984b358c04cfa4e01ff3c448e334b761ce06d798dda1d` |
-| AArch64 embedder | `e642ffa2835ef879fa6013968bd711600b429c81bc31c2adeb63ce7baea5f1ff` |
-| ARMv7 hard-float embedder | `de234470e16a19e6acac143e5303799c3978ee14142c1fcf4dcec25190e6b27b` |
-| common supervisor, both slices | `bb6907ef4fc15f09ff676ee4926de06b3af7824629fe48c7e76caed87ae13d32` |
+| universal release manifest | `74b2b7223a2c388395a92539fc06aa40d9e7d14ac8d4186e6e34bb19eb5956fa` |
+| AArch64 embedder | `ee52ddec49eb66f4e3750cee64e59a3e1e5e4735deafa04d574b4b29ac7eef4e` |
+| ARMv7 hard-float embedder | `0a300e01a248018df506600abd7365bb9dc9328220c47c0f973f968dce6915c9` |
+| common supervisor, both slices | `8f3ff898784ebe7083f4093938cb450bd08136c859116a3b3e030d0435e24e63` |
 
 The exact hash list is preserved in
-`analysis/native-cutover/final-release/6aadd9886c0f5409eb575940f35e1349d88bbcb9/artifact-hashes.txt`.
+`analysis/native-cutover/final-release/ed349d0b845412d77e9e83092472dffe39b60663/artifact-hashes.txt`.
 
 ## Architecture delivered
 
@@ -99,6 +99,20 @@ SY7636A `power_good` attribute and requires two consecutive `OFF` samples,
 next presenter. This preserves the handoff chain cap and the hibernated Flutter
 PID without allowing two panel owners to overlap.
 
+An unexpectedly killed RM2 renderer is reaped before the supervisor writes the
+kernel framebuffer `blank` attribute to `POWERDOWN`, then requires the same
+stable two-sample `OFF` proof before recovering to Home. This closes the
+physical owner boundary that orderly handoff metadata cannot supply after a
+crash.
+
+The first substantive cross-app reconciliation job promotes the retained
+complete target into one full-panel presenter job. Three bounded mode-6
+black/white conditioning cycles precede complete mode-2 target content. The
+same transition-key vector and 256-byte stack remap are reused, so the third
+cycle adds no Flutter traversal, target copy, heap allocation, lifecycle path,
+or app-visible API. Repeated formal Motion Lab stress rejected two cycles;
+three cycles produced a clean following Ink Lab panel on the exact device.
+
 ### Move
 
 Move retains its Gallery 3 and DRM implementation behind the same presenter
@@ -122,12 +136,12 @@ owner because boot-default enablement is still profile-gated.
 
 | Device | Profile | Slice | Installed embedder | Common service | Stock UI while Pluto owns panel | Removed-runtime paths/processes |
 | --- | --- | --- | --- | --- | --- | ---: |
-| reMarkable 1 | `rm1` | `linux-arm` | `de234470…e6b27b` | active | inactive | 0 / 0 |
-| reMarkable 2 | `rm2` | `linux-arm` | `de234470…e6b27b` | active | inactive | 0 / 0 |
-| Paper Pro Move | `move` | `linux-arm64` | `e642ffa2…f1ff` | active | inactive | 0 / 0 |
+| reMarkable 1 | `rm1` | `linux-arm` | `0a300e01…6915c9` | active | inactive | 0 / 0 |
+| reMarkable 2 | `rm2` | `linux-arm` | `0a300e01…6915c9` | active | inactive | 0 / 0 |
+| Paper Pro Move | `move` | `linux-arm64` | `ee52ddec…eef4e` | active | inactive | 0 / 0 |
 
 The post-install audit is
-`analysis/native-cutover/final-release/6aadd9886c0f5409eb575940f35e1349d88bbcb9/post-install-fence.txt`.
+`analysis/native-cutover/final-release/ed349d0b845412d77e9e83092472dffe39b60663/`.
 
 ## Physical acceptance
 
@@ -142,17 +156,18 @@ both required.
 | --- | --- | --- | --- |
 | exact installed revision/profile/manifest | pass | pass | pass |
 | common supervisor and release/AOT identity | pass | pass | pass |
-| all target-supported apps | pass | pending final optical run | pass |
-| real switcher and selected app | pass | pending final optical run | pass |
-| blank-to-stroked Ink on glass | pass | pending final optical run | pass |
-| Home return on glass | pass | pending final optical run | pass |
-| calibrated 10-stage verifier | pass, `ink_overlap=1.0000` | pending | pass, `ink_overlap=1.0000` |
-| Paper Codex | not applicable | not applicable | supported |
+| all target-supported apps | pass | pass | pass |
+| real switcher and selected app | pass | pass | pass |
+| blank-to-stroked Ink on glass | pass | pass | pass |
+| Home return on glass | pass | pass | pass |
+| calibrated 10-stage verifier | pass, alignment `0.3470`, pair min `0.1950`, Ink overlap `1.0000` | pass, alignment `0.3258`, pair min `0.1774`, Ink overlap `1.0000` | pass, alignment `0.5911`, pair min `0.4613`, Ink overlap `1.0000` |
+| Paper Codex | not applicable | not applicable | pass: UI visible, `codex-cli 0.144.1` spawned |
 
 Accepted optical evidence:
 
-- `analysis/native-cutover/final-acceptance/6aadd9886c0f5409eb575940f35e1349d88bbcb9/rm1/`
-- `analysis/native-cutover/final-acceptance/6aadd9886c0f5409eb575940f35e1349d88bbcb9/move/`
+- `analysis/native-cutover/final-acceptance/ed349d0b845412d77e9e83092472dffe39b60663/rm1/`
+- `analysis/native-cutover/final-acceptance/ed349d0b845412d77e9e83092472dffe39b60663/rm2/`
+- `analysis/native-cutover/final-acceptance/ed349d0b845412d77e9e83092472dffe39b60663/move/`
 
 The lifecycle gate preserves the same Home and Ink PIDs across twenty exact
 RTC-bound suspend/resume cycles, restores the stroked Ink surface, and proves
@@ -162,29 +177,54 @@ re-enumeration even when the on-device RTC receipt is exact.
 
 | Lifecycle gate | RM1 | RM2 | Move |
 | --- | --- | --- | --- |
-| 20 exact RTC suspend/resume cycles | pending serialized final | pending serialized final | pending serialized final |
-| same Home PID and advancing health | pending | pending | pending |
-| stroked Ink restore | pending | pending | pending |
-| foreground crash recovery | pending | pending | pending |
+| 20 exact RTC suspend/resume cycles | pass | pass | pass |
+| same Home PID and advancing health | pass | pass | pass |
+| stroked Ink restore | pass | pass | pass |
+| foreground crash recovery | pass, zero post-cursor wake receipts | pass, stable PMIC `OFF` and zero post-cursor wake receipts | pass, zero post-cursor wake receipts |
+
+RM1 and Move passed the complete 20-cycle plus crash command. RM2 passed all
+20 cursor-bound cycles and restored the original stroked Ink PID; its correct
+physical crash recovery then exposed a host-harness defect when journald
+vacuum reduced the retained whole-boot wake count from 16 to 8. The harness now
+binds crash recovery to its own pre-kill journal cursor and requires zero new
+wake receipts. Its fixture and a focused exact-device supplement pass. The
+runtime needed no change.
+
+Lifecycle evidence:
+
+- `analysis/native-cutover/lifecycle/ed349d0b845412d77e9e83092472dffe39b60663/rm1-final-serial/`
+- `analysis/native-cutover/lifecycle/ed349d0b845412d77e9e83092472dffe39b60663/rm2-final-serial/`
+- `analysis/native-cutover/lifecycle/ed349d0b845412d77e9e83092472dffe39b60663/rm2-crash-cursor-supplement/`
+- `analysis/native-cutover/lifecycle/ed349d0b845412d77e9e83092472dffe39b60663/move-final-serial/`
 
 ## Host and artifact verification
 
-The final sign-off runs:
+The final sign-off passed:
 
-- deterministic profile regeneration and setup verification;
-- Dart formatting, analysis, workspace/CLI tests, and goldens;
-- native debug/release CTest plus focused sanitizers;
-- ARMv7 hard-float and AArch64 ELF/library-ceiling gates;
-- product-AOT validation and both universal release slices;
+- `./tools/setup/setup.sh --verify`;
+- the 17-case calibrated visual-pixel regression suite;
+- the lifecycle harness regression suite, including journal vacuum during
+  crash recovery;
 - source/build/payload residue denial;
-- the complete `./ci/check.sh`.
+- the complete `./ci/check.sh`;
+- final `git diff --check`.
 
-Final results will be recorded here only after the serialized physical runs no
-longer contend for host USB transport.
+Evidence is under
+`analysis/native-cutover/final-gates/ed349d0b845412d77e9e83092472dffe39b60663/`.
+
+The final live audit put Home in the foreground on all three tablets and
+rechecked the installed release revision, profile, release/native process
+identity, common service, stock-service exclusion, embedder and supervisor
+hashes, installed app set, removed-runtime path/process count, and next-boot
+owner. All three report the exact frozen hashes, zero removed-runtime
+paths/processes, transient Pluto for the current boot, and stock Xochitl first
+on the next boot. The simultaneous rig frame and command transcripts are under
+`analysis/native-cutover/final-audit/ed349d0b845412d77e9e83092472dffe39b60663/`.
 
 ## Acceptance decision
 
-Pending the RM2 optical run, all three serialized lifecycle soaks, the final
-full host gate, and a final three-panel Home frame. No pending item requires a
-second runtime architecture or compatibility work.
-
+Accepted. Pluto Home, the switcher, every supported common app, physical Ink
+drawing, warm suspend/resume, crash recovery, and the Move-only Paper Codex
+capability all run through the common native supervisor and renderer contract
+on the three physical tablets. Stock remains the tested recovery/next-boot
+owner; it is not a runtime rendering fallback.

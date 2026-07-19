@@ -3,11 +3,11 @@
 Date: 2026-07-19
 
 Runtime revision:
-`6aadd9886c0f5409eb575940f35e1349d88bbcb9`
+`ed349d0b845412d77e9e83092472dffe39b60663`
 
-Status: exact-device optimization decisions are final. RM1 video and optical
-acceptance are complete; the matching RM2 final video is pending its serialized
-lifecycle soak.
+Status: complete. Exact-device optimization decisions, all three optical
+acceptance runs, serialized lifecycle/crash soaks, installed-state audit, and
+the host gate are final.
 
 ## Method and acceptance rule
 
@@ -176,17 +176,49 @@ Physical app switching rejected several logically plausible shortcuts:
 - one white rail and one black/white cycle both left visible stress content;
 - the warm-handoff chain cap was not removed merely to avoid a cold boundary.
 
-The retained path uses bracketed live-power reads, two black/white conditioning
-cycles for a substantive cross-app reconciliation, safe-hold validation, and
-the supervisor's two-sample cold power boundary. Every failed candidate
-recovered to Home rather than retrying uncertain panel work.
+The retained path uses bracketed live-power reads, safe-hold validation, and
+the supervisor's two-sample cold power boundary. A focused source-to-target
+trial accepted two black/white conditioning cycles, but the repeated ten-stage
+formal sequence accumulated enough pigment debt to leave strong Motion Lab
+structure over Ink Lab. The exact logs showed two completed cycles and zero
+timing or hardware faults, so this was a physical image-quality rejection.
+
+The final path runs three mode-6 black/white cycles inside the same promoted
+first cross-app presenter job, then complete mode-2 target content. It reuses
+the transition-key vector and 256-byte stack remap and adds no target copy,
+allocation, Flutter traversal, or lifecycle transition. At 24 °C the third
+pair adds 20 phases, approximately 236 ms. Exact revision `ed349d0…` passed a
+stressed Motion-Lab-to-Ink-Lab video and the back-to-back formal sequence with
+no retained stripes, spinner, line, or box after settle. Every failed
+candidate recovered to Home rather than retrying uncertain panel work.
 
 ### Final recorded Ink window
 
-Pending the serialized RM2 lifecycle run. The final entry will include the
-same 15 s camera video, 30 fps transition contact sheet, CPU ticks, RSS/HWM,
-available memory, frequency, temperature, post-dither delta, and optical
-tear/ghost review used for RM1.
+The immediate predecessor `049fdbae…` recorded the unchanged active-Ink fast
+path; final revision `ed349d0…` modifies only the cross-app conditioning
+sequence described above. The 15 s rig video contains 450 H.264 frames over
+14.981 s at approximately 30 fps. Frame-by-frame review shows the stroke
+building continuously at about 2.97–3.34 s with no split line, skipped
+segment, or horizontal tear.
+
+| Process/system metric | Result |
+| --- | ---: |
+| Ink average / peak CPU | 12.240% / 138.000% of one core |
+| Ink RSS min / average / max | 121,384 / 127,703 / 136,092 KiB |
+| Ink maximum HWM | 164,620 KiB |
+| supervisor average / peak CPU | 5.360% / 7.000% of one core |
+| supervisor RSS | 4,388 KiB |
+| minimum system `MemAvailable` | 782,936 KiB |
+| CPU0 range | 792–1,200 MHz |
+| maximum temperature | 38 °C |
+| system busy time | 19.431% |
+| central post-dither stroke delta | `YAVG=0.690128` |
+
+The 138% peak is a sampled two-core process burst expressed in one-core units,
+not sustained utilization. Evidence:
+`analysis/native-cutover/performance/final-video-049fdbae375da620042f2e1b622cbb368ab84d2c/rm2/`.
+The exact final-runtime cross-app video is under
+`analysis/native-cutover/diagnostics/rm2-handoff-three-cycle-ed349d0b845412d77e9e83092472dffe39b60663/`.
 
 ## Move regression and shared pen path
 
@@ -226,7 +258,8 @@ preview remains only a hint; exact app-owned truth follows.
 
 The retained optimizations are checksum- or oracle-exact, bounded, and
 profile-gated. Losing paths were removed or left only in benchmark evidence;
-there is no production benchmark selector. Final acceptance remains open only
-for the serialized RM2 video/optical pass and the final all-device lifecycle
-and host gates.
-
+there is no production benchmark selector. All three optical gates are
+accepted. Twenty exact RTC suspend/resume cycles, stroked-Ink restoration,
+foreground-crash recovery, and final Home state passed on RM1, RM2, and Move.
+The calibrated visual regressions, lifecycle harness regressions, residue
+denial, setup verification, and complete repository quality gate also pass.

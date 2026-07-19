@@ -1,8 +1,9 @@
 # Native cutover implementation and benchmark report
 
-Status: final all-device release acceptance is in progress. Measured development
-rounds are recorded below; the release tables remain explicitly unaccepted
-until the same clean revision and artifact set passes on all three tablets.
+Status: accepted. Runtime revision
+`ed349d0b845412d77e9e83092472dffe39b60663` and one frozen universal artifact
+set passed the final host, physical-device, optical, performance, lifecycle,
+crash-recovery, and residue gates on RM1, RM2, and Move.
 
 ## Scope and acceptance rule
 
@@ -617,9 +618,40 @@ The exact activation logged one cleanup job and the expected two mode-6
 black/white cycles followed by complete mode-2 content. Across three jobs it
 recorded 126 phases, encode p50 `7.727 ms`, p95 `7.812 ms`, p99 `7.897 ms`,
 maximum `7.913 ms`, zero missed phases, zero underflows, zero hardware faults,
-and no buffer growth. This accepts the presenter-local optical sequence; the
-formal same-revision all-device table remains pending until RM1 and Move also
-pass.
+and no buffer growth. This accepted the presenter-local optical sequence at
+that intermediate stage; round 14 and the final table record the later
+worst-case correction and all-device result.
+
+### RM2 round 14: three cycles survive repeated formal stress
+
+The controlled round-13 source-to-target trial was necessary but not a
+sufficient worst-case history. During a later complete ten-stage formal run,
+two correctly executed cycles left strong Motion Lab stripes, spinner, line,
+and box over the following Ink Lab panel. The paired native Ink Lab screenshot
+was clean. App and presenter logs proved that both cycles completed with zero
+missed deadlines, underflows, power faults, or hardware faults, so the
+candidate was rejected optically rather than by trigger, timing, or logical
+content.
+
+Final runtime revision
+`ed349d0b845412d77e9e83092472dffe39b60663` adds one more mode-6
+black/white pair before complete mode-2 content. The full sequence is recorded
+source to black, black to white, white to black, black to white, white to
+black, black to white, then target content from white. The original transition
+key and 256-byte stack remap still encode every stage inside one promoted
+presenter job. There is no second panel target, heap allocation, surface walk,
+Flutter frame, lifecycle transition, or new app-facing control. The marginal
+20 phases cost about 236 ms at the bound 24 C table.
+
+The focused exact-revision Motion-Lab-to-Ink-Lab video under
+`analysis/native-cutover/diagnostics/rm2-handoff-three-cycle-ed349d0b845412d77e9e83092472dffe39b60663/`
+shows the bounded rail sequence and a clean stable Ink Lab target. The
+back-to-back formal ten-stage run also remained clean. Its device log records
+three black/white mode-6 cycles followed by complete mode-2 content, and the
+camera/native pairs contain no tear, skipped content, or retained source
+structure after settle. Three cycles are therefore the accepted RM2
+cross-app bound; ordinary regional work, pen work, and the exact 1x1
+same-surface liveness proof keep their non-flashing paths.
 
 ### Lifecycle acceptance: reject early external wakes
 
@@ -637,58 +669,70 @@ Acceptance requires that immutable receipt to fall within the fixed two-second
 whole-clock tolerance on either side of the armed epoch, whether or not SSH
 briefly became unreachable. It distinguishes early wake, late wake, and no
 suspend receipt, and accepts slow USB transport only when the exact on-time
-receipt exists. The final 20-cycle runs must be hands-off and pass this stronger
-gate.
+receipt exists. The final hands-off runs passed this stronger gate. RM1 and
+Move each passed the complete 20-cycle plus crash command. RM2 passed all 20
+exact cycles and physically recovered from the deliberate crash, but its
+original host command then reported a false negative because journald vacuum
+reduced the retained whole-boot receipt count. The corrected cursor-scoped
+fixture and an exact-device crash supplement both pass, with zero post-cursor
+wake receipts; the runtime needed no change.
 
 ## Final host and artifact gates
 
-The following table is intentionally not a promise from an intermediate build.
-Each row receives its final revision, command, and result only after the tree is
-clean and the exact artifacts used by all three tablets have been frozen.
+The device runtime and payloads are frozen at `ed349d0…`. The final host-only
+acceptance commit descends from that revision and changes no installed binary
+or payload. Detailed logs are under
+`analysis/native-cutover/final-gates/ed349d0b845412d77e9e83092472dffe39b60663/`.
 
 | Gate | Final result | Evidence |
 | --- | --- | --- |
-| profile/table regeneration | pending final revision | pending |
-| setup verification | pending final revision | pending |
-| shell contracts | pending final revision | pending |
-| Dart format/analyze/tests/goldens | pending final revision | pending |
-| native debug/release CTest | pending final revision | pending |
-| ASan/UBSan and focused TSan | pending final revision | pending |
-| ARMv7 ELF/ABI and product AOT | pending final revision | pending |
-| AArch64 ELF/ABI and product AOT | pending final revision | pending |
-| `linux-arm` payload assembly | pending final revision | pending |
-| `linux-arm64` payload assembly | pending final revision | pending |
-| source/build/payload residue denylist | pending final revision | pending |
-| complete `./ci/check.sh` | pending final revision | pending |
+| profile/table regeneration | pass | complete repository quality gate |
+| setup verification | pass | `setup-verify.log` |
+| shell contracts | pass | complete repository quality gate |
+| Dart format/analyze/tests/goldens | pass | complete repository quality gate |
+| native debug/release CTest | pass | frozen-runtime native test records below |
+| ASan/UBSan and focused TSan | pass | focused driver records below |
+| ARMv7 ELF/ABI and product AOT | pass | frozen release and quality gate |
+| AArch64 ELF/ABI and product AOT | pass | frozen release and quality gate |
+| `linux-arm` payload assembly | pass | frozen release manifest |
+| `linux-arm64` payload assembly | pass | frozen release manifest |
+| source/build/payload residue denylist | pass | `residue-test.log` |
+| calibrated visual-pixel regressions | pass, 17 cases | `visual-pixels-test.log` |
+| lifecycle harness regressions | pass | `lifecycle-harness-test.log` |
+| complete `./ci/check.sh` | pass | `ci-check.log` |
 
 ## Same-revision physical-device acceptance
 
-All cells must refer to the same clean Git revision and corresponding target
-artifact hashes. “Visible” means a fresh camera frame or video of the physical
-panel. A stock screen, host screenshot alone, service log alone, or a frozen
-previous e-ink image does not pass.
+All device cells refer to runtime revision `ed349d0…`, manifest SHA-256
+`74b2b7223a2c388395a92539fc06aa40d9e7d14ac8d4186e6e34bb19eb5956fa`,
+ARM embedder `0a300e01…6915c9`, ARM64 embedder `ee52ddec…eef4e`, and common
+supervisor `8f3ff898…24e63`. “Visible” means a fresh camera frame or video of
+the physical panel.
 
 | Gate | RM1 | RM2 | Move |
 | --- | --- | --- | --- |
-| exact profile/kernel/panel/waveform accepted | pending | pending | pending |
-| final release payload hash verified | pending | pending | pending |
-| common supervisor healthy | pending | pending | pending |
-| release/AOT process identity | pending | pending | pending |
-| Pluto Home visible | pending | pending | pending |
-| all target-supported apps launch and present | pending | pending | pending |
-| switcher visible | pending | pending | pending |
-| another app selected and visible | pending | pending | pending |
-| Ink visible with deterministic pointer stroke | pending | pending | pending |
-| Home return visible | pending | pending | pending |
-| native Paper Codex capability | not applicable | not applicable | pending |
-| screenshot, logs, and health agree with glass | pending | pending | pending |
-| CPU, RSS, latency, thermal, and fault counters | pending | pending | pending |
-| final residue audit | pending | pending | pending |
+| exact profile/kernel/panel/waveform accepted | pass | pass | pass |
+| final release payload hash verified | pass | pass | pass |
+| common supervisor healthy | pass | pass | pass |
+| release/AOT process identity | pass | pass | pass |
+| Pluto Home visible | pass | pass | pass |
+| all target-supported apps launch and present | pass | pass | pass |
+| switcher visible | pass | pass | pass |
+| another app selected and visible | pass | pass | pass |
+| Ink visible with deterministic pointer stroke | pass | pass | pass |
+| Home return visible | pass | pass | pass |
+| native Paper Codex capability | not applicable | not applicable | pass |
+| screenshot, logs, and health agree with glass | pass | pass | pass |
+| CPU, RSS, latency, thermal, and fault counters | pass | pass | pass |
+| 20 exact RTC cycles and stroked-Ink restoration | pass | pass | pass |
+| foreground-crash recovery | pass | pass, corrected cursor supplement | pass |
+| final residue and installed-state audit | pass | pass | pass |
 
-The final evidence bundle will live under
-`analysis/native-cutover/final-acceptance/` and include command transcripts,
-hash manifests, process and service records, health receipts, raw timing data,
-camera stills/video/contact sheets, and a per-device audit.
+The evidence bundles are under
+`analysis/native-cutover/final-acceptance/ed349d0b845412d77e9e83092472dffe39b60663/`,
+`analysis/native-cutover/lifecycle/ed349d0b845412d77e9e83092472dffe39b60663/`,
+and
+`analysis/native-cutover/final-audit/ed349d0b845412d77e9e83092472dffe39b60663/`.
 
 ### Development optical smoke is not final acceptance
 
@@ -703,6 +747,12 @@ from the frozen release.
 
 ## Final conclusion
 
-Pending the same-revision all-device release and camera gate. This section will
-state acceptance only after every required cell above is backed by preserved
-evidence.
+Accepted. The three tablets run the same native Pluto product architecture,
+with profile-selected panel drivers only at the true hardware boundary. Home,
+the switcher, every target-supported app, deterministic Ink drawing, warm
+suspend/resume, foreground-crash recovery, screenshots, logs, and health agree
+with the physical panels. No tearing or skipped Ink segment was observed.
+Move's transient Gallery 3 pigment during stress settles to the intended
+content and is not described as zero transient pigment. Pluto owns the current
+boot; stock remains the verified next-boot recovery owner because
+boot-default enablement stays profile-gated.

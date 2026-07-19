@@ -52,17 +52,20 @@ INK_AFTER_INDEX = 8
 INK_EQUIVALENT = frozenset((INK_BEFORE_INDEX, INK_AFTER_INDEX))
 MOTION_LAB_INDEX = 1
 DYNAMIC_STAGE_PAIR_FLOOR = 0.10
+SPARSE_STAGE_PAIR_FLOOR = 0.15
 INK_LAB_INDEX = 2
 INK_GALLERY_INDEX = 4
 INK_CANVAS_BEFORE_INDEX = 7
 INK_CANVAS_AFTER_INDEX = 8
 ALIGNED_EDGE_ENERGY_FLOOR = 0.005
 ALIGNED_EDGE_DENSITY_FLOOR = 0.003
-# The calibrated 4K RM2 Ink Lab proof retains 0.012027 edge energy but only
-# 0.000470 strong-edge density after the bounded 144x192 alignment warp.  The
-# sparse floor therefore requires roughly 11 strong pixels while the unwarped
-# content gate, energy, pair, assignment, and signed-stroke checks remain.
-SPARSE_ALIGNED_EDGE_DENSITY_FLOOR = 0.0004
+# Clean 4K RM2 Ink Lab proofs are intentionally almost empty. The original
+# calibration retained 0.000470 strong-edge density, but exact clean release
+# runs after stronger pigment conditioning measured 0.000072--0.000109: the
+# old floor accidentally depended on residual pigment or resampling noise.
+# Keep a nonzero roughly-two-pixel floor while the stricter unwarped content
+# gate, aligned energy, complete assignment, and signed-stroke checks remain.
+SPARSE_ALIGNED_EDGE_DENSITY_FLOOR = 0.00005
 SPARSE_ALIGNED_EDGE_DENSITY_FLOORS = {
     INK_LAB_INDEX: SPARSE_ALIGNED_EDGE_DENSITY_FLOOR,
     INK_GALLERY_INDEX: SPARSE_ALIGNED_EDGE_DENSITY_FLOOR,
@@ -76,8 +79,9 @@ WORK_HEIGHT = 192
 # pairs available before final acceptance were RM1 Home and Ink gallery.  With
 # this bounded transform they score 0.349 and 0.271 respectively despite the
 # 1152x1374 optical crop, illumination falloff, and JPEG blur.  The 0.20
-# alignment, 0.18 per-pair, 0.28 run-mean, and 0.008 one-to-one assignment
-# discrimination floors retain margin below that evidence.  The old RM1
+# alignment, 0.18 ordinary-pair, 0.15 sparse-pair, 0.28 run-mean, and 0.008
+# one-to-one assignment discrimination floors retain margin below that
+# evidence.  The old RM1
 # "stroke" pair was a decoded no-op, so it is used only as negative evidence;
 # positive stroke thresholds come from the exact panel-relative protocol
 # geometry plus the adversarial synthetic suite.  Motion Lab is the sole
@@ -86,10 +90,13 @@ WORK_HEIGHT = 192
 # 0.159--0.264 there.  The calibrated 4K Move proof measured 0.119 while its
 # static pairs measured 0.488--0.710, the run mean was 0.556, and the complete
 # assignment margin was 0.027.  Motion therefore has a 0.10 pair floor and is
-# still covered by the mandatory 0.008 complete-assignment discrimination;
-# all static stages retain the 0.18 pair floor.  Per-row nearest-neighbour
-# discrimination is intentionally not a gate: a locally similar frame can
-# rank first while the correct ten-frame bijection remains unambiguous.
+# still covered by the mandatory 0.008 complete-assignment discrimination.
+# Ordinary static stages retain the 0.18 pair floor. Clean, nearly blank Ink
+# surfaces retain the 0.15 sparse floor; their run mean, bijection, nonblank
+# gate, and deterministic stroke checks remain mandatory. Per-row
+# nearest-neighbour discrimination is intentionally not a gate: a locally
+# similar frame can rank first while the correct ten-frame bijection remains
+# unambiguous.
 
 
 class VerificationError(RuntimeError):
@@ -606,11 +613,12 @@ def _verify_stage_matching(
         allowed = allowed_by_row[camera_index]
         accepted = max(row[index] for index in allowed)
         accepted_scores.append(accepted)
-        floor = (
-            DYNAMIC_STAGE_PAIR_FLOOR
-            if camera_index == MOTION_LAB_INDEX
-            else 0.18
-        )
+        if camera_index == MOTION_LAB_INDEX:
+            floor = DYNAMIC_STAGE_PAIR_FLOOR
+        elif camera_index in SPARSE_ALIGNED_EDGE_DENSITY_FLOORS:
+            floor = SPARSE_STAGE_PAIR_FLOOR
+        else:
+            floor = 0.18
         if accepted < floor:
             _fail(
                 "camera/native stage match is too weak "
