@@ -210,16 +210,21 @@ COLD_HOME="$TMP/cold-home"
 COLD_PUB_CACHE="$TMP/cold-pub-cache"
 COLD_BIN="$TMP/cold-bin"
 COLD_GIT_CONFIG="$TMP/cold-gitconfig"
+COLD_MAIN_OUTPUT="$TMP/cold-main.out"
 mkdir -p "$COLD_HOME"
 GIT_CONFIG_GLOBAL="$COLD_GIT_CONFIG" git config --global \
   "url.file://$SDK_SOURCE.insteadOf" "$FLUTTER_REPOSITORY"
-GIT_ALLOW_PROTOCOL=file \
-GIT_CONFIG_GLOBAL="$COLD_GIT_CONFIG" \
-HOME="$COLD_HOME" \
-PLUTO_SDK="$COLD_SDK" \
-PUB_CACHE="$COLD_PUB_CACHE" \
-PLUTO_BIN_DIR="$COLD_BIN" \
-  bash -c 'source "$1"; main' _ "$ROOT/tools/setup/setup.sh" >/dev/null
+if ! GIT_ALLOW_PROTOCOL=file \
+  GIT_CONFIG_GLOBAL="$COLD_GIT_CONFIG" \
+  HOME="$COLD_HOME" \
+  PLUTO_SDK="$COLD_SDK" \
+  PUB_CACHE="$COLD_PUB_CACHE" \
+  PLUTO_BIN_DIR="$COLD_BIN" \
+    bash -c 'source "$1"; main' _ "$ROOT/tools/setup/setup.sh" \
+      > "$COLD_MAIN_OUTPUT" 2>&1; then
+  sed -n '1,240p' "$COLD_MAIN_OUTPUT" >&2
+  fail "cold main setup fixture failed"
+fi
 [[ -x "$COLD_SDK/bin/cache/dart-sdk/bin/dart" ]] || {
   printf 'FAIL: cold main setup did not initialize Dart\n' >&2
   exit 1
