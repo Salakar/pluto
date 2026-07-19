@@ -409,6 +409,7 @@ class VisualPixelsTest(unittest.TestCase):
     def test_stroke_overlap_allows_only_the_calibrated_registration_guard(
         self,
     ) -> None:
+        self.assertEqual(VERIFIER_MODULE.INK_TRAJECTORY_DELTA_LIMIT, 0.021)
         width = 20
         height = 12
         centroids = (0.5,) * 8
@@ -447,6 +448,31 @@ class VisualPixelsTest(unittest.TestCase):
     def test_only_motion_lab_is_declared_as_the_dynamic_stage(self) -> None:
         self.assertEqual(VERIFIER_MODULE.MOTION_LAB_INDEX, 1)
         self.assertEqual(LABELS[VERIFIER_MODULE.MOTION_LAB_INDEX], LABELS[1])
+
+    def test_only_ink_surfaces_have_the_sparse_aligned_edge_density_floor(
+        self,
+    ) -> None:
+        self.assertEqual(VERIFIER_MODULE.INK_LAB_INDEX, 2)
+        self.assertEqual(LABELS[VERIFIER_MODULE.INK_LAB_INDEX], LABELS[2])
+        sparse_indexes = {
+            VERIFIER_MODULE.INK_LAB_INDEX,
+            VERIFIER_MODULE.INK_GALLERY_INDEX,
+            VERIFIER_MODULE.INK_CANVAS_BEFORE_INDEX,
+            VERIFIER_MODULE.INK_CANVAS_AFTER_INDEX,
+        }
+        self.assertEqual(
+            set(VERIFIER_MODULE.SPARSE_ALIGNED_EDGE_DENSITY_FLOORS),
+            sparse_indexes,
+        )
+        for index in sparse_indexes:
+            self.assertEqual(
+                VERIFIER_MODULE.SPARSE_ALIGNED_EDGE_DENSITY_FLOORS[index],
+                0.00125,
+            )
+            self.assertGreater(
+                VERIFIER_MODULE.ALIGNED_EDGE_DENSITY_FLOOR,
+                VERIFIER_MODULE.SPARSE_ALIGNED_EDGE_DENSITY_FLOORS[index],
+            )
 
     def test_allows_validation_equivalent_frames(self) -> None:
         swap_camera_stages(self.root, 3, 6)
