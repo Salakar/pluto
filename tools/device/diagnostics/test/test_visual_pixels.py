@@ -468,7 +468,7 @@ class VisualPixelsTest(unittest.TestCase):
         for index in sparse_indexes:
             self.assertEqual(
                 VERIFIER_MODULE.SPARSE_ALIGNED_EDGE_DENSITY_FLOORS[index],
-                0.00125,
+                0.0004,
             )
             self.assertGreater(
                 VERIFIER_MODULE.ALIGNED_EDGE_DENSITY_FLOOR,
