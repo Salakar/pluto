@@ -46,10 +46,54 @@ using DirectScreenshotHandler = std::function<bool(
     const std::optional<std::string> &requested_app_id,
     DirectScreenshotCapture *capture, DirectControlFailure *failure)>;
 
+// Result of one root-local, deterministic pointer gesture. This is used by the
+// real-device acceptance harness to exercise the same Flutter hit-test/input
+// path on devices that cannot expose a kernel uinput device. Both the switcher
+// tap and Ink stroke return this bounded identity receipt.
+struct DirectPointerResult {
+  std::string app_id;
+  std::int64_t pid = 0;
+  std::size_t event_count = 0;
+};
+
+using DirectPointerHandler = std::function<bool(
+    const std::string &requested_app_id, DirectPointerResult *result,
+    DirectControlFailure *failure)>;
+
+// The Ink stroke is an acceptance mutation, so the request must name the exact
+// foreground process which is allowed to receive it. The handler independently
+// checks that expected_pid identifies its own process before delivering input.
+using DirectInkStrokeHandler = std::function<bool(
+    const std::string &requested_app_id, std::int64_t expected_pid,
+    DirectPointerResult *result, DirectControlFailure *failure)>;
+
+// Result of the acceptance-only Ink canvas preparation flow. The caller binds
+// the request to the foreground receipt it just read; the embedder must return
+// that exact process and may invoke only Ink's bounded semantic actions.
+struct DirectInkCanvasResult {
+  std::string app_id;
+  std::int64_t pid = 0;
+  std::uint64_t process_start_ticks = 0;
+  std::size_t action_count = 0;
+  bool canvas_ready = false;
+  // The retained Flutter surface generation and exact Full presenter frame
+  // completed after the final canvas-ready semantics generation. Both are
+  // mandatory even when the editor was already mounted and action_count is 0.
+  std::uint64_t surface_generation = 0;
+  std::uint64_t proof_frame_id = 0;
+};
+
+using DirectInkCanvasHandler = std::function<bool(
+    const std::string &requested_app_id, std::int64_t expected_pid,
+    DirectInkCanvasResult *result, DirectControlFailure *failure)>;
+
 struct DirectControlServerConfig {
   std::string run_dir = "/run/pluto";
   std::size_t max_packet_bytes = 32768;
   DirectScreenshotHandler screenshot;
+  DirectPointerHandler tap_switcher_preview;
+  DirectInkCanvasHandler prepare_ink_canvas;
+  DirectInkStrokeHandler draw_stroke;
 };
 
 // Root-local control endpoint for the direct embedder. On Linux it publishes

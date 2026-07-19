@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <cassert>
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -47,12 +47,17 @@ uint64_t read_u64_le(std::span<const uint8_t> bytes, size_t offset) {
   return value;
 }
 
-RendererHandoffState make_state(uint16_t first_color = 0xf800u) {
+bool make_state(RendererHandoffState *out_state,
+                uint16_t first_color = 0xf800u) {
   constexpr uint32_t kWidth = 32;
   constexpr uint32_t kHeight = 24;
   constexpr uint32_t kTile = 8;
 
-  RendererHandoffState state;
+  if (out_state == nullptr) {
+    return false;
+  }
+  RendererHandoffState &state = *out_state;
+  state = RendererHandoffState{};
   state.width = kWidth;
   state.height = kHeight;
   state.rotation = 0;
@@ -82,7 +87,11 @@ RendererHandoffState make_state(uint16_t first_color = 0xf800u) {
   frame.l_cur()[0] = 12;
   frame.chroma_bits()[0] = 0x03;
   (void)frame.begin_pass();
-  assert(frame.export_state(&state.frame_ledger));
+  const bool frame_exported = frame.export_state(&state.frame_ledger);
+  EXPECT_TRUE(frame_exported);
+  if (!frame_exported) {
+    return false;
+  }
   state.frame_ledger.row_hash[0][0] = 0x10203040u;
   state.frame_ledger.stats[0].changed_px = 2;
   state.frame_ledger.stats[0].changed_chroma = 1;
@@ -94,30 +103,67 @@ RendererHandoffState make_state(uint16_t first_color = 0xf800u) {
   ladder_config.height = kHeight;
   ladder_config.tile_px = kTile;
   ClassifyLadder ladder;
-  assert(ladder.configure(ladder_config));
-  assert(ladder.export_state(&state.classify_ladder));
+  const bool ladder_configured = ladder.configure(ladder_config);
+  EXPECT_TRUE(ladder_configured);
+  if (!ladder_configured) {
+    return false;
+  }
+  const bool ladder_exported = ladder.export_state(&state.classify_ladder);
+  EXPECT_TRUE(ladder_exported);
+  if (!ladder_exported) {
+    return false;
+  }
   state.classify_ladder.epoch = state.frame_ledger.epoch;
   state.classify_ladder.history[0].last_epoch = 1;
   state.classify_ladder.history[0].streak = 1;
   state.classify_ladder.history[0].last_dirty = PlutoRect{0, 0, 2, 1};
 
   TileGrid grid;
-  assert(grid.configure(kWidth, kHeight, kTile));
+  const bool grid_configured = grid.configure(kWidth, kHeight, kTile);
+  EXPECT_TRUE(grid_configured);
+  if (!grid_configured) {
+    return false;
+  }
   GhostLedger ghost;
   StressLedger stress;
   ChromaPendingSet chroma;
-  assert(ghost.configure(grid, state.renderer_config.ghost_tau_ms,
-                         state.renderer_config.ghost_debt_settle_threshold));
-  assert(stress.configure(grid));
-  assert(chroma.configure(grid));
+  const bool ghost_configured =
+      ghost.configure(grid, state.renderer_config.ghost_tau_ms,
+                      state.renderer_config.ghost_debt_settle_threshold);
+  EXPECT_TRUE(ghost_configured);
+  if (!ghost_configured) {
+    return false;
+  }
+  const bool stress_configured = stress.configure(grid);
+  EXPECT_TRUE(stress_configured);
+  if (!stress_configured) {
+    return false;
+  }
+  const bool chroma_configured = chroma.configure(grid);
+  EXPECT_TRUE(chroma_configured);
+  if (!chroma_configured) {
+    return false;
+  }
   ghost.tick(1000);
   ghost.accrue(PlutoRect{0, 0, 8, 8}, kPlutoRefreshFast);
   stress.tick(1000);
   stress.accrue(PlutoRect{8, 0, 8, 8}, kPlutoRefreshFast);
   chroma.mark(PlutoRect{0, 8, 8, 8});
-  assert(ghost.export_state(&state.ghost_ledger));
-  assert(stress.export_state(&state.stress_ledger));
-  assert(chroma.export_state(&state.chroma_pending));
+  const bool ghost_exported = ghost.export_state(&state.ghost_ledger);
+  EXPECT_TRUE(ghost_exported);
+  if (!ghost_exported) {
+    return false;
+  }
+  const bool stress_exported = stress.export_state(&state.stress_ledger);
+  EXPECT_TRUE(stress_exported);
+  if (!stress_exported) {
+    return false;
+  }
+  const bool chroma_exported = chroma.export_state(&state.chroma_pending);
+  EXPECT_TRUE(chroma_exported);
+  if (!chroma_exported) {
+    return false;
+  }
 
   SettlePlannerConfig planner_config;
   planner_config.width = kWidth;
@@ -128,18 +174,36 @@ RendererHandoffState make_state(uint16_t first_color = 0xf800u) {
   planner_config.enable_sparkle_topoff = false;
   planner_config.perception = pluto::PerceptionConstants(state.renderer_config);
   SettlePlanner planner;
-  assert(planner.configure(planner_config, &ghost, &stress, &chroma));
+  const bool planner_configured =
+      planner.configure(planner_config, &ghost, &stress, &chroma);
+  EXPECT_TRUE(planner_configured);
+  if (!planner_configured) {
+    return false;
+  }
   planner.note_damage(PlutoRect{0, 0, 8, 8}, 2000);
   planner.arm_scroll_settle(PlutoRect{0, 0, 32, 8}, 2000);
-  assert(planner.export_state(&state.settle_planner));
+  const bool planner_exported = planner.export_state(&state.settle_planner);
+  EXPECT_TRUE(planner_exported);
+  if (!planner_exported) {
+    return false;
+  }
 
   AutoGhostbusterConfig auto_config;
   auto_config.pigment_hygiene_supported = true;
   AutoGhostbuster ghostbuster;
-  assert(ghostbuster.configure(grid, auto_config));
+  const bool ghostbuster_configured = ghostbuster.configure(grid, auto_config);
+  EXPECT_TRUE(ghostbuster_configured);
+  if (!ghostbuster_configured) {
+    return false;
+  }
   ghostbuster.note_accepted_present(PlutoRect{0, 0, 8, 8}, kPlutoRefreshFast,
                                     3000);
-  assert(ghostbuster.export_state(&state.auto_ghostbuster));
+  const bool ghostbuster_exported =
+      ghostbuster.export_state(&state.auto_ghostbuster);
+  EXPECT_TRUE(ghostbuster_exported);
+  if (!ghostbuster_exported) {
+    return false;
+  }
 
   RegionSchedulerConfig scheduler_config;
   scheduler_config.width = kWidth;
@@ -153,13 +217,20 @@ RendererHandoffState make_state(uint16_t first_color = 0xf800u) {
       state.retained_frame.data(), static_cast<size_t>(state.retained_stride),
       kWidth, kHeight, kPlutoPixelFormatRgb565};
   RegionScheduler scheduler(scheduler_config, {}, &ghost, &stress, &chroma);
-  assert(scheduler.valid());
-  assert(scheduler.export_state(&state.region_scheduler));
-  return state;
+  const bool scheduler_valid = scheduler.valid();
+  EXPECT_TRUE(scheduler_valid);
+  if (!scheduler_valid) {
+    return false;
+  }
+  const bool scheduler_exported =
+      scheduler.export_state(&state.region_scheduler);
+  EXPECT_TRUE(scheduler_exported);
+  return scheduler_exported;
 }
 
 TEST(RendererHandoffTest, ExactColorChromaAndDebtRoundTrip) {
-  const RendererHandoffState source = make_state();
+  RendererHandoffState source;
+  ASSERT_TRUE(make_state(&source));
   ASSERT_TRUE(pluto::renderer_handoff_validate(source));
   std::vector<uint8_t> encoded;
   RendererHandoffReject reject = RendererHandoffReject::kArgument;
@@ -189,7 +260,8 @@ TEST(RendererHandoffTest, ExactColorChromaAndDebtRoundTrip) {
 }
 
 TEST(RendererHandoffTest, TransientScrollVerificationScratchIsCanonicalized) {
-  RendererHandoffState with_scratch = make_state();
+  RendererHandoffState with_scratch;
+  ASSERT_TRUE(make_state(&with_scratch));
   RendererHandoffState clean = with_scratch;
   std::fill(with_scratch.frame_ledger.row_samples.begin(),
             with_scratch.frame_ledger.row_samples.end(), 0x1eu);
@@ -222,8 +294,10 @@ TEST(RendererHandoffTest, TransientScrollVerificationScratchIsCanonicalized) {
 }
 
 TEST(RendererHandoffTest, EqualVisibleLevelsRetainDifferentExactRgb) {
-  const RendererHandoffState red = make_state(0xf800u);
-  const RendererHandoffState blue = make_state(0x001fu);
+  RendererHandoffState red;
+  RendererHandoffState blue;
+  ASSERT_TRUE(make_state(&red, 0xf800u));
+  ASSERT_TRUE(make_state(&blue, 0x001fu));
   ASSERT_TRUE(red.frame_ledger.levels == blue.frame_ledger.levels);
   ASSERT_EQ(pluto::renderer_handoff_configuration_hash(red),
             pluto::renderer_handoff_configuration_hash(blue));
@@ -242,22 +316,28 @@ TEST(RendererHandoffTest, EqualVisibleLevelsRetainDifferentExactRgb) {
 }
 
 TEST(RendererHandoffTest, WireChecksumsMatchBitwiseCrc64EcmaReference) {
-  const RendererHandoffState source = make_state();
+  RendererHandoffState source;
+  ASSERT_TRUE(make_state(&source));
   std::vector<uint8_t> encoded;
   ASSERT_TRUE(pluto::renderer_handoff_encode(source, &encoded));
-  ASSERT_GE(encoded.size(), 72u);
-  EXPECT_EQ(read_u64_le(encoded, 56),
-            crc64_reference(std::span<const uint8_t>(encoded).subspan(72)));
-  EXPECT_EQ(read_u64_le(encoded, 64),
-            crc64_reference(std::span<const uint8_t>(encoded).first(64)));
+  ASSERT_GE(encoded.size(), 68u);
+  EXPECT_TRUE(std::equal(
+      encoded.begin(), encoded.begin() + 8,
+      std::array<uint8_t, 8>{'P', 'L', 'R', 'S', 'T', 'A', 'T', 'E'}.begin()));
+  EXPECT_EQ(read_u64_le(encoded, 52),
+            crc64_reference(std::span<const uint8_t>(encoded).subspan(68)));
+  EXPECT_EQ(read_u64_le(encoded, 60),
+            crc64_reference(std::span<const uint8_t>(encoded).first(60)));
 }
 
 TEST(RendererHandoffTest, CorruptionPartialAndConfigurationMismatchFailClosed) {
-  const RendererHandoffState source = make_state();
+  RendererHandoffState source;
+  ASSERT_TRUE(make_state(&source));
   std::vector<uint8_t> encoded;
   ASSERT_TRUE(pluto::renderer_handoff_encode(source, &encoded));
 
-  RendererHandoffState untouched = make_state(0x07e0u);
+  RendererHandoffState untouched;
+  ASSERT_TRUE(make_state(&untouched, 0x07e0u));
   const std::vector<uint8_t> before = untouched.retained_frame;
   RendererHandoffReject reject = RendererHandoffReject::kNone;
   std::vector<uint8_t> corrupt = encoded;
@@ -283,39 +363,41 @@ TEST(RendererHandoffTest, CorruptionPartialAndConfigurationMismatchFailClosed) {
 }
 
 TEST(RendererHandoffTest, ConfigurationFingerprintCoversFutureDecisions) {
-  RendererHandoffState source = make_state();
+  RendererHandoffState source;
+  ASSERT_TRUE(make_state(&source));
   const uint64_t baseline = pluto::renderer_handoff_configuration_hash(source);
   source.renderer_config.chroma_floor++;
   EXPECT_NE(pluto::renderer_handoff_configuration_hash(source), baseline);
-  source = make_state();
+  ASSERT_TRUE(make_state(&source));
   source.region_scheduler.config.latency_model_us[0]++;
   EXPECT_NE(pluto::renderer_handoff_configuration_hash(source), baseline);
-  source = make_state();
+  ASSERT_TRUE(make_state(&source));
   source.auto_ghostbuster.config.yellow_tile_threshold_q8++;
   EXPECT_NE(pluto::renderer_handoff_configuration_hash(source), baseline);
-  source = make_state();
+  ASSERT_TRUE(make_state(&source));
   source.start_presenter_thread = false;
   EXPECT_NE(pluto::renderer_handoff_configuration_hash(source), baseline);
-  source = make_state();
+  ASSERT_TRUE(make_state(&source));
   source.presenter_pen_focus_from_host = true;
   EXPECT_NE(pluto::renderer_handoff_configuration_hash(source), baseline);
-  source = make_state();
+  ASSERT_TRUE(make_state(&source));
   source.present_bridge_active = false;
   source.mirror_enabled = true;
   EXPECT_NE(pluto::renderer_handoff_configuration_hash(source), baseline);
 }
 
 TEST(RendererHandoffTest, InvalidLogicalLevelAndDebtStateAreRejected) {
-  RendererHandoffState invalid = make_state();
+  RendererHandoffState invalid;
+  ASSERT_TRUE(make_state(&invalid));
   invalid.frame_ledger.levels[0] = 0xff;
   EXPECT_FALSE(pluto::renderer_handoff_validate(invalid));
   EXPECT_FALSE(pluto::renderer_handoff_encode(invalid, nullptr));
 
-  invalid = make_state();
+  ASSERT_TRUE(make_state(&invalid));
   invalid.chroma_pending.pending[0] = 2;
   EXPECT_FALSE(pluto::renderer_handoff_validate(invalid));
 
-  invalid = make_state();
+  ASSERT_TRUE(make_state(&invalid));
   invalid.auto_ghostbuster.active_decision =
       pluto::AutoGhostbusterDecision::kBlink;
   EXPECT_FALSE(pluto::renderer_handoff_validate(invalid));

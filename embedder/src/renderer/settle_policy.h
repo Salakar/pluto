@@ -13,10 +13,8 @@ namespace pluto {
 
 class RegionScheduler;
 
-// SettlePlanner: the SINGLE settle authority. It replaced both the old
-// scheduler's idle settle and the swtcon presenter's internal idle-settle +
-// full_refresh_every counter — a presenter never self-schedules quality
-// passes anymore.
+// SettlePlanner is the single settle authority. A presenter never
+// self-schedules quality passes.
 //
 // Policy:
 //   * Quiescence: a tile becomes settle-eligible only after
@@ -63,7 +61,6 @@ struct SettlePlannerForcedState {
 };
 
 struct SettlePlannerState {
-  uint32_t version = 1;
   SettlePlannerConfig config{};
   std::vector<uint64_t> last_damage_us;
   std::vector<SettlePlannerForcedState> forced;
@@ -77,7 +74,6 @@ struct SettlePlannerState {
 
 class SettlePlanner {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   SettlePlanner() = default;
 
   bool configure(const SettlePlannerConfig &config, GhostLedger *ghost,

@@ -8,12 +8,12 @@
 
 namespace {
 
-void wakeup_counter(void* ctx) {
-  auto* count = static_cast<std::atomic<int>*>(ctx);
+void wakeup_counter(void *ctx) {
+  auto *count = static_cast<std::atomic<int> *>(ctx);
   count->fetch_add(1);
 }
 
-}  // namespace
+} // namespace
 
 TEST(PlutoPenRingTest, PublicAbiMatchesDoc04Layout) {
   EXPECT_EQ(sizeof(pluto_pen_ring_record), 40u);
@@ -22,14 +22,19 @@ TEST(PlutoPenRingTest, PublicAbiMatchesDoc04Layout) {
   EXPECT_EQ(PLUTO_PEN_RING_RECORD_SIZE, 40u);
   EXPECT_EQ(PLUTO_TOUCH_RING_RECORD_SIZE, 32u);
 
-  const pluto_pen_ring_header* header = pluto_pen_ring();
+  const pluto_pen_ring_header *header = pluto_pen_ring();
   ASSERT_TRUE(header != nullptr);
   EXPECT_EQ(header->magic, PLUTO_PEN_RING_MAGIC);
-  EXPECT_EQ(header->version, PLUTO_PEN_RING_VERSION);
   EXPECT_EQ(header->record_size, PLUTO_PEN_RING_RECORD_SIZE);
+  EXPECT_EQ(header->capacity, PLUTO_PEN_RING_DEFAULT_CAPACITY);
+  EXPECT_EQ(header->reserved, 0u);
+  EXPECT_EQ(offsetof(pluto_pen_ring_header, record_size), 4u);
+  EXPECT_EQ(offsetof(pluto_pen_ring_header, capacity), 8u);
+  EXPECT_EQ(offsetof(pluto_pen_ring_header, write_index), 16u);
 
-  const auto* records = reinterpret_cast<const pluto_pen_ring_record*>(
-      reinterpret_cast<const uint8_t*>(header) + sizeof(pluto_pen_ring_header));
+  const auto *records = reinterpret_cast<const pluto_pen_ring_record *>(
+      reinterpret_cast<const uint8_t *>(header) +
+      sizeof(pluto_pen_ring_header));
   ASSERT_TRUE(records != nullptr);
 }
 

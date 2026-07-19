@@ -10,6 +10,8 @@ import 'package:test/test.dart';
 
 import 'support/aot_fixture.dart';
 
+const String _engineCommit = 'a10d8ac38de835021c8d2f920dbf50a920ccc030';
+
 /// Contract test: drives [LiveDeviceOperations.installPackage] against a
 /// local `sh` and the REAL `tools/device/pluto-install-transaction.sh`, so
 /// the CLI's staging layout and the device-side transaction cannot drift
@@ -59,9 +61,34 @@ void main() {
               path: 'manifest.json',
               bytes: Uint8List.fromList(
                 utf8.encode(
-                  '{"id":"dev.example.notes","name":"Notes","runtime":'
-                  '{"type":"flutter-aot","appElf":"lib/app.so",'
-                  '"assets":"flutter_assets"}}',
+                  jsonEncode(<String, Object?>{
+                    'id': 'dev.example.notes',
+                    'name': 'Notes',
+                    'version': '1.0.0',
+                    'icon': 'assets/pluto/icon.png',
+                    'runtime': <String, Object?>{
+                      'type': 'flutter-aot',
+                      'appElf': 'lib/app.so',
+                      'assets': 'flutter_assets',
+                    },
+                    'engine': <String, Object?>{
+                      'flutterVersion': '3.44.4',
+                      'engineCommit': _engineCommit,
+                    },
+                    'targets': <Object?>['linux-arm', 'linux-arm64'],
+                    'permissions': <Object?>[],
+                    'display': <String, Object?>{
+                      'orientations': <Object?>['portrait'],
+                      'defaultOrientation': 'portrait',
+                      'scale': 'auto',
+                      'color': 'auto',
+                      'refreshProfile': 'ui',
+                    },
+                    'launch': <String, Object?>{
+                      'singleInstance': true,
+                      'args': <Object?>[],
+                    },
+                  }),
                 ),
               ),
             ),
@@ -70,10 +97,14 @@ void main() {
               path: 'bundle/flutter_assets/AssetManifest.bin',
               bytes: Uint8List.fromList(<int>[4]),
             ),
+            PackageEntry(
+              path: 'assets/pluto/icon.png',
+              bytes: Uint8List.fromList(<int>[5]),
+            ),
           ]),
           metadata: const PackageMetadata(
             flutterVersion: '3.44.4',
-            engineCommit: 'abc',
+            engineCommit: _engineCommit,
             plutoVersion: '0.1.0',
           ),
         );
@@ -182,6 +213,24 @@ final class _LocalShellTransport implements DeviceTransport {
     }
     if (command == 'uname -m') {
       return const CommandResult(exitCode: 0, stdout: 'aarch64\n');
+    }
+    if (command == 'uname -r') {
+      return const CommandResult(
+        exitCode: 0,
+        stdout: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8\n',
+      );
+    }
+    if (command == 'cat /etc/version') {
+      return const CommandResult(exitCode: 0, stdout: '20260629074044\n');
+    }
+    if (command == 'cat /usr/share/remarkable/update.conf') {
+      return const CommandResult(
+        exitCode: 0,
+        stdout: 'REMARKABLE_RELEASE_VERSION=3.28.0.162\n',
+      );
+    }
+    if (command == 'cat /proc/device-tree/compatible') {
+      return const CommandResult(exitCode: 0, stdout: 'fsl,imx93\n');
     }
     final ProcessResult result = await Process.run('sh', <String>[
       '-c',

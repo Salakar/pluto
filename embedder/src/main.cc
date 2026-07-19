@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "engine/engine_host.h"
-#include "pluto/abi.h"
 #include "presenter/host_preview.h"
+#include "presenter/presenter_contract.h"
 
 namespace {
 
@@ -54,7 +54,8 @@ PlutoPixelFormat parse_pixel_format(const std::string& value) {
 
 void print_usage() {
   std::cout
-      << "Usage: pluto-embedder --bundle=<path> [options]\n"
+      << "Usage: pluto-embedder --bundle=<path> --engine=<so> "
+         "--icu-data=<dat> [options]\n"
          "\n"
          "Modes:\n"
          "  --release   Product AOT (default; loads <bundle>/lib/app.so)\n"
@@ -62,9 +63,10 @@ void print_usage() {
          "  --debug     JIT development/hot reload; requires kernel_blob.bin\n"
          "\n"
          "Options:\n"
-         "  [--engine=<so>] [--icu-data=<dat>] [--aot-elf=<so>] "
+         "  [--aot-elf=<so>] "
          "[--ready-file=<absolute-path>] "
-         "[--presenter=null|host-png] [--run-duration-ms=<ms>] "
+         "[--health-file=<absolute-path>] "
+         "[--presenter=null|host-headless] [--run-duration-ms=<ms>] "
          "[--rotation=0|90|180|270] [--allowed-rotations=<csv>] "
          "[--auto-rotate] "
          "[--hibernate] "
@@ -90,6 +92,10 @@ int run_doctor(const pluto::EngineHostConfig& config) {
   if (ops == nullptr) {
     std::cerr << "doctor: presenter not found: " << config.presenter_name
               << "\n";
+    return 1;
+  }
+  if (!pluto::presenter_ops_are_current(ops)) {
+    std::cerr << "doctor: presenter operation table is not current\n";
     return 1;
   }
   PlutoPresenter* presenter = nullptr;
@@ -162,11 +168,15 @@ int main(int argc, char** argv) {
         std::cerr << "--ready-file must be a non-empty absolute path\n";
         return 2;
       }
+    } else if (starts_with(arg, "--health-file=")) {
+      config.health_file_path = after_equals(arg);
+      if (config.health_file_path.empty() ||
+          !std::filesystem::path(config.health_file_path).is_absolute()) {
+        std::cerr << "--health-file must be a non-empty absolute path\n";
+        return 2;
+      }
     } else if (starts_with(arg, "--presenter=")) {
       config.presenter_name = after_equals(arg);
-      if (config.presenter_name == "host-png") {
-        config.presenter_name = "host-headless";
-      }
     } else if (starts_with(arg, "--presenter-options=")) {
       config.presenter_options = after_equals(arg);
     } else if (starts_with(arg, "--pixel-format=")) {
@@ -247,11 +257,17 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (argc == 1) {
+    print_usage();
+    return 0;
+  }
   if (config.engine_path.empty()) {
-    config.engine_path = "third_party/engine/linux-arm64/libflutter_engine.so";
+    std::cerr << "--engine must be a non-empty path\n";
+    return 2;
   }
   if (config.icu_data_path.empty()) {
-    config.icu_data_path = "third_party/engine/linux-arm64/icudtl.dat";
+    std::cerr << "--icu-data must be a non-empty path\n";
+    return 2;
   }
 
   if (print_config) {
@@ -270,10 +286,6 @@ int main(int argc, char** argv) {
   }
 
   if (config.bundle_path.empty()) {
-    if (argc == 1) {
-      std::cout << "pluto embedder ABI " << pluto_abi_version() << "\n";
-      return 0;
-    }
     std::cerr << "--bundle=<path> is required to run an app "
                  "(run pluto-embedder --help for usage)\n";
     return 2;

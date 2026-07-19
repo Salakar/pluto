@@ -1,4 +1,4 @@
-// DrmSwtconPresenter — the per-pixel waveform engine presenter, built on
+// Gallery3DrmPresenter — the per-pixel waveform engine presenter, built on
 // the device-proven scan protocol.
 //
 // Drive stack (single renderer policy — this is the ONLY frame path):
@@ -436,6 +436,67 @@ std::string option_value(const char *options, const char *key) {
                       end == std::string::npos ? std::string::npos : end - pos);
 }
 
+bool options_have_exact_current_shape(const char *options) {
+  if (options == nullptr || *options == '\0') {
+    return true;
+  }
+  constexpr std::array<std::string_view, 25> kKeys{
+      "dry_run",
+      "exact_color",
+      "card",
+      "flip_interval_ms",
+      "stats_log_s",
+      "mode_lab",
+      "handoff",
+      "enable_rails",
+      "rails_dry_run",
+      "panel_base",
+      "regulator_base",
+      "vcom",
+      "vpdd",
+      "hwmon",
+      "eink",
+      "ct33_std",
+      "ct33_best",
+      "ct33_pen",
+      "ct33_fast",
+      "max_active_px",
+      "full_flash_band_frames",
+      "early_cancel",
+      "settle_force_identity",
+      "emission_mode",
+      "scan_period_ns",
+  };
+  std::array<bool, kKeys.size()> seen{};
+  std::string_view remaining(options);
+  while (!remaining.empty()) {
+    const std::size_t separator = remaining.find(',');
+    const std::string_view token = remaining.substr(0, separator);
+    const std::size_t equals = token.find('=');
+    if (token.empty() || equals == 0 || equals == std::string_view::npos ||
+        equals + 1u == token.size() ||
+        token.find('=', equals + 1u) != std::string_view::npos) {
+      return false;
+    }
+    const std::string_view key = token.substr(0, equals);
+    const auto found = std::find(kKeys.begin(), kKeys.end(), key);
+    if (found == kKeys.end()) {
+      return false;
+    }
+    const std::size_t index =
+        static_cast<std::size_t>(std::distance(kKeys.begin(), found));
+    if (seen[index]) {
+      return false;
+    }
+    seen[index] = true;
+    if (separator == std::string_view::npos) {
+      break;
+    }
+    remaining.remove_prefix(separator + 1u);
+  }
+  return true;
+}
+
 bool parse_bool_option(const std::string &value, bool *out) {
   if (out == nullptr || value.empty()) {
     return false;
@@ -582,9 +643,9 @@ private:
   std::vector<std::uint8_t> drive_;   // slot-major [slot][tile]
 };
 
-class DrmSwtconPresenter final {
+class Gallery3DrmPresenter final {
 public:
-  ~DrmSwtconPresenter() { close(); }
+  ~Gallery3DrmPresenter() { close(); }
 
   PlutoStatus open(const PlutoPresenterConfig *config) {
     presenter_open_t_ns_ = steady_now_ns();
@@ -593,7 +654,7 @@ public:
     first_visible_latch_logged_ = false;
     warm_handoff_accepted_.store(false, std::memory_order_relaxed);
     if (config != nullptr &&
-        config->struct_size < sizeof(PlutoPresenterConfig)) {
+        config->struct_size != sizeof(PlutoPresenterConfig)) {
       return kPlutoStatusInvalidArgument;
     }
     config_ = {};
@@ -1031,10 +1092,11 @@ public:
     build_count_ = 0;
 
     pen_focus_accepting_.store(true, std::memory_order_release);
-    engine_thread_ = std::thread(&DrmSwtconPresenter::engine_thread_main, this);
+    engine_thread_ =
+        std::thread(&Gallery3DrmPresenter::engine_thread_main, this);
     if (config_.mode_lab_step_ms > 0) {
       mode_lab_thread_ =
-          std::thread(&DrmSwtconPresenter::mode_lab_thread_main, this);
+          std::thread(&Gallery3DrmPresenter::mode_lab_thread_main, this);
     }
     if (!config_.dry_run) {
       if (!scan_loop_.start()) {
@@ -1149,7 +1211,7 @@ public:
 
   PlutoStatus info(PlutoDisplayInfo *out_info) const {
     if (out_info == nullptr ||
-        out_info->struct_size < sizeof(PlutoDisplayInfo)) {
+        out_info->struct_size != sizeof(PlutoDisplayInfo)) {
       return kPlutoStatusInvalidArgument;
     }
     *out_info = make_info();
@@ -1194,7 +1256,7 @@ public:
     constexpr std::uint32_t kKnownFlags =
         static_cast<std::uint32_t>(kPlutoPenFocusInRange) |
         static_cast<std::uint32_t>(kPlutoPenFocusContact);
-    if (focus == nullptr || focus->struct_size < sizeof(PlutoPenFocus) ||
+    if (focus == nullptr || focus->struct_size != sizeof(PlutoPenFocus) ||
         (focus->flags & ~kKnownFlags) != 0 ||
         ((focus->flags & kPlutoPenFocusContact) != 0 &&
          (focus->flags & kPlutoPenFocusInRange) == 0)) {
@@ -1244,7 +1306,7 @@ public:
 
   PlutoStatus present(const PlutoPresentRequest *request) {
     if (request == nullptr ||
-        request->struct_size < sizeof(PlutoPresentRequest)) {
+        request->struct_size != sizeof(PlutoPresentRequest)) {
       return kPlutoStatusInvalidArgument;
     }
     const PlutoStatus validation = validate_request(*request);
@@ -2104,7 +2166,7 @@ public:
   PlutoStatus stage_handoff(const PlutoHandoffPayload *payload,
                             std::uint32_t timeout_ms) {
     if (payload == nullptr ||
-        payload->struct_size < sizeof(PlutoHandoffPayload) ||
+        payload->struct_size != sizeof(PlutoHandoffPayload) ||
         payload->bytes == nullptr || payload->byte_count == 0 ||
         payload->byte_count > kGlassHandoffMaxBytes || payload->width <= 0 ||
         payload->height <= 0 ||
@@ -2226,7 +2288,7 @@ public:
 
   PlutoStatus get_handoff(PlutoHandoffPayload *out_payload) {
     if (out_payload == nullptr ||
-        out_payload->struct_size < sizeof(PlutoHandoffPayload)) {
+        out_payload->struct_size != sizeof(PlutoHandoffPayload)) {
       return kPlutoStatusInvalidArgument;
     }
     std::lock_guard<std::mutex> lock(mutex_);
@@ -2380,19 +2442,19 @@ public:
     return true;
   }
 
-  PlutoStatus debug_stats(PlutoSwtconDebugStats *out_stats) const {
-    if (out_stats == nullptr || out_stats->struct_size < sizeof(std::size_t)) {
+  PlutoStatus debug_stats(PlutoGallery3DrmDebugStats *out_stats) const {
+    if (out_stats == nullptr ||
+        out_stats->struct_size != sizeof(PlutoGallery3DrmDebugStats)) {
       return kPlutoStatusInvalidArgument;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    const std::size_t size = out_stats->struct_size;
-    PlutoSwtconDebugStats stats = stats_snapshot_;
-    stats.struct_size = size;
+    PlutoGallery3DrmDebugStats stats = stats_snapshot_;
+    stats.struct_size = sizeof(stats);
     stats.updates_completed = stat_updates_;
     stats.gc16_updates = stat_gc16_;
     stats.full_updates = stat_fulls_;
     // Always 0 since Stage 2: the presenter never self-schedules settles
-    // (the renderer's SettlePlanner owns them). Field kept — append-only.
+    // (the renderer's SettlePlanner owns them).
     stats.settle_updates = 0;
     const std::size_t samples =
         static_cast<std::size_t>(std::min<std::uint64_t>(
@@ -2444,11 +2506,7 @@ public:
     stats.color_pen_truth_masked_lanes = stat_pen_truth_masked_lanes_;
     stats.color_pen_truth_groups_per_request_max =
         stat_pen_truth_groups_per_request_max_;
-    // This diagnostics ABI is append-only. Older callers intentionally pass
-    // their smaller struct_size; copy only the prefix they know, while newer
-    // callers retain any future tail beyond this implementation's version.
-    std::memcpy(out_stats, &stats,
-                std::min(size, sizeof(PlutoSwtconDebugStats)));
+    *out_stats = stats;
     return kPlutoStatusOk;
   }
 
@@ -2769,7 +2827,6 @@ private:
 
     if (color_enabled_) {
       HandoffFingerprint ct33;
-      ct33.add_u32(1); // canonical named-blob encoding revision
       for (const auto &[name, bytes] : waveform_.ct33_bytes()) {
         ct33.add_string(name);
         ct33.add_u64(bytes.size());
@@ -2782,15 +2839,11 @@ private:
       }
     }
 
-    // Canonical behavior fingerprint. This is deliberately exhaustive and
-    // explicitly revisioned; any future drive/state semantic change bumps
-    // the revision and fails closed even when its C++ layout happens to stay
-    // source-compatible.
-    constexpr std::uint32_t kPipelineIdentityRevision = 2;
+    // Canonical behavior fingerprint. This is deliberately exhaustive: a
+    // drive/state semantic change changes the encoded fields and fails closed.
     const PixelEngineConfig &engine = config_.engine;
     const swtcon::DcLedgerConfig &dc = engine.dc;
     HandoffFingerprint pipeline;
-    pipeline.add_u32(kPipelineIdentityRevision);
     pipeline.add_u32(static_cast<std::uint32_t>(identity.profile));
     if (fixed_profile != nullptr) {
       pipeline.add_string(fixed_profile->machine);
@@ -2943,6 +2996,9 @@ private:
   }
 
   PlutoStatus parse_options(const char *options) {
+    if (!options_have_exact_current_shape(options)) {
+      return kPlutoStatusInvalidArgument;
+    }
     const std::string dry_run = option_value(options, "dry_run");
     if (!dry_run.empty() && !parse_bool_option(dry_run, &config_.dry_run)) {
       return kPlutoStatusInvalidArgument;
@@ -3015,9 +3071,8 @@ private:
     if (!hwmon.empty()) {
       config_.temperature.hwmon_root = hwmon;
     }
-    const std::string waveform = option_value(options, "waveform");
     const std::string eink = option_value(options, "eink");
-    config_.waveform_files.eink_path = !waveform.empty() ? waveform : eink;
+    config_.waveform_files.eink_path = eink;
     const std::string ct33_std = option_value(options, "ct33_std");
     const std::string ct33_best = option_value(options, "ct33_best");
     const std::string ct33_pen = option_value(options, "ct33_pen");
@@ -3086,24 +3141,6 @@ private:
       config_.scan_period_ns = static_cast<std::uint64_t>(value);
     }
 
-    // Retired keys (option-surface migration rule): the old
-    // record-playback drive core died with the per-pixel engine. Warn-and-
-    // ignore so proven device recipes keep working and never silently
-    // change meaning. settle_delay_ms/full_refresh_every retired at Stage 2
-    // (SettlePlanner is the single settle authority); the du_*/dither
-    // emergency-DU surface retired at the engine stage (the engine drives
-    // exclusively from decoded .eink LUTs).
-    for (const char *retired :
-         {"settle_delay_ms", "full_refresh_every", "du_mode", "du_white",
-          "du_black", "dither", "du_frames", "du_frames_fast", "du_frames_ui",
-          "du_frames_text", "du_frames_full"}) {
-      if (!option_value(options, retired).empty()) {
-        std::fprintf(stderr,
-                     "swtcon: option '%s' is retired and ignored (per-pixel "
-                     "engine drive core)\n",
-                     retired);
-      }
-    }
     return kPlutoStatusOk;
   }
 
@@ -5732,7 +5769,7 @@ private:
   // Guarded by mutex_. A frame leaves pending_frames_ before its callback runs,
   // so wait_idle must include this second half of the completion handoff.
   std::size_t completion_callbacks_pending_ = 0;
-  PlutoSwtconDebugStats stats_snapshot_{};
+  PlutoGallery3DrmDebugStats stats_snapshot_{};
   std::uint64_t stat_updates_ = 0;
   std::uint64_t stat_gc16_ = 0;
   std::uint64_t stat_fulls_ = 0;
@@ -5848,13 +5885,13 @@ private:
   std::thread mode_lab_thread_;
 };
 
-PlutoStatus swtcon_open(const PlutoPresenterConfig *config,
-                        PlutoPresenter **out_presenter) {
+PlutoStatus gallery3_drm_open(const PlutoPresenterConfig *config,
+                              PlutoPresenter **out_presenter) {
   if (out_presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   *out_presenter = nullptr;
-  auto *presenter = new (std::nothrow) DrmSwtconPresenter();
+  auto *presenter = new (std::nothrow) Gallery3DrmPresenter();
   if (presenter == nullptr) {
     return kPlutoStatusInternal;
   }
@@ -5872,138 +5909,142 @@ PlutoStatus swtcon_open(const PlutoPresenterConfig *config,
   return kPlutoStatusOk;
 }
 
-void swtcon_close(PlutoPresenter *presenter) {
-  auto *swtcon = reinterpret_cast<DrmSwtconPresenter *>(presenter);
+void gallery3_drm_close(PlutoPresenter *presenter) {
+  auto *swtcon = reinterpret_cast<Gallery3DrmPresenter *>(presenter);
   delete swtcon;
 }
 
-PlutoStatus swtcon_info(PlutoPresenter *presenter, PlutoDisplayInfo *out_info) {
+PlutoStatus gallery3_drm_info(PlutoPresenter *presenter,
+                              PlutoDisplayInfo *out_info) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->info(out_info);
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->info(out_info);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_present(PlutoPresenter *presenter,
-                           const PlutoPresentRequest *request) {
+PlutoStatus gallery3_drm_present(PlutoPresenter *presenter,
+                                 const PlutoPresentRequest *request) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->present(request);
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->present(
+        request);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-bool swtcon_ready(PlutoPresenter *presenter, PlutoRefreshClass refresh_class) {
+bool gallery3_drm_ready(PlutoPresenter *presenter,
+                        PlutoRefreshClass refresh_class) {
   if (presenter == nullptr) {
     return false;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->ready(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->ready(
         refresh_class);
   } catch (...) {
     return false;
   }
 }
 
-PlutoStatus swtcon_wait_idle(PlutoPresenter *presenter,
-                             std::uint32_t timeout_ms) {
+PlutoStatus gallery3_drm_wait_idle(PlutoPresenter *presenter,
+                                   std::uint32_t timeout_ms) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->wait_idle(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->wait_idle(
         timeout_ms);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_snapshot(PlutoPresenter *presenter,
-                            PlutoSurface *out_surface) {
+PlutoStatus gallery3_drm_snapshot(PlutoPresenter *presenter,
+                                  PlutoSurface *out_surface) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->snapshot(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->snapshot(
         out_surface);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_set_pen_focus(PlutoPresenter *presenter,
-                                 const PlutoPenFocus *focus) {
+PlutoStatus gallery3_drm_set_pen_focus(PlutoPresenter *presenter,
+                                       const PlutoPenFocus *focus) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->set_pen_focus(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->set_pen_focus(
         focus);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_stage_handoff(PlutoPresenter *presenter,
-                                 const PlutoHandoffPayload *payload,
-                                 std::uint32_t timeout_ms) {
+PlutoStatus gallery3_drm_stage_handoff(PlutoPresenter *presenter,
+                                       const PlutoHandoffPayload *payload,
+                                       std::uint32_t timeout_ms) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->stage_handoff(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->stage_handoff(
         payload, timeout_ms);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_get_handoff(PlutoPresenter *presenter,
-                               PlutoHandoffPayload *out_payload) {
+PlutoStatus gallery3_drm_get_handoff(PlutoPresenter *presenter,
+                                     PlutoHandoffPayload *out_payload) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->get_handoff(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->get_handoff(
         out_payload);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-PlutoStatus swtcon_confirm_handoff(PlutoPresenter *presenter, bool accepted) {
+PlutoStatus gallery3_drm_confirm_handoff(PlutoPresenter *presenter,
+                                         bool accepted) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<DrmSwtconPresenter *>(presenter)->confirm_handoff(
+    return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->confirm_handoff(
         accepted);
   } catch (...) {
     return kPlutoStatusInternal;
   }
 }
 
-const PlutoPresenterOps kSwtconOps{
+const PlutoPresenterOps kGallery3DrmOps{
     sizeof(PlutoPresenterOps),
-    "swtcon",
-    swtcon_open,
-    swtcon_close,
-    swtcon_info,
-    swtcon_present,
-    swtcon_ready,
-    swtcon_wait_idle,
-    swtcon_snapshot,
-    swtcon_set_pen_focus,
-    swtcon_stage_handoff,
-    swtcon_get_handoff,
-    swtcon_confirm_handoff,
+    "gallery3_drm",
+    gallery3_drm_open,
+    gallery3_drm_close,
+    gallery3_drm_info,
+    gallery3_drm_present,
+    gallery3_drm_ready,
+    gallery3_drm_wait_idle,
+    gallery3_drm_snapshot,
+    gallery3_drm_set_pen_focus,
+    gallery3_drm_stage_handoff,
+    gallery3_drm_get_handoff,
+    gallery3_drm_confirm_handoff,
 };
 
 } // namespace
@@ -6034,7 +6075,7 @@ bool debug_glass_for_testing(PlutoPresenter *presenter,
   if (presenter == nullptr) {
     return false;
   }
-  return reinterpret_cast<DrmSwtconPresenter *>(presenter)->debug_glass(
+  return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->debug_glass(
       out_levels, out_width, out_height, out_stride);
 }
 
@@ -6045,7 +6086,7 @@ bool debug_dc_for_testing(PlutoPresenter *presenter,
   if (presenter == nullptr) {
     return false;
   }
-  return reinterpret_cast<DrmSwtconPresenter *>(presenter)->debug_dc(
+  return reinterpret_cast<Gallery3DrmPresenter *>(presenter)->debug_dc(
       out_rescan, out_stress, out_tile_cols);
 }
 
@@ -6055,8 +6096,8 @@ bool debug_color_history_for_testing(PlutoPresenter *presenter, int x, int y,
   if (presenter == nullptr) {
     return false;
   }
-  return reinterpret_cast<DrmSwtconPresenter *>(presenter)->debug_color_history(
-      x, y, out_a, out_b);
+  return reinterpret_cast<Gallery3DrmPresenter *>(presenter)
+      ->debug_color_history(x, y, out_a, out_b);
 }
 
 } // namespace swtcon
@@ -6065,18 +6106,17 @@ bool debug_color_history_for_testing(PlutoPresenter *presenter, int x, int y,
 
 extern "C" {
 
-const PlutoPresenterOps *pluto_swtcon_presenter_ops(void) {
-  return &pluto::kSwtconOps;
+const PlutoPresenterOps *pluto_gallery3_drm_presenter_ops(void) {
+  return &pluto::kGallery3DrmOps;
 }
 
-PlutoStatus
-pluto_swtcon_presenter_debug_stats(PlutoPresenter *presenter,
-                                   PlutoSwtconDebugStats *out_stats) {
+PlutoStatus pluto_gallery3_drm_presenter_debug_stats(
+    PlutoPresenter *presenter, PlutoGallery3DrmDebugStats *out_stats) {
   if (presenter == nullptr) {
     return kPlutoStatusInvalidArgument;
   }
   try {
-    return reinterpret_cast<pluto::DrmSwtconPresenter *>(presenter)
+    return reinterpret_cast<pluto::Gallery3DrmPresenter *>(presenter)
         ->debug_stats(out_stats);
   } catch (...) {
     return kPlutoStatusInternal;

@@ -97,15 +97,11 @@ enum InkPhysicalPanelClass {
 final class DeviceFacts {
   /// Creates a cached device description.
   const DeviceFacts({
-    required this.model,
     required this.panelWidth,
     required this.panelHeight,
     required this.dpi,
     required this.isColor,
   });
-
-  /// Recognized hardware model.
-  final RemarkableModel model;
 
   /// Portrait Pluto render-surface width in pixels.
   final int panelWidth;
@@ -121,7 +117,6 @@ final class DeviceFacts {
 
   /// Safe defaults for host previews and tests without an embedder.
   static const DeviceFacts hostDefault = DeviceFacts(
-    model: RemarkableModel.unknown,
     panelWidth: 954,
     panelHeight: 1696,
     dpi: 264,
@@ -134,7 +129,6 @@ final class DeviceFacts {
       final DeviceInfo info =
           await (loader ?? PlutoDevice.instance.deviceInfo)();
       return DeviceFacts(
-        model: info.model,
         panelWidth: info.panel.width,
         panelHeight: info.panel.height,
         dpi: info.panel.dpi,
@@ -164,11 +158,9 @@ final class InkDisplayCaps {
   factory InkDisplayCaps.fromDevice(DeviceFacts device) {
     return InkDisplayCaps(
       presenterDrivesColor: device.isColor,
-      physicalPanelClass: switch (device.model) {
-        RemarkableModel.paperPro ||
-        RemarkableModel.paperProMove => InkPhysicalPanelClass.gallery3,
-        _ => InkPhysicalPanelClass.monochrome,
-      },
+      physicalPanelClass: device.isColor
+          ? InkPhysicalPanelClass.gallery3
+          : InkPhysicalPanelClass.monochrome,
     );
   }
 }

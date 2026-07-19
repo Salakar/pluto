@@ -2,6 +2,18 @@ import 'dart:typed_data';
 
 import 'package:pluto_manifest/pluto_manifest.dart';
 
+/// Pluto product version compiled into this launcher.
+const String kPlutoVersion = '0.1.0';
+
+/// Flutter SDK version compiled into this launcher.
+const String kFlutterVersionPin = '3.44.4';
+
+/// Dart SDK version compiled into this launcher.
+const String kDartVersionPin = '3.12.2';
+
+/// Flutter engine commit compiled into this launcher.
+const String kEngineCommitPin = 'a10d8ac38de835021c8d2f920dbf50a920ccc030';
+
 /// Install kind shown in app metadata.
 enum LauncherInstallKind {
   /// Release AOT install.
@@ -125,49 +137,6 @@ final class LauncherApp {
   }
 }
 
-/// Session backend mode reported by `plutod`.
-enum LauncherBackendMode {
-  /// qtfb/AppLoad cooperative backend.
-  qtfbCooperative,
-
-  /// Own-display SWTCON fallback backend.
-  ownSwtcon,
-
-  /// Host preview backend.
-  hostPreview,
-}
-
-/// Session information shown in Settings and About.
-final class SessionInfo {
-  /// Creates session information.
-  const SessionInfo({
-    required this.backendMode,
-    required this.plutoVersion,
-    required this.engineVersion,
-    required this.flutterVersion,
-    required this.dartVersion,
-    required this.returnInstructions,
-  });
-
-  /// Active display/session backend.
-  final LauncherBackendMode backendMode;
-
-  /// Pluto platform version.
-  final String plutoVersion;
-
-  /// Engine commit or version.
-  final String engineVersion;
-
-  /// Flutter SDK pin.
-  final String flutterVersion;
-
-  /// Dart SDK pin.
-  final String dartVersion;
-
-  /// Human instructions for returning from stock reMarkable UI.
-  final String returnInstructions;
-}
-
 /// Network addresses shown on developer-facing surfaces.
 final class LauncherNetworkInfo {
   /// Creates network info.
@@ -178,37 +147,6 @@ final class LauncherNetworkInfo {
 
   /// Wi-Fi address, when connected.
   final String? wifiIp;
-}
-
-/// Renderer diagnostics shown on the About & developer screen.
-final class LauncherDeveloperStats {
-  /// Creates developer stats.
-  const LauncherDeveloperStats({
-    required this.vmServiceUri,
-    required this.renderer,
-    required this.ghostPartialsSinceFull,
-    required this.ghostBudget,
-    required this.buildMs,
-    required this.rasterMs,
-  });
-
-  /// Dart VM service websocket URI.
-  final String vmServiceUri;
-
-  /// Renderer description string.
-  final String renderer;
-
-  /// Partial refreshes since the last full flash.
-  final int ghostPartialsSinceFull;
-
-  /// Partial refreshes allowed before a forced full flash.
-  final int ghostBudget;
-
-  /// Rolling average frame build time in milliseconds.
-  final double buildMs;
-
-  /// Rolling average frame raster time in milliseconds.
-  final double rasterMs;
 }
 
 /// Result of an app launch request.
@@ -230,7 +168,7 @@ final class LaunchFailure extends LaunchResult {
   /// Creates a launch failure.
   const LaunchFailure({required this.reason, this.stderr});
 
-  /// Short reason from `plutod`.
+  /// Short reason from the Pluto supervisor.
   final String reason;
 
   /// Optional stderr excerpt.
@@ -294,31 +232,4 @@ final class PowerMenuRequest {
 
   /// App to resume when the user dismisses the power menu.
   final AppId originAppId;
-}
-
-/// Options for the full Pluto uninstall flow.
-final class PlutoUninstallOptions {
-  /// Creates uninstall options.
-  const PlutoUninstallOptions({
-    required this.deleteAppData,
-    required this.keepAppListBackup,
-  });
-
-  /// Whether app data should be deleted.
-  final bool deleteAppData;
-
-  /// Whether an app-list backup should be left under `/home/root`.
-  final bool keepAppListBackup;
-}
-
-/// Progress step for the full Pluto uninstall.
-final class PlutoUninstallStep {
-  /// Creates a progress step.
-  const PlutoUninstallStep({required this.label, required this.isComplete});
-
-  /// Step label.
-  final String label;
-
-  /// Whether the step is complete.
-  final bool isComplete;
 }

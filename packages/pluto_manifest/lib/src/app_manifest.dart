@@ -9,7 +9,7 @@ final RegExp _relativePathPattern = RegExp(r'^(?!/)(?!.*\.\.).+$');
 
 /// A validated reverse-DNS Pluto app id.
 extension type const AppId._(String _value) {
-  /// Validates [input] and returns an [AppId] when it is schema-1 compatible.
+  /// Validates [input] and returns an [AppId] when it is canonical.
   static AppId? tryParse(String input) {
     if (input.length > 100 || !_appIdPattern.hasMatch(input)) {
       return null;
@@ -103,19 +103,6 @@ final class ManifestSyntaxError extends ManifestError {
   }
 }
 
-/// The manifest schema is newer than this package understands.
-final class ManifestSchemaTooNew extends ManifestError {
-  /// Creates a schema-version error.
-  const ManifestSchemaTooNew(this.schema);
-
-  /// Requested schema version.
-  final int schema;
-
-  @override
-  String get message =>
-      'Manifest schema $schema is newer than supported schema 1.';
-}
-
 /// A manifest field failed validation.
 final class ManifestFieldError extends ManifestError {
   /// Creates a field validation error at [path].
@@ -143,7 +130,7 @@ final class ManifestUnknownPermission extends ManifestError {
   String get message => 'Unknown Pluto permission: $permission';
 }
 
-/// Closed schema-1 permission registry.
+/// Closed permission registry.
 enum AppPermission {
   /// Full-precision pen side channel.
   penRaw('pen.raw'),
@@ -201,23 +188,38 @@ enum AppRuntimeKind {
   /// Manifest wire string.
   final String wireName;
 
-  /// Parses the canonical schema-1 spelling plus the two enum-name spellings
-  /// emitted by early Pluto builders.
-  ///
-  /// Encoding always uses [wireName], so accepting a legacy input migrates it
-  /// to canonical kebab-case on the next write. No case folding or fuzzy
-  /// matching is used: unknown runtime kinds remain schema errors.
+  /// Parses the canonical runtime spelling.
   static AppRuntimeKind? fromWireName(String name) {
     for (final AppRuntimeKind kind in AppRuntimeKind.values) {
       if (kind.wireName == name) {
         return kind;
       }
     }
-    return switch (name) {
-      'flutterAot' => AppRuntimeKind.flutterAot,
-      'flutterKernel' => AppRuntimeKind.flutterKernel,
-      _ => null,
-    };
+    return null;
+  }
+}
+
+/// Device build targets an application can run on.
+enum AppTargetPlatform {
+  /// ARMv7 EABI5 hard-float used by reMarkable 1 and 2.
+  linuxArm('linux-arm'),
+
+  /// AArch64 used by Paper Pro Move.
+  linuxArm64('linux-arm64');
+
+  const AppTargetPlatform(this.wireName);
+
+  /// Canonical manifest spelling.
+  final String wireName;
+
+  /// Parses the canonical manifest spelling.
+  static AppTargetPlatform? fromWireName(String name) {
+    for (final AppTargetPlatform target in values) {
+      if (target.wireName == name) {
+        return target;
+      }
+    }
+    return null;
   }
 }
 
@@ -271,13 +273,12 @@ final class FlutterKernelRuntime extends AppRuntime {
   };
 }
 
-/// Required engine and Pluto ABI versions for an app.
+/// Required Flutter engine identity for an app.
 final class EngineRequirement {
   /// Creates an engine requirement.
   const EngineRequirement({
     required this.flutterVersion,
     required this.engineCommit,
-    required this.plutoAbi,
   });
 
   /// Flutter SDK version used to build the app.
@@ -286,13 +287,9 @@ final class EngineRequirement {
   /// Engine commit hash required by the app snapshot.
   final String engineCommit;
 
-  /// Pluto platform ABI required by the app.
-  final int plutoAbi;
-
   Map<String, Object?> _toJson() => <String, Object?>{
     'flutterVersion': flutterVersion,
     'engineCommit': engineCommit,
-    'plutoAbi': plutoAbi,
   };
 }
 
@@ -382,7 +379,6 @@ final class DisplayPrefs {
       ManifestOrientation.portrait,
     ],
     this.defaultOrientation = ManifestOrientation.portrait,
-    this.scale,
     this.color = DisplayColorMode.auto,
     this.refreshProfile = DisplayRefreshProfile.ui,
   });
@@ -392,12 +388,6 @@ final class DisplayPrefs {
 
   /// Orientation applied at app start.
   final ManifestOrientation defaultOrientation;
-
-  /// Explicit device-pixel-ratio override, or null to use device metrics.
-  final double? scale;
-
-  /// Whether the runtime should use the connected device's native metrics.
-  bool get usesAutomaticScale => scale == null;
 
   /// Color policy.
   final DisplayColorMode color;
@@ -411,7 +401,7 @@ final class DisplayPrefs {
         orientation.wireName,
     ],
     'defaultOrientation': defaultOrientation.wireName,
-    'scale': scale ?? 'auto',
+    'scale': 'auto',
     'color': color.wireName,
     'refreshProfile': refreshProfile.wireName,
   };
@@ -438,7 +428,6 @@ final class LaunchPrefs {
 final class AppManifest {
   /// Creates an app manifest value.
   const AppManifest({
-    required this.schema,
     required this.id,
     required this.name,
     required this.version,
@@ -448,6 +437,10 @@ final class AppManifest {
     this.author,
     this.icon = 'icon.png',
     this.iconMono,
+    this.targets = const <AppTargetPlatform>{
+      AppTargetPlatform.linuxArm,
+      AppTargetPlatform.linuxArm64,
+    },
     this.permissions = const <AppPermission>{},
     this.display = const DisplayPrefs(),
     this.launch = const LaunchPrefs(),
@@ -465,7 +458,7 @@ final class AppManifest {
     }
   }
 
-  /// Parses and validates YAML with the installed manifest schema.
+  /// Parses and validates a canonical installed YAML manifest.
   static Result<AppManifest, ManifestError> decodeYaml(String yaml) {
     try {
       final Object? decoded = _yamlToPlain(loadYaml(yaml));
@@ -474,6 +467,8 @@ final class AppManifest {
       return ResultErr<AppManifest, ManifestError>(
         ManifestSyntaxError(error.message),
       );
+    } on ManifestError catch (error) {
+      return ResultErr<AppManifest, ManifestError>(error);
     }
   }
 
@@ -490,49 +485,88 @@ final class AppManifest {
           ManifestFieldError(path: r'$', reason: 'expected a map'),
         );
       }
+      _validateObjectShape(
+        decoded,
+        required: const <String>{'id', 'name', 'version'},
+        optional: const <String>{
+          'description',
+          'author',
+          'icon',
+          'iconMono',
+          'targets',
+          'permissions',
+          'display',
+          'launch',
+        },
+        path: r'$',
+      );
       final Map<String, Object?> stamped = <String, Object?>{
         ...decoded,
         'runtime': runtime._toJson(),
         'engine': engine._toJson(),
       };
-      return _decodePlainObject(stamped);
+      return _decodePlainObject(stamped, canonical: false);
     } on YamlException catch (error) {
       return ResultErr<AppManifest, ManifestError>(
         ManifestSyntaxError(error.message),
       );
+    } on ManifestError catch (error) {
+      return ResultErr<AppManifest, ManifestError>(error);
     }
   }
 
   static Result<AppManifest, ManifestError> _decodePlainObject(
-    Object? decoded,
-  ) {
+    Object? decoded, {
+    bool canonical = true,
+  }) {
     if (decoded is! Map<String, Object?>) {
       return const ResultErr<AppManifest, ManifestError>(
         ManifestFieldError(path: r'$', reason: 'expected an object'),
       );
     }
     try {
-      return ResultOk<AppManifest, ManifestError>(_parse(decoded));
-    } on ManifestSchemaTooNew catch (error) {
-      return ResultErr<AppManifest, ManifestError>(error);
-    } on ManifestFieldError catch (error) {
-      return ResultErr<AppManifest, ManifestError>(error);
-    } on ManifestUnknownPermission catch (error) {
+      return ResultOk<AppManifest, ManifestError>(
+        _parse(decoded, canonical: canonical),
+      );
+    } on ManifestError catch (error) {
       return ResultErr<AppManifest, ManifestError>(error);
     }
   }
 
-  static AppManifest _parse(Map<String, Object?> root) {
-    final String schemaKey = root.containsKey('schema')
-        ? 'schema'
-        : 'manifestVersion';
-    final int schema = _required<int>(root, schemaKey, schemaKey);
-    if (schema > 1) {
-      throw ManifestSchemaTooNew(schema);
-    }
-    if (schema < 1) {
-      throw const ManifestFieldError(path: 'schema', reason: 'must be 1');
-    }
+  static AppManifest _parse(
+    Map<String, Object?> root, {
+    required bool canonical,
+  }) {
+    _validateObjectShape(
+      root,
+      required: canonical
+          ? const <String>{
+              'id',
+              'name',
+              'version',
+              'icon',
+              'targets',
+              'runtime',
+              'engine',
+              'permissions',
+              'display',
+              'launch',
+            }
+          : const <String>{'id', 'name', 'version', 'runtime', 'engine'},
+      optional: canonical
+          ? const <String>{'description', 'author', 'iconMono'}
+          : const <String>{
+              'description',
+              'author',
+              'icon',
+              'iconMono',
+              'targets',
+              'permissions',
+              'display',
+              'launch',
+            },
+      path: r'$',
+    );
 
     final String rawId = _required<String>(root, 'id', 'id');
     final AppId? id = AppId.tryParse(rawId);
@@ -571,7 +605,9 @@ final class AppManifest {
       );
     }
 
-    final String icon = _optional<String>(root, 'icon', 'icon') ?? 'icon.png';
+    final String icon = canonical
+        ? _required<String>(root, 'icon', 'icon')
+        : _optional<String>(root, 'icon', 'icon') ?? 'icon.png';
     _validateRelativePath(icon, 'icon');
     final String? iconMono = _optional<String>(root, 'iconMono', 'iconMono');
     if (iconMono != null) {
@@ -579,7 +615,6 @@ final class AppManifest {
     }
 
     return AppManifest(
-      schema: schema,
       id: id,
       name: name,
       version: version,
@@ -587,19 +622,24 @@ final class AppManifest {
       author: _optional<String>(root, 'author', 'author'),
       icon: icon,
       iconMono: iconMono,
+      targets: _parseTargets(root, canonical: canonical),
       runtime: _parseRuntime(_requiredMap(root, 'runtime', 'runtime')),
       engine: _parseEngine(_requiredMap(root, 'engine', 'engine')),
-      permissions: _parsePermissions(root),
-      display: _parseDisplay(_optionalMap(root, 'display', 'display')),
-      launch: _parseLaunch(_optionalMap(root, 'launch', 'launch')),
+      permissions: _parsePermissions(root, canonical: canonical),
+      display: _parseDisplay(
+        canonical
+            ? _requiredMap(root, 'display', 'display')
+            : _optionalMap(root, 'display', 'display'),
+        canonical: canonical,
+      ),
+      launch: _parseLaunch(
+        canonical
+            ? _requiredMap(root, 'launch', 'launch')
+            : _optionalMap(root, 'launch', 'launch'),
+        canonical: canonical,
+      ),
     );
   }
-
-  /// Manifest schema version.
-  final int schema;
-
-  /// Compatibility alias for older docs that used `manifestVersion`.
-  int get manifestVersion => schema;
 
   /// Reverse-DNS application id.
   final AppId id;
@@ -622,10 +662,13 @@ final class AppManifest {
   /// Optional relative monochrome icon path.
   final String? iconMono;
 
+  /// Exact device targets supported by this application.
+  final Set<AppTargetPlatform> targets;
+
   /// Runtime launch layout.
   final AppRuntime runtime;
 
-  /// Required engine and ABI versions.
+  /// Required Flutter engine identity.
   final EngineRequirement engine;
 
   /// Declared capability permissions.
@@ -637,9 +680,6 @@ final class AppManifest {
   /// Launch preferences.
   final LaunchPrefs launch;
 
-  /// Compatibility entrypoint view for authored manifests.
-  String get entrypoint => launch.args.isEmpty ? 'main' : launch.args.first;
-
   /// Canonical JSON encoding with stable key order.
   String encode() => jsonEncode(_toJson());
 
@@ -648,7 +688,6 @@ final class AppManifest {
 
   Map<String, Object?> _toJson() {
     final Map<String, Object?> result = <String, Object?>{
-      'schema': schema,
       'id': id.value,
       'name': name,
       'version': version.toString(),
@@ -663,6 +702,10 @@ final class AppManifest {
     if (iconMono != null) {
       result['iconMono'] = iconMono;
     }
+    result['targets'] = <String>[
+      for (final AppTargetPlatform target in AppTargetPlatform.values)
+        if (targets.contains(target)) target.wireName,
+    ];
     result['runtime'] = runtime._toJson();
     result['engine'] = engine._toJson();
     result['permissions'] = <String>[
@@ -705,7 +748,7 @@ enum BuildMode {
 final class InstallRecord {
   /// Creates an install record.
   const InstallRecord({
-    required this.schema,
+    required this.appId,
     required this.installedAt,
     required this.installedBy,
     required this.source,
@@ -735,9 +778,28 @@ final class InstallRecord {
   }
 
   static InstallRecord _parse(Map<String, Object?> root) {
-    final int schema = _required<int>(root, 'schema', 'schema');
-    if (schema > 1) {
-      throw ManifestSchemaTooNew(schema);
+    _validateObjectShape(
+      root,
+      required: const <String>{
+        'appId',
+        'installedAt',
+        'installedBy',
+        'source',
+        'buildMode',
+        'engineFlavor',
+        'sizeBytes',
+        'payload',
+      },
+      optional: const <String>{},
+      path: r'$',
+    );
+    final String rawAppId = _required<String>(root, 'appId', 'appId');
+    final AppId? appId = AppId.tryParse(rawAppId);
+    if (appId == null) {
+      throw const ManifestFieldError(
+        path: 'appId',
+        reason: 'must be a reverse-DNS app id up to 100 chars',
+      );
     }
     final String installedAtText = _required<String>(
       root,
@@ -753,8 +815,11 @@ final class InstallRecord {
         reason: 'must be an ISO-8601 timestamp',
       );
     }
-    final Map<String, Object?> payloadMap =
-        _optionalMap(root, 'payload', 'payload') ?? const <String, Object?>{};
+    final Map<String, Object?> payloadMap = _requiredMap(
+      root,
+      'payload',
+      'payload',
+    );
     final Map<String, String> payload = <String, String>{};
     for (final MapEntry<String, Object?> entry in payloadMap.entries) {
       final Object? value = entry.value;
@@ -766,8 +831,15 @@ final class InstallRecord {
       }
       payload[entry.key] = value;
     }
+    final int sizeBytes = _required<int>(root, 'sizeBytes', 'sizeBytes');
+    if (sizeBytes < 0) {
+      throw const ManifestFieldError(
+        path: 'sizeBytes',
+        reason: 'must not be negative',
+      );
+    }
     return InstallRecord(
-      schema: schema,
+      appId: appId,
       installedAt: installedAt,
       installedBy: _required<String>(root, 'installedBy', 'installedBy'),
       source: _required<String>(root, 'source', 'source'),
@@ -775,13 +847,13 @@ final class InstallRecord {
         _required<String>(root, 'buildMode', 'buildMode'),
       ),
       engineFlavor: _required<String>(root, 'engineFlavor', 'engineFlavor'),
-      sizeBytes: _required<int>(root, 'sizeBytes', 'sizeBytes'),
+      sizeBytes: sizeBytes,
       payload: Map<String, String>.unmodifiable(payload),
     );
   }
 
-  /// Install-record schema version.
-  final int schema;
+  /// Application identity bound to this receipt.
+  final AppId appId;
 
   /// UTC install time.
   final DateTime installedAt;
@@ -840,19 +912,39 @@ AppRuntime _parseRuntime(Map<String, Object?> map) {
       reason: 'unknown runtime type',
     );
   }
-  final String assets = _required<String>(map, 'assets', 'runtime.assets');
-  _validateRelativePath(assets, 'runtime.assets');
   switch (kind) {
     case AppRuntimeKind.flutterAot:
+      _validateObjectShape(
+        map,
+        required: const <String>{'type', 'appElf', 'assets'},
+        optional: const <String>{},
+        path: 'runtime',
+      );
+      final String assets = _required<String>(map, 'assets', 'runtime.assets');
+      _validateRelativePath(assets, 'runtime.assets');
       final String appElf = _required<String>(map, 'appElf', 'runtime.appElf');
       _validateRelativePath(appElf, 'runtime.appElf');
       return FlutterAotRuntime(appElf: appElf, assets: assets);
     case AppRuntimeKind.flutterKernel:
+      _validateObjectShape(
+        map,
+        required: const <String>{'type', 'assets'},
+        optional: const <String>{},
+        path: 'runtime',
+      );
+      final String assets = _required<String>(map, 'assets', 'runtime.assets');
+      _validateRelativePath(assets, 'runtime.assets');
       return FlutterKernelRuntime(assets: assets);
   }
 }
 
 EngineRequirement _parseEngine(Map<String, Object?> map) {
+  _validateObjectShape(
+    map,
+    required: const <String>{'flutterVersion', 'engineCommit'},
+    optional: const <String>{},
+    path: 'engine',
+  );
   final String commit = _required<String>(
     map,
     'engineCommit',
@@ -864,13 +956,6 @@ EngineRequirement _parseEngine(Map<String, Object?> map) {
       reason: 'must be a 40-character lowercase hex hash',
     );
   }
-  final int abi = _required<int>(map, 'plutoAbi', 'engine.plutoAbi');
-  if (abi < 1) {
-    throw const ManifestFieldError(
-      path: 'engine.plutoAbi',
-      reason: 'must be at least 1',
-    );
-  }
   return EngineRequirement(
     flutterVersion: _required<String>(
       map,
@@ -878,13 +963,73 @@ EngineRequirement _parseEngine(Map<String, Object?> map) {
       'engine.flutterVersion',
     ),
     engineCommit: commit,
-    plutoAbi: abi,
   );
 }
 
-Set<AppPermission> _parsePermissions(Map<String, Object?> root) {
+Set<AppTargetPlatform> _parseTargets(
+  Map<String, Object?> root, {
+  required bool canonical,
+}) {
+  if (canonical && !root.containsKey('targets')) {
+    throw const ManifestFieldError(path: 'targets', reason: 'is required');
+  }
+  final Object? raw = root['targets'];
+  if (raw == null) {
+    if (root.containsKey('targets')) {
+      throw const ManifestFieldError(path: 'targets', reason: 'must be a list');
+    }
+    return const <AppTargetPlatform>{
+      AppTargetPlatform.linuxArm,
+      AppTargetPlatform.linuxArm64,
+    };
+  }
+  if (raw is! List<Object?> || raw.isEmpty) {
+    throw const ManifestFieldError(
+      path: 'targets',
+      reason: 'must be a non-empty list',
+    );
+  }
+  final Set<AppTargetPlatform> result = <AppTargetPlatform>{};
+  for (var index = 0; index < raw.length; index++) {
+    final Object? value = raw[index];
+    if (value is! String) {
+      throw ManifestFieldError(
+        path: 'targets[$index]',
+        reason: 'must be a string',
+      );
+    }
+    final AppTargetPlatform? target = AppTargetPlatform.fromWireName(value);
+    if (target == null) {
+      throw ManifestFieldError(
+        path: 'targets[$index]',
+        reason: 'unknown device target',
+      );
+    }
+    if (!result.add(target)) {
+      throw ManifestFieldError(
+        path: 'targets[$index]',
+        reason: 'duplicate device target',
+      );
+    }
+  }
+  return Set<AppTargetPlatform>.unmodifiable(result);
+}
+
+Set<AppPermission> _parsePermissions(
+  Map<String, Object?> root, {
+  required bool canonical,
+}) {
+  if (canonical && !root.containsKey('permissions')) {
+    throw const ManifestFieldError(path: 'permissions', reason: 'is required');
+  }
   final Object? raw = root['permissions'];
   if (raw == null) {
+    if (root.containsKey('permissions')) {
+      throw const ManifestFieldError(
+        path: 'permissions',
+        reason: 'must be a list',
+      );
+    }
     return const <AppPermission>{};
   }
   if (raw is! List<Object?>) {
@@ -911,12 +1056,38 @@ Set<AppPermission> _parsePermissions(Map<String, Object?> root) {
   return Set<AppPermission>.unmodifiable(permissions);
 }
 
-DisplayPrefs _parseDisplay(Map<String, Object?>? map) {
+DisplayPrefs _parseDisplay(
+  Map<String, Object?>? map, {
+  required bool canonical,
+}) {
   if (map == null) {
     return const DisplayPrefs();
   }
+  _validateObjectShape(
+    map,
+    required: canonical
+        ? const <String>{
+            'orientations',
+            'defaultOrientation',
+            'scale',
+            'color',
+            'refreshProfile',
+          }
+        : const <String>{},
+    optional: canonical
+        ? const <String>{}
+        : const <String>{
+            'orientations',
+            'defaultOrientation',
+            'scale',
+            'color',
+            'refreshProfile',
+          },
+    path: 'display',
+  );
   final List<ManifestOrientation> orientations = _parseOrientations(
     map['orientations'],
+    canonical: canonical,
   );
   final String? defaultOrientationText = _optional<String>(
     map,
@@ -938,7 +1109,7 @@ DisplayPrefs _parseDisplay(Map<String, Object?>? map) {
       reason: 'must be included in display.orientations',
     );
   }
-  final double? scale = _parseDisplayScale(map);
+  _validateDisplayScale(map);
   final String colorText =
       _optional<String>(map, 'color', 'display.color') ?? 'auto';
   final DisplayColorMode? color = DisplayColorMode._fromWireName(colorText);
@@ -963,14 +1134,22 @@ DisplayPrefs _parseDisplay(Map<String, Object?>? map) {
   return DisplayPrefs(
     orientations: List<ManifestOrientation>.unmodifiable(orientations),
     defaultOrientation: defaultOrientation,
-    scale: scale,
     color: color,
     refreshProfile: refresh,
   );
 }
 
-List<ManifestOrientation> _parseOrientations(Object? raw) {
+List<ManifestOrientation> _parseOrientations(
+  Object? raw, {
+  required bool canonical,
+}) {
   if (raw == null) {
+    if (canonical) {
+      throw const ManifestFieldError(
+        path: 'display.orientations',
+        reason: 'must be a list',
+      );
+    }
     return const <ManifestOrientation>[ManifestOrientation.portrait];
   }
   if (raw is! List<Object?>) {
@@ -1009,12 +1188,28 @@ ManifestOrientation _parseOrientation(String value, String path) {
   return orientation;
 }
 
-LaunchPrefs _parseLaunch(Map<String, Object?>? map) {
+LaunchPrefs _parseLaunch(Map<String, Object?>? map, {required bool canonical}) {
   if (map == null) {
     return const LaunchPrefs();
   }
+  _validateObjectShape(
+    map,
+    required: canonical
+        ? const <String>{'singleInstance', 'args'}
+        : const <String>{},
+    optional: canonical
+        ? const <String>{}
+        : const <String>{'singleInstance', 'args'},
+    path: 'launch',
+  );
   final Object? argsRaw = map['args'];
   final List<String> args = <String>[];
+  if (argsRaw == null && map.containsKey('args')) {
+    throw const ManifestFieldError(
+      path: 'launch.args',
+      reason: 'must be a list',
+    );
+  }
   if (argsRaw != null) {
     if (argsRaw is! List<Object?>) {
       throw const ManifestFieldError(
@@ -1062,13 +1257,34 @@ T? _optional<T>(Map<String, Object?> map, String key, String path) {
     return null;
   }
   final Object? value = map[key];
-  if (value == null) {
-    return null;
-  }
   if (value is T) {
-    return value as T;
+    return value;
   }
   throw ManifestFieldError(path: path, reason: 'has the wrong type');
+}
+
+void _validateObjectShape(
+  Map<String, Object?> map, {
+  required Set<String> required,
+  required Set<String> optional,
+  required String path,
+}) {
+  for (final String key in map.keys) {
+    if (!required.contains(key) && !optional.contains(key)) {
+      throw ManifestFieldError(
+        path: path == r'$' ? key : '$path.$key',
+        reason: 'is not supported',
+      );
+    }
+  }
+  for (final String key in required) {
+    if (!map.containsKey(key)) {
+      throw ManifestFieldError(
+        path: path == r'$' ? key : '$path.$key',
+        reason: 'is required',
+      );
+    }
+  }
 }
 
 Map<String, Object?> _requiredMap(
@@ -1098,32 +1314,18 @@ Map<String, Object?>? _optionalMap(
   throw ManifestFieldError(path: path, reason: 'must be an object');
 }
 
-double? _parseDisplayScale(Map<String, Object?> map) {
+void _validateDisplayScale(Map<String, Object?> map) {
   if (!map.containsKey('scale')) {
-    return null;
+    return;
   }
   final Object? value = map['scale'];
   if (value == 'auto') {
-    return null;
+    return;
   }
-  final double scale;
-  if (value is int) {
-    scale = value.toDouble();
-  } else if (value is double) {
-    scale = value;
-  } else {
-    throw const ManifestFieldError(
-      path: 'display.scale',
-      reason: 'must be auto or a number',
-    );
-  }
-  if (!scale.isFinite || scale < 1.0 || scale > 3.0) {
-    throw const ManifestFieldError(
-      path: 'display.scale',
-      reason: 'numeric overrides must be between 1.0 and 3.0',
-    );
-  }
-  return scale;
+  throw const ManifestFieldError(
+    path: 'display.scale',
+    reason: 'must be auto when provided',
+  );
 }
 
 Object? _yamlToPlain(Object? value) {

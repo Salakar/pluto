@@ -5,6 +5,7 @@ import 'config/paths.dart';
 import 'config/pins.dart';
 import 'device/remarkable_discovery.dart';
 import 'doctor/doctor.dart';
+import 'errors.dart';
 import 'process.dart';
 import 'ssh/device_transport.dart';
 import 'ssh/dropbear_transport.dart';
@@ -36,13 +37,57 @@ final class PlutoCliEnvironment {
   final StringSink err;
 
   /// Creates the default environment.
-  factory PlutoCliEnvironment.defaults() {
+  factory PlutoCliEnvironment.defaults({
+    Map<String, String>? processEnvironment,
+  }) {
     final PlutoPaths paths = PlutoPaths.defaults();
+    final Map<String, String> variables =
+        processEnvironment ?? Platform.environment;
+    final String strictValue = variables['PLUTO_ACCEPTANCE_STRICT_SSH'] ?? '0';
+    final String allowTestHooks =
+        variables['PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS'] ?? '0';
+    final String? sshOverride = variables['PLUTO_ACCEPTANCE_SSH_BIN'];
+    if (strictValue != '0' && strictValue != '1') {
+      throw const CliConfigurationException(
+        message: 'PLUTO_ACCEPTANCE_STRICT_SSH must be 0 or 1.',
+      );
+    }
+    if (allowTestHooks != '0' && allowTestHooks != '1') {
+      throw const CliConfigurationException(
+        message: 'PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS must be 0 or 1.',
+      );
+    }
+    final bool acceptanceStrict = strictValue == '1';
+    String sshExecutable = acceptanceStrict ? '/usr/bin/ssh' : 'ssh';
+    if (acceptanceStrict && sshOverride != null && sshOverride.isNotEmpty) {
+      if (allowTestHooks != '1') {
+        throw const CliConfigurationException(
+          message:
+              'PLUTO_ACCEPTANCE_SSH_BIN requires '
+              'PLUTO_ACCEPTANCE_ALLOW_TEST_HOOKS=1.',
+        );
+      }
+      final File overrideFile = File(sshOverride);
+      if (!overrideFile.isAbsolute ||
+          FileSystemEntity.typeSync(sshOverride, followLinks: false) !=
+              FileSystemEntityType.file ||
+          (FileStat.statSync(sshOverride).mode & 0x49) == 0) {
+        throw const CliConfigurationException(
+          message:
+              'PLUTO_ACCEPTANCE_SSH_BIN must be an absolute executable '
+              'regular file.',
+        );
+      }
+      sshExecutable = sshOverride;
+    }
     return PlutoCliEnvironment(
       paths: paths,
       hostEnvironment: const ProcessHostEnvironment(),
-      transportFactory: (DeviceEndpoint endpoint) =>
-          DropbearTransport(endpoint: endpoint),
+      transportFactory: (DeviceEndpoint endpoint) => DropbearTransport(
+        endpoint: endpoint,
+        sshExecutable: sshExecutable,
+        acceptanceStrict: acceptanceStrict,
+      ),
       out: stdout,
       err: stderr,
     );

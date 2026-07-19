@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pluto_core/pluto_core.dart';
+import 'package:pluto_core/testing.dart';
+import 'package:pluto_device/pluto_device.dart';
 import 'package:pluto_launcher/main.dart';
 import 'package:pluto_launcher/src/screens.dart';
 import 'package:pluto_manifest/pluto_manifest.dart';
@@ -144,7 +147,7 @@ void main() {
     WidgetTester tester,
   ) async {
     _setMoveViewport(tester);
-    final _Harness harness = _Harness();
+    final _Harness harness = _Harness(apps: const <LauncherApp>[]);
     await tester.pumpWidget(
       PlutoLauncherApp(services: harness.services, initialRoute: '/settings'),
     );
@@ -166,6 +169,32 @@ void main() {
     expect(harness.settings.rotation, RotationPreference.landscape);
     expect(harness.session.didReturnToLauncher, isTrue);
   });
+
+  for (final RemarkableModel model in <RemarkableModel>[
+    RemarkableModel.remarkable1,
+    RemarkableModel.remarkable2,
+  ]) {
+    testWidgets('settings omits frontlight controls on ${model.wireName}', (
+      WidgetTester tester,
+    ) async {
+      _setRm12Viewport(tester);
+      final _Harness harness = _Harness(
+        apps: const <LauncherApp>[],
+        device: FakeLauncherDeviceRepository(model: model),
+      );
+      await tester.pumpWidget(
+        PlutoLauncherApp(services: harness.services, initialRoute: '/settings'),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Rotation'), findsOneWidget);
+      expect(find.text('Frontlight'), findsNothing);
+      expect(find.byType(DiscreteSlider), findsNothing);
+      expect(harness.settings.frontlightReadCalls, 0);
+      expect(harness.settings.frontlightWrites, isEmpty);
+    });
+  }
 
   testWidgets('home and settings lay out without overflow in landscape', (
     WidgetTester tester,
@@ -325,6 +354,20 @@ void main() {
       expect(harness.session.launchedApps.single.value, 'dev.example.counter');
     },
   );
+
+  testWidgets('switcher center tap selects first preview on Move', (
+    WidgetTester tester,
+  ) async {
+    _setMoveViewport(tester);
+    await _expectSwitcherCenterTapSelectsFirstPreview(tester);
+  });
+
+  testWidgets('switcher center tap selects first preview on RM1 and RM2', (
+    WidgetTester tester,
+  ) async {
+    _setRm12Viewport(tester);
+    await _expectSwitcherCenterTapSelectsFirstPreview(tester);
+  });
 
   testWidgets('missing switcher preview follows the live RM1/RM2 surface', (
     WidgetTester tester,
@@ -629,6 +672,12 @@ void main() {
     await tester.tap(find.text('reMarkable').first);
     await tester.pump();
     expect(find.text('Switch to reMarkable?'), findsOneWidget);
+    expect(
+      find.text(
+        'Your notes and documents open in the stock reMarkable interface. Pluto stays installed. To return, connect the tablet to your computer and run pluto run --release dev.pluto.launcher.',
+      ),
+      findsOneWidget,
+    );
 
     await tester.pump(const Duration(milliseconds: 650));
     await tester.tap(find.text('Switch'));
@@ -651,6 +700,9 @@ void main() {
     await _pumpLauncherRoute(tester, harness, '/settings');
     expect(find.text('Ghost cleaning'), findsNothing);
     expect(find.text('Wi-Fi'), findsOneWidget);
+    expect(find.text('About'), findsOneWidget);
+    expect(find.text('About & developer'), findsNothing);
+    expect(find.text('Uninstall Pluto…'), findsNothing);
   });
 
   testWidgets('about omits unsupported diagnostics', (
@@ -671,7 +723,10 @@ void main() {
     ]) {
       expect(find.text(removed), findsNothing);
     }
-    expect(find.text('VM service'), findsOneWidget);
+    expect(find.text('About'), findsOneWidget);
+    expect(find.text('0.1.0'), findsOneWidget);
+    expect(find.text('3.44.4 / 3.12.2'), findsOneWidget);
+    expect(find.text('VM service'), findsNothing);
   });
 
   testWidgets('Wi-Fi open-network connect and toggle refresh visible state', (
@@ -771,6 +826,19 @@ void main() {
     );
     expect(find.text('Wi-Fi: wpa_supplicant scan failed'), findsOneWidget);
     expect(find.textContaining('PlatformException'), findsNothing);
+
+    final FakeLauncherSettings packageFailure = FakeLauncherSettings()
+      ..scanWifiError = const PlutoPlatformException(
+        'canonical scan failed',
+        code: 'unavailable',
+      );
+    await _pumpLauncherRoute(
+      tester,
+      _Harness(settings: packageFailure),
+      '/settings/wifi',
+    );
+    expect(find.text('Wi-Fi: canonical scan failed'), findsOneWidget);
+    expect(find.textContaining('PlutoPlatformException'), findsNothing);
   });
 
   test('real status stream is stable and preserves telemetry truth', () async {
@@ -778,31 +846,53 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     var sequence = 0;
 
-    Future<({ChannelLauncherSettings settings, StatusSnapshot status})> read({
+    Future<({PlutoLauncherSettings settings, StatusSnapshot status})> read({
       required Map<String, Object?> battery,
-      required Map<String, Object?> wifi,
+      required Map<String, Object?>? activeWifi,
+      required bool wifiEnabled,
+      required bool usbConnected,
     }) async {
       sequence += 1;
       final MethodChannel channel = MethodChannel(
         'pluto/test/settings/$sequence',
       );
       messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
-        return switch (call.method) {
-          'batteryGet' => battery,
-          'wifiStatus' => wifi,
-          'frontlightGet' => <String, Object?>{'raw': 1024, 'max': 2048},
-          'networkInfo' => <String, Object?>{
-            'usbConnected': battery['isUsbNetworkConnected'],
-            'usbIp': battery['isUsbNetworkConnected'] == true
-                ? '10.11.99.1'
-                : '',
-            'wifiIp': wifi['ipAddress'] ?? '',
-          },
-          _ => null,
+        expect(call.method, 'network.info');
+        return <String, Object?>{
+          'usbConnected': usbConnected,
+          'usbIp': usbConnected ? '10.11.99.1' : '',
         };
       });
       addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
-      final ChannelLauncherSettings settings = ChannelLauncherSettings(
+      final FakePlutoTransport transport = FakePlutoTransport()
+        ..onInvoke(
+          plutoSettingsChannel,
+          batteryDeviceMethod,
+          (Object? arguments) => battery,
+        )
+        ..onInvoke(
+          plutoSettingsChannel,
+          batteryMarkerMethod,
+          (Object? arguments) => <String, Object?>{'level': 0.81},
+        )
+        ..onInvoke(
+          plutoSettingsChannel,
+          wifiActiveMethod,
+          (Object? arguments) => activeWifi,
+        )
+        ..onInvoke(
+          plutoSettingsChannel,
+          wifiIsEnabledMethod,
+          (Object? arguments) => wifiEnabled,
+        )
+        ..onInvoke(
+          plutoSettingsChannel,
+          frontlightReadMethod,
+          (Object? arguments) => <String, Object?>{'raw': 1024, 'maxRaw': 2048},
+        );
+      addTearDown(transport.close);
+      final PlutoLauncherSettings settings = PlutoLauncherSettings(
+        settings: PlutoSettings.withTransport(transport),
         channel: channel,
       );
       addTearDown(settings.dispose);
@@ -815,15 +905,15 @@ void main() {
     }
 
     final commonBattery = <String, Object?>{
-      'levelPercent': 73,
-      'markerLevelPercent': 81,
-      'isCharging': false,
+      'level': 0.73,
+      'state': 'discharging',
       'isUsbPowerPresent': true,
-      'isUsbNetworkConnected': false,
     };
     final disabled = await read(
       battery: commonBattery,
-      wifi: <String, Object?>{'status': 'disabled'},
+      activeWifi: null,
+      wifiEnabled: false,
+      usbConnected: false,
     );
     expect(disabled.status.isWifiEnabled, isFalse);
     expect(disabled.status.wifi, isNull);
@@ -836,23 +926,22 @@ void main() {
 
     final disconnected = await read(
       battery: commonBattery,
-      wifi: <String, Object?>{'status': 'disconnected'},
+      activeWifi: null,
+      wifiEnabled: true,
+      usbConnected: false,
     );
     expect(disconnected.status.isWifiEnabled, isTrue);
     expect(disconnected.status.wifi, isNull);
 
     final connected = await read(
-      battery: <String, Object?>{
-        ...commonBattery,
-        'isUsbPowerPresent': false,
-        'isUsbNetworkConnected': true,
-      },
-      wifi: <String, Object?>{
-        'status': 'connected',
+      battery: <String, Object?>{...commonBattery, 'isUsbPowerPresent': false},
+      activeWifi: <String, Object?>{
         'ssid': 'HomeNet',
         'ipAddress': '192.168.1.44',
         'signal': 0.82,
       },
+      wifiEnabled: true,
+      usbConnected: true,
     );
     expect(connected.status.isWifiEnabled, isTrue);
     expect(connected.status.wifi?.ssid, 'HomeNet');
@@ -870,33 +959,59 @@ void main() {
     var wifiEnabled = true;
     var frontlightRaw = 160;
     messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
-      switch (call.method) {
-        case 'batteryGet':
-          return <String, Object?>{
-            'levelPercent': 73,
-            'isCharging': false,
-            'isUsbNetworkConnected': false,
-          };
-        case 'wifiStatus':
-          return <String, Object?>{
-            'status': wifiEnabled ? 'disconnected' : 'disabled',
-          };
-        case 'frontlightGet':
-          return <String, Object?>{'raw': frontlightRaw, 'max': 2048};
-        case 'wifiSetEnabled':
-          wifiEnabled =
-              (call.arguments! as Map<Object?, Object?>)['enabled']! as bool;
-          return null;
-        case 'frontlightSet':
-          frontlightRaw =
-              (call.arguments! as Map<Object?, Object?>)['raw']! as int;
-          return null;
-      }
-      return null;
+      expect(call.method, 'network.info');
+      return <String, Object?>{'usbConnected': false, 'usbIp': ''};
     });
     addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
-    final ChannelLauncherSettings settings = ChannelLauncherSettings(
+    final FakePlutoTransport transport = FakePlutoTransport()
+      ..onInvoke(
+        plutoSettingsChannel,
+        batteryDeviceMethod,
+        (Object? arguments) => <String, Object?>{
+          'level': 0.73,
+          'state': 'discharging',
+          'isUsbPowerPresent': false,
+        },
+      )
+      ..onInvoke(
+        plutoSettingsChannel,
+        batteryMarkerMethod,
+        (Object? arguments) => null,
+      )
+      ..onInvoke(
+        plutoSettingsChannel,
+        wifiActiveMethod,
+        (Object? arguments) => null,
+      )
+      ..onInvoke(
+        plutoSettingsChannel,
+        wifiIsEnabledMethod,
+        (Object? arguments) => wifiEnabled,
+      )
+      ..onInvoke(plutoSettingsChannel, wifiSetEnabledMethod, (
+        Object? arguments,
+      ) {
+        wifiEnabled = (arguments! as Map<Object?, Object?>)['enabled']! as bool;
+        return null;
+      })
+      ..onInvoke(
+        plutoSettingsChannel,
+        frontlightReadMethod,
+        (Object? arguments) => <String, Object?>{
+          'raw': frontlightRaw,
+          'maxRaw': 2048,
+        },
+      )
+      ..onInvoke(plutoSettingsChannel, frontlightWriteMethod, (
+        Object? arguments,
+      ) {
+        frontlightRaw = (arguments! as Map<Object?, Object?>)['raw']! as int;
+        return null;
+      });
+    addTearDown(transport.close);
+    final PlutoLauncherSettings settings = PlutoLauncherSettings(
+      settings: PlutoSettings.withTransport(transport),
       channel: channel,
     );
     addTearDown(settings.dispose);
@@ -926,6 +1041,7 @@ void main() {
     WidgetTester tester,
   ) async {
     final _Harness harness = _Harness(
+      apps: const <LauncherApp>[],
       frontlight: const FrontlightState(raw: 913, maxRaw: 2047),
     );
 
@@ -944,6 +1060,7 @@ void main() {
     WidgetTester tester,
   ) async {
     final _Harness harness = _Harness(
+      apps: const <LauncherApp>[],
       frontlight: const FrontlightState(raw: 347, maxRaw: 2047),
     );
     harness.session.standbyHandoffError = StateError('handoff write failed');
@@ -956,6 +1073,29 @@ void main() {
     expect(harness.session.didReturnToLauncher, isTrue);
     expect(find.textContaining('Standby was interrupted'), findsOneWidget);
   });
+
+  for (final RemarkableModel model in <RemarkableModel>[
+    RemarkableModel.remarkable1,
+    RemarkableModel.remarkable2,
+  ]) {
+    testWidgets('standby skips frontlight operations on ${model.wireName}', (
+      WidgetTester tester,
+    ) async {
+      final _Harness harness = _Harness(
+        apps: const <LauncherApp>[],
+        frontlight: const FrontlightState(raw: 913, maxRaw: 2047),
+        device: FakeLauncherDeviceRepository(model: model),
+      );
+
+      await _pumpStandby(tester, harness);
+
+      expect(harness.session.didHandoffStandby, isTrue);
+      expect(harness.session.didReturnToLauncher, isFalse);
+      expect(harness.settings.frontlightReadCalls, 0);
+      expect(harness.settings.frontlightWrites, isEmpty);
+      expect(harness.settings.currentFrontlight.raw, 913);
+    });
+  }
 }
 
 Future<void> _pumpStandby(WidgetTester tester, _Harness harness) async {
@@ -1063,11 +1203,35 @@ void _setRm12Viewport(WidgetTester tester) {
   addTearDown(tester.view.resetDevicePixelRatio);
 }
 
+Future<void> _expectSwitcherCenterTapSelectsFirstPreview(
+  WidgetTester tester,
+) async {
+  final _Harness harness = _Harness();
+  harness.session.switcherRequest = AppSwitcherRequest(
+    originAppId: AppId.tryParse('dev.pluto.ink')!,
+    previews: <AppSwitcherPreview>[
+      AppSwitcherPreview(appId: AppId.tryParse('dev.example.weather')!),
+      AppSwitcherPreview(appId: AppId.tryParse('dev.example.counter')!),
+    ],
+  );
+  await tester.pumpWidget(PlutoLauncherApp(services: harness.services));
+  await tester.pumpAndSettle();
+
+  expect(find.byType(AppSwitcherScreen), findsOneWidget);
+  final Offset physicalCenter = tester.view.physicalSize.center(Offset.zero);
+  await tester.tapAt(physicalCenter / tester.view.devicePixelRatio);
+  await tester.pump(const Duration(milliseconds: 100));
+
+  expect(harness.session.launchedApps, hasLength(1));
+  expect(harness.session.launchedApps.single.value, 'dev.example.weather');
+}
+
 final class _Harness {
   _Harness({
     FrontlightState? frontlight,
     FakeLauncherSettings? settings,
     List<LauncherApp>? apps,
+    this.device = const FakeLauncherDeviceRepository(),
   }) : repository = FakeManifestRepository(apps: apps ?? sampleLauncherApps()),
        session = FakeSessionManager(),
        settings = settings ?? FakeLauncherSettings(frontlight: frontlight) {
@@ -1075,13 +1239,14 @@ final class _Harness {
       manifests: repository,
       session: session,
       settings: this.settings,
-      device: const FakeLauncherDeviceRepository(),
+      device: device,
     );
   }
 
   final FakeManifestRepository repository;
   final FakeSessionManager session;
   final FakeLauncherSettings settings;
+  final LauncherDeviceRepository device;
   late final LauncherServices services;
 }
 

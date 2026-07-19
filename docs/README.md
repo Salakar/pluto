@@ -24,6 +24,11 @@ Start here, then dive into the topic you need.
 - [auto-ghostbuster.md](auto-ghostbuster.md) — automatic full-screen ghost
   maintenance policy and its gates.
 - [optimise.md](optimise.md) — the renderer optimisation log and method.
+- [native-display-architecture.md](native-display-architecture.md) — the one
+  runtime, generated profile routing, native panel boundary, lifecycle, and
+  recovery contracts shared by every supported tablet.
+- [native-cutover-report.md](native-cutover-report.md) — exact-device
+  performance results and final all-device release acceptance evidence.
 
 ## Design and verification
 

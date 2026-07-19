@@ -14,11 +14,17 @@
 #include <filesystem>
 #include <limits>
 
+#include "compositor/frame_recording.h"
+#include "presenter/presenter_contract.h"
 #include "renderer/quantize.h"
 #include "renderer/rect_utils.h"
+#include "runtime/health_file.h"
 
 namespace pluto {
 namespace {
+
+static_assert(sizeof(PlutoRect) == 16,
+              "frame recording requires four packed 32-bit rectangle fields");
 
 uint64_t monotonic_us() {
   using clock = std::chrono::steady_clock;
@@ -118,22 +124,20 @@ bool env_flag_enabled(const char *name) {
 // harness (tools/renderer_replay). Host-endian (little-endian on every
 // supported host), tightly packed:
 //
-//   file   := "PLFR" u32 | version u32 (=1) | frame*
-//   frame  := "FRM0" u32
+//   file   := "PLFR" u32 | frame*
+//   frame  := "FRM0" u32 | frame_bytes u32
 //           | presentation_time_ns u64
 //           | width u32 | height u32
 //           | format u32 (PlutoPixelFormat)
 //           | did_update u32 (0|1)
 //           | paint_bounds_count u32
-//           | paint_bounds: count x (x i32, y i32, w i32, h i32)
 //           | payload_bytes u32 (width*bpp*height when did_update, else 0)
+//           | paint_bounds: count x (x i32, y i32, w i32, h i32)
 //           | payload bytes (tight rows of width*bpp)
+//           | crc32 u32 (all frame bytes preceding this field)
 //
 // Idle frames (did_update == false) are recorded header-only so replay
 // preserves the settle/idle cadence.
-constexpr uint32_t k_record_file_magic = 0x52464c50u;  // "PLFR"
-constexpr uint32_t k_record_frame_magic = 0x304d5246u; // "FRM0"
-constexpr uint32_t k_record_version = 1;
 
 bool record_write(std::FILE *file, const void *data, size_t size) {
   return std::fwrite(data, 1, size, file) == size;
@@ -143,8 +147,18 @@ bool record_write_u32(std::FILE *file, uint32_t value) {
   return record_write(file, &value, sizeof(value));
 }
 
-bool record_write_u64(std::FILE *file, uint64_t value) {
-  return record_write(file, &value, sizeof(value));
+bool record_write_crc(std::FILE *file, const void *data, size_t size,
+                      uint32_t *crc) {
+  *crc = frame_recording::crc32_update(*crc, data, size);
+  return record_write(file, data, size);
+}
+
+bool record_write_u32_crc(std::FILE *file, uint32_t value, uint32_t *crc) {
+  return record_write_crc(file, &value, sizeof(value), crc);
+}
+
+bool record_write_u64_crc(std::FILE *file, uint64_t value, uint32_t *crc) {
+  return record_write_crc(file, &value, sizeof(value), crc);
 }
 
 // Damage-merge policy for the scheduler feed: union when overlap makes
@@ -196,42 +210,10 @@ uint64_t pen_focus_wake_signature(const PenRenderHintSnapshot &hint) {
   return signature;
 }
 
-bool presenter_has_pen_focus_hook(const PlutoPresenterOps *ops) {
-  constexpr size_t kRequiredOpsSize =
-      offsetof(PlutoPresenterOps, set_pen_focus) +
-      sizeof(PlutoPresenterOps::set_pen_focus);
-  return ops != nullptr && ops->struct_size >= kRequiredOpsSize &&
-         ops->set_pen_focus != nullptr;
-}
-
-bool presenter_has_stage_handoff_hook(const PlutoPresenterOps *ops) {
-  constexpr size_t kRequiredOpsSize =
-      offsetof(PlutoPresenterOps, stage_handoff) +
-      sizeof(PlutoPresenterOps::stage_handoff);
-  return ops != nullptr && ops->struct_size >= kRequiredOpsSize &&
-         ops->stage_handoff != nullptr;
-}
-
-bool presenter_has_get_handoff_hook(const PlutoPresenterOps *ops) {
-  constexpr size_t kRequiredOpsSize = offsetof(PlutoPresenterOps, get_handoff) +
-                                      sizeof(PlutoPresenterOps::get_handoff);
-  return ops != nullptr && ops->struct_size >= kRequiredOpsSize &&
-         ops->get_handoff != nullptr;
-}
-
-bool presenter_has_confirm_handoff_hook(const PlutoPresenterOps *ops) {
-  constexpr size_t kRequiredOpsSize =
-      offsetof(PlutoPresenterOps, confirm_handoff) +
-      sizeof(PlutoPresenterOps::confirm_handoff);
-  return ops != nullptr && ops->struct_size >= kRequiredOpsSize &&
-         ops->confirm_handoff != nullptr;
-}
-
-bool presenter_has_wait_idle_hook(const PlutoPresenterOps *ops) {
-  constexpr size_t kRequiredOpsSize = offsetof(PlutoPresenterOps, wait_idle) +
-                                      sizeof(PlutoPresenterOps::wait_idle);
-  return ops != nullptr && ops->struct_size >= kRequiredOpsSize &&
-         ops->wait_idle != nullptr;
+bool presenter_binding_is_current(const PlutoPresenterOps *ops,
+                                  PlutoPresenter *presenter) {
+  return (ops == nullptr && presenter == nullptr) ||
+         (presenter != nullptr && presenter_ops_are_current(ops));
 }
 
 PlutoRect presenter_focus_rect(const PlutoRect &logical, uint32_t logical_width,
@@ -518,7 +500,14 @@ size_t CompletionQueue::size_approx_for_testing() const {
 
 FrameRenderer::FrameRenderer(const FrameRendererConfig &config)
     : config_(config) {
+  if (!config_.health_file_path.empty()) {
+    health_file_ =
+        std::make_unique<HealthFilePublisher>(config_.health_file_path);
+  }
   open_frame_recorder();
+  if (!presenter_binding_is_current(config_.presenter_ops, config_.presenter)) {
+    return;
+  }
   configure(config.width, config.height, config.format);
   valid_ = components_valid();
   if (valid_ && config_.start_presenter_thread) {
@@ -527,11 +516,18 @@ FrameRenderer::FrameRenderer(const FrameRendererConfig &config)
 }
 
 bool FrameRenderer::components_valid() const {
-  return !presenter_focus_clear_fault_ && scheduler_ != nullptr &&
+  const bool health_contract_valid =
+      config_.health_file_path.empty() ||
+      (std::filesystem::path(config_.health_file_path).is_absolute() &&
+       health_file_ != nullptr && presenter_supports_health_contract_);
+  return presenter_binding_is_current(config_.presenter_ops,
+                                      config_.presenter) &&
+         !presenter_focus_clear_fault_ && scheduler_ != nullptr &&
          scheduler_->valid() && ledger_.valid() && ladder_.valid() &&
          scroll_detect_.valid() && guard_band_.valid() &&
          settle_planner_.valid() && pen_render_policy_.valid() &&
-         (!config_.enable_auto_ghostbuster || auto_ghostbuster_.valid());
+         (!config_.enable_auto_ghostbuster || auto_ghostbuster_.valid()) &&
+         health_contract_valid;
 }
 
 FrameRenderer::~FrameRenderer() { shutdown(); }
@@ -545,6 +541,10 @@ void FrameRenderer::configure(uint32_t width, uint32_t height,
                  "pluto: refusing renderer reconfigure during pixel reset\n");
     return;
   }
+  presenter_completion_count_ = 0;
+  health_published_completion_count_ = 0;
+  presenter_supports_health_contract_ = false;
+  next_health_publish_us_ = 0;
   // Never forget a fallback reservation owned by the previous geometry. In
   // production host-direct mode native-panel coordinates survive logical
   // reconfiguration and EngineHost owns the lifecycle terminal edge. A failed
@@ -667,6 +667,10 @@ void FrameRenderer::configure(uint32_t width, uint32_t height,
     }
   }
   display_info_available_ = have_display_info;
+  presenter_supports_health_contract_ =
+      have_display_info && scheduler_config.presenter_reports_completion &&
+      presenter_ops_are_current(config_.presenter_ops) &&
+      config_.start_presenter_thread;
 
   AbiPresentBridgeConfig bridge_config{};
   bridge_config.width = width_;
@@ -790,6 +794,10 @@ void FrameRenderer::configure(uint32_t width, uint32_t height,
 // zero scheduler activity by construction.
 bool FrameRenderer::submit_frame(const PlutoFramePacket &packet) {
   std::lock_guard<std::mutex> lock(mutex_);
+  return submit_frame_locked(packet);
+}
+
+bool FrameRenderer::submit_frame_locked(const PlutoFramePacket &packet) {
   ++submitted_frames_;
   if (!valid_ || packet.pixels == nullptr || packet.row_bytes == 0 ||
       packet.width == 0 || packet.height == 0) {
@@ -800,6 +808,7 @@ bool FrameRenderer::submit_frame(const PlutoFramePacket &packet) {
     ++idle_frames_;
     last_damage_count_ = 0;
     maybe_resume_presentation_locked();
+    note_accepted_flutter_frame_locked();
     return true;
   }
   if (packet.width != width_ || packet.height != height_ ||
@@ -868,6 +877,7 @@ bool FrameRenderer::submit_frame(const PlutoFramePacket &packet) {
   seeded_physical_baseline_valid_ = false;
   if (count == 0) {
     maybe_resume_presentation_locked();
+    note_accepted_flutter_frame_locked();
     return true;
   }
   ++diffed_frames_;
@@ -901,6 +911,7 @@ bool FrameRenderer::submit_frame(const PlutoFramePacket &packet) {
     tick_locked(now_us);
     wake_.store(true, std::memory_order_release);
     cv_.notify_one();
+    note_accepted_flutter_frame_locked();
     return true;
   }
 
@@ -927,6 +938,7 @@ bool FrameRenderer::submit_frame(const PlutoFramePacket &packet) {
   maybe_resume_presentation_locked();
   wake_.store(true, std::memory_order_release);
   cv_.notify_one();
+  note_accepted_flutter_frame_locked();
   return true;
 }
 
@@ -1133,6 +1145,9 @@ void FrameRenderer::notify_idle_frame() {
   ++idle_frames_;
   last_damage_count_ = 0;
   maybe_resume_presentation_locked();
+  if (valid_ && retained_content_ready_) {
+    note_accepted_flutter_frame_locked();
+  }
 }
 
 bool FrameRenderer::set_rotation(uint32_t rotation, uint32_t logical_width,
@@ -1141,7 +1156,7 @@ bool FrameRenderer::set_rotation(uint32_t rotation, uint32_t logical_width,
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  if (pixel_reset_phase_ != PixelResetPhase::kIdle) {
+  if (pixel_reset_phase_ != PixelResetPhase::kIdle || exact_proof_active_) {
     std::fprintf(stderr,
                  "pluto: rotation deferred until optical restore completes\n");
     return false;
@@ -1160,25 +1175,18 @@ bool FrameRenderer::set_rotation(uint32_t rotation, uint32_t logical_width,
   // Freeze scheduler dispatch under the renderer mutex, then prove the
   // physical presenter idle before rebuilding scheduler and bridge geometry.
   // Completion callbacks are enqueue-only and therefore cannot deadlock this
-  // wait. A backend without wait_idle may rotate only when scheduler state is
-  // already empty.
+  // wait.
   if (config_.presenter_ops != nullptr && config_.presenter != nullptr) {
-    if (config_.presenter_ops->wait_idle != nullptr) {
-      const PlutoStatus status = config_.presenter_ops->wait_idle(
-          config_.presenter, k_rotation_wait_idle_timeout_ms);
-      if (status != kPlutoStatusOk) {
-        std::fprintf(stderr,
-                     "pluto: rotation refused; presenter did not become "
-                     "idle (status=%d)\n",
-                     static_cast<int>(status));
-        return false;
-      }
-      drain_completions_locked();
-    } else if (scheduler_ != nullptr && !scheduler_->idle()) {
-      std::fprintf(stderr, "pluto: rotation refused; busy presenter has no "
-                           "wait_idle operation\n");
+    const PlutoStatus status = config_.presenter_ops->wait_idle(
+        config_.presenter, k_rotation_wait_idle_timeout_ms);
+    if (status != kPlutoStatusOk) {
+      std::fprintf(stderr,
+                   "pluto: rotation refused; presenter did not become "
+                   "idle (status=%d)\n",
+                   static_cast<int>(status));
       return false;
     }
+    drain_completions_locked();
   }
   // Debt is tracked in the renderer/panel coordinate grid. Even a 180-degree
   // rotation keeps the same dimensions while moving every physical tile, so
@@ -1199,7 +1207,7 @@ bool FrameRenderer::set_rotation(uint32_t rotation, uint32_t logical_width,
 bool FrameRenderer::request_full_refresh() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!valid_ || scheduler_ == nullptr || !retained_content_ready_ ||
-      width_ == 0 || height_ == 0) {
+      width_ == 0 || height_ == 0 || exact_proof_active_) {
     return false;
   }
   const PlutoRect full{0, 0, static_cast<int32_t>(width_),
@@ -1307,7 +1315,8 @@ void FrameRenderer::set_auto_maintenance_allowed(bool allowed) {
 bool FrameRenderer::request_ghost_control(GhostControlMode mode) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!valid_ || scheduler_ == nullptr || !retained_content_ready_ ||
-      width_ == 0 || height_ == 0 || presentation_suspended_) {
+      width_ == 0 || height_ == 0 || presentation_suspended_ ||
+      exact_proof_active_) {
     return false;
   }
   if (pixel_reset_phase_ != PixelResetPhase::kIdle) {
@@ -1726,8 +1735,7 @@ bool FrameRenderer::import_handoff_state_locked(
 void FrameRenderer::try_admit_handoff_locked() {
   const PlutoPresenterOps *ops = config_.presenter_ops;
   PlutoPresenter *presenter = config_.presenter;
-  if (presenter == nullptr || !presenter_has_get_handoff_hook(ops) ||
-      !presenter_has_confirm_handoff_hook(ops)) {
+  if (presenter == nullptr || !presenter_ops_are_current(ops)) {
     return;
   }
 
@@ -1742,7 +1750,7 @@ void FrameRenderer::try_admit_handoff_locked() {
   PlutoHandoffPayload payload{};
   payload.struct_size = sizeof(payload);
   const PlutoStatus status = ops->get_handoff(presenter, &payload);
-  if (status == kPlutoStatusAgain) {
+  if (status == kPlutoStatusAgain || status == kPlutoStatusUnsupported) {
     return;
   }
   if (status != kPlutoStatusOk) {
@@ -1801,7 +1809,7 @@ void FrameRenderer::try_admit_handoff_locked() {
 void FrameRenderer::try_stage_handoff_locked(uint64_t deadline_us) {
   const PlutoPresenterOps *ops = config_.presenter_ops;
   PlutoPresenter *presenter = config_.presenter;
-  if (presenter == nullptr || !presenter_has_stage_handoff_hook(ops)) {
+  if (presenter == nullptr || !presenter_ops_are_current(ops)) {
     return;
   }
   const bool scheduler_idle = scheduler_ != nullptr && scheduler_->idle();
@@ -1821,24 +1829,22 @@ void FrameRenderer::try_stage_handoff_locked(uint64_t deadline_us) {
       presentation_resume_requested_ || auto_ghostbuster_.action_active() ||
       input_mask != 0 || !retained_content_ready_ ||
       seeded_physical_baseline_valid_) {
-    if (ops->name != nullptr && std::strcmp(ops->name, "swtcon") == 0) {
-      std::fprintf(
-          stderr,
-          "pluto: renderer handoff staging skipped unsafe valid=%d "
-          "components=%d scheduler_idle=%d user_pending=%d "
-          "settle_pending=%d inflight=%d completions=%zu dropped=%zu "
-          "reset_phase=%u hold=%d suspended=%d resume_pending=%d "
-          "maintenance_active=%d input=%u retained=%d seeded=%d\n",
-          valid_ ? 1 : 0, components_valid() ? 1 : 0, scheduler_idle ? 1 : 0,
-          user_pending ? 1 : 0, settle_pending ? 1 : 0,
-          presenter_inflight ? 1 : 0, completion_count, dropped,
-          static_cast<unsigned>(pixel_reset_phase_),
-          pixel_reset_render_hold_ ? 1 : 0, presentation_suspended_ ? 1 : 0,
-          presentation_resume_requested_ ? 1 : 0,
-          auto_ghostbuster_.action_active() ? 1 : 0,
-          static_cast<unsigned>(input_mask), retained_content_ready_ ? 1 : 0,
-          seeded_physical_baseline_valid_ ? 1 : 0);
-    }
+    std::fprintf(
+        stderr,
+        "pluto: renderer handoff staging skipped unsafe valid=%d "
+        "components=%d scheduler_idle=%d user_pending=%d "
+        "settle_pending=%d inflight=%d completions=%zu dropped=%zu "
+        "reset_phase=%u hold=%d suspended=%d resume_pending=%d "
+        "maintenance_active=%d input=%u retained=%d seeded=%d\n",
+        valid_ ? 1 : 0, components_valid() ? 1 : 0, scheduler_idle ? 1 : 0,
+        user_pending ? 1 : 0, settle_pending ? 1 : 0,
+        presenter_inflight ? 1 : 0, completion_count, dropped,
+        static_cast<unsigned>(pixel_reset_phase_),
+        pixel_reset_render_hold_ ? 1 : 0, presentation_suspended_ ? 1 : 0,
+        presentation_resume_requested_ ? 1 : 0,
+        auto_ghostbuster_.action_active() ? 1 : 0,
+        static_cast<unsigned>(input_mask), retained_content_ready_ ? 1 : 0,
+        seeded_physical_baseline_valid_ ? 1 : 0);
     return;
   }
 
@@ -1869,7 +1875,8 @@ void FrameRenderer::try_stage_handoff_locked(uint64_t deadline_us) {
   };
   const PlutoStatus status =
       ops->stage_handoff(presenter, &payload, remaining_ms);
-  if (status != kPlutoStatusOk && status != kPlutoStatusAgain) {
+  if (status != kPlutoStatusOk && status != kPlutoStatusAgain &&
+      status != kPlutoStatusUnsupported) {
     std::fprintf(stderr,
                  "pluto: presenter declined renderer handoff; using cold "
                  "path\n");
@@ -1923,7 +1930,7 @@ bool FrameRenderer::detach_presenter(uint32_t timeout_ms) {
       lock.unlock();
       PlutoStatus status = kPlutoStatusOk;
       bool presenter_idle_proven = false;
-      if (ops != nullptr && presenter != nullptr && ops->wait_idle != nullptr) {
+      if (presenter_ops_are_current(ops) && presenter != nullptr) {
         status = ops->wait_idle(presenter, remaining_ms);
         presenter_idle_proven = status == kPlutoStatusOk;
       } else {
@@ -1970,7 +1977,7 @@ bool FrameRenderer::detach_presenter(uint32_t timeout_ms) {
           std::max<uint64_t>(1, (deadline_us - now_us + 999u) / 1000u));
       const PlutoPresenterOps *ops = config_.presenter_ops;
       PlutoPresenter *presenter = config_.presenter;
-      if (ops == nullptr || presenter == nullptr || ops->wait_idle == nullptr) {
+      if (!presenter_ops_are_current(ops) || presenter == nullptr) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         continue;
       }
@@ -1990,8 +1997,8 @@ bool FrameRenderer::detach_presenter(uint32_t timeout_ms) {
     }
   }
 
-  if (config_.presenter_ops != nullptr && config_.presenter != nullptr &&
-      config_.presenter_ops->wait_idle != nullptr) {
+  if (presenter_ops_are_current(config_.presenter_ops) &&
+      config_.presenter != nullptr) {
     const PlutoPresenterOps *ops = config_.presenter_ops;
     PlutoPresenter *presenter = config_.presenter;
     // Keep mutex_ across the final idle fence. Completion callbacks are
@@ -2038,7 +2045,7 @@ bool FrameRenderer::detach_presenter(uint32_t timeout_ms) {
 
       const PlutoPresenterOps *ops = config_.presenter_ops;
       PlutoPresenter *presenter = config_.presenter;
-      if (ops == nullptr || presenter == nullptr || ops->wait_idle == nullptr) {
+      if (!presenter_ops_are_current(ops) || presenter == nullptr) {
         handoff_scheduler_quiescent = false;
         break;
       }
@@ -2084,9 +2091,7 @@ bool FrameRenderer::detach_presenter(uint32_t timeout_ms) {
   // skips staging; detach itself continues and the next process cold-clears.
   if (handoff_scheduler_quiescent) {
     try_stage_handoff_locked(deadline_us);
-  } else if (config_.presenter_ops != nullptr &&
-             config_.presenter_ops->name != nullptr &&
-             std::strcmp(config_.presenter_ops->name, "swtcon") == 0) {
+  } else if (presenter_ops_are_current(config_.presenter_ops)) {
     std::fprintf(stderr,
                  "pluto: renderer handoff quiescence failed user_pending=%d "
                  "settle_pending=%d inflight=%d\n",
@@ -2106,15 +2111,98 @@ bool FrameRenderer::detach_presenter(uint32_t timeout_ms) {
 
 bool FrameRenderer::attach_presenter(const PlutoPresenterOps *presenter_ops,
                                      PlutoPresenter *presenter) {
-  if (presenter_ops == nullptr || presenter == nullptr) {
+  if (!presenter_ops_are_current(presenter_ops) || presenter == nullptr) {
     return false;
   }
   std::lock_guard<std::mutex> lock(mutex_);
+
+  // detach_presenter() deliberately leaves the last complete app-owned
+  // surface in memory while its Dart isolate sleeps. Preserve that desired
+  // surface across configure(): the newly opened presenter may import a
+  // different app's glass handoff, which is the correct physical baseline but
+  // not the content this resumed isolate must show.
+  const uint32_t resume_width = width_;
+  const uint32_t resume_height = height_;
+  const size_t resume_stride = stride_;
+  const PlutoPixelFormat resume_format = format_;
+  const bool have_resume_surface =
+      retained_content_ready_ && resume_width != 0 && resume_height != 0 &&
+      resume_stride != 0 && resume_height <= SIZE_MAX / resume_stride &&
+      retained_frame_.size() == resume_stride * resume_height;
+  std::vector<uint8_t> resume_surface;
+  if (have_resume_surface) {
+    resume_surface = std::move(retained_frame_);
+  }
+
   config_.presenter_ops = presenter_ops;
   config_.presenter = presenter;
   next_presenter_health_poll_us_ = 0;
   configure(width_, height_, format_);
   valid_ = components_valid();
+  if (!valid_ || !have_resume_surface || resume_width != width_ ||
+      resume_height != height_ || resume_stride != stride_ ||
+      resume_format != format_) {
+    return valid_;
+  }
+  const bool exact_physical_baseline = seeded_physical_baseline_valid_;
+
+  // Reconcile the complete, real pre-hibernate app surface against the current
+  // glass handoff. Engine ScheduleFrame is still requested by EngineHost after
+  // lifecycle resume, but it is only a hint: Flutter can legitimately decide
+  // an unchanged layer tree needs no new raster. The supervisor has removed
+  // the old health receipt, so native resume itself must guarantee a fresh
+  // completed presentation.
+  const bool exact_surface_match =
+      exact_physical_baseline && resume_surface == retained_frame_;
+  if (exact_surface_match) {
+    // The imported handoff already contains this exact raw surface plus the
+    // correlated settled/debt planes for the glass now in front of us. A
+    // byte comparison is enough to transfer ownership back to this isolate;
+    // avoid a full 2.6M-pixel tile/dither traversal on the common same-app
+    // resume path.
+    retained_content_ready_ = true;
+    seeded_physical_baseline_valid_ = false;
+    last_damage_count_ = 0;
+  } else {
+    PlutoFramePacket replay{};
+    replay.pixels = resume_surface.data();
+    replay.row_bytes = resume_stride;
+    replay.width = resume_width;
+    replay.height = resume_height;
+    replay.format = resume_format;
+    replay.did_update = true;
+    const uint64_t replay_now_us = decision_now_us();
+    replay.presentation_time_ns =
+        replay_now_us > UINT64_MAX / 1000u ? UINT64_MAX : replay_now_us * 1000u;
+    if (!submit_frame_locked(replay)) {
+      valid_ = false;
+      return false;
+    }
+  }
+
+  // When the exact handoff already matches this app, reconciliation is a
+  // zero-diff frame. Queue the smallest real Fast presenter probe in that case
+  // rather than driving all 2.6M pixels merely to prove the new generation is
+  // alive. RegionScheduler/presenter alignment expands it where required, and
+  // health still waits for the backend's real completion boundary. Without an
+  // exact physical baseline, retain a full replay as the conservative cold
+  // path. If reconciliation already left user work queued/in flight, that work
+  // is the proof and no redundant request is added.
+  if (scheduler_ != nullptr && !scheduler_->user_work_pending() &&
+      !scheduler_->anything_inflight()) {
+    const bool exact_zero_diff =
+        exact_physical_baseline && last_damage_count_ == 0;
+    const PlutoRect proof = exact_zero_diff
+                                ? PlutoRect{0, 0, 1, 1}
+                                : PlutoRect{0, 0, static_cast<int32_t>(width_),
+                                            static_cast<int32_t>(height_)};
+    const PlutoRefreshClass quality = kPlutoRefreshFast;
+    const uint64_t now_us = decision_now_us();
+    scheduler_->submit_damage(&proof, &quality, 1, now_us);
+    tick_locked(now_us);
+    wake_.store(true, std::memory_order_release);
+    cv_.notify_one();
+  }
   return valid_;
 }
 
@@ -2385,8 +2473,7 @@ void FrameRenderer::open_frame_recorder() {
     std::fprintf(stderr, "pluto: PLUTO_RECORD_FRAMES: cannot open %s\n", path);
     return;
   }
-  if (!record_write_u32(record_file_, k_record_file_magic) ||
-      !record_write_u32(record_file_, k_record_version)) {
+  if (!record_write_u32(record_file_, frame_recording::kFileMagic)) {
     std::fprintf(stderr, "pluto: PLUTO_RECORD_FRAMES: write failed; "
                          "recording disabled\n");
     std::fclose(record_file_);
@@ -2400,29 +2487,61 @@ void FrameRenderer::record_frame(const PlutoFramePacket &packet) {
   }
   const size_t bpp = bytes_per_pixel(packet.format);
   const size_t row_bytes = static_cast<size_t>(packet.width) * bpp;
-  const uint32_t payload_bytes =
-      packet.did_update ? static_cast<uint32_t>(row_bytes * packet.height) : 0u;
-  bool ok =
-      record_write_u32(record_file_, k_record_frame_magic) &&
-      record_write_u64(record_file_, packet.presentation_time_ns) &&
-      record_write_u32(record_file_, packet.width) &&
-      record_write_u32(record_file_, packet.height) &&
-      record_write_u32(record_file_, static_cast<uint32_t>(packet.format)) &&
-      record_write_u32(record_file_, packet.did_update ? 1u : 0u) &&
-      record_write_u32(record_file_,
-                       static_cast<uint32_t>(packet.paint_bounds_count));
-  for (size_t i = 0; ok && i < packet.paint_bounds_count; ++i) {
-    ok = record_write(record_file_, &packet.paint_bounds[i], sizeof(PlutoRect));
+  if (packet.paint_bounds_count > std::numeric_limits<uint32_t>::max() ||
+      (packet.did_update && packet.height != 0 &&
+       row_bytes > std::numeric_limits<size_t>::max() / packet.height)) {
+    std::fprintf(stderr, "pluto: PLUTO_RECORD_FRAMES: frame is too large; "
+                         "recording disabled\n");
+    std::fclose(record_file_);
+    record_file_ = nullptr;
+    return;
   }
-  ok = ok && record_write_u32(record_file_, payload_bytes);
+  const size_t payload_size =
+      packet.did_update ? row_bytes * packet.height : 0u;
+  const size_t bounds_size = packet.paint_bounds_count * sizeof(PlutoRect);
+  if (payload_size > std::numeric_limits<uint32_t>::max() ||
+      bounds_size > frame_recording::kMaximumFrameBytes -
+                        frame_recording::kMinimumFrameBytes ||
+      payload_size > frame_recording::kMaximumFrameBytes -
+                         frame_recording::kMinimumFrameBytes - bounds_size) {
+    std::fprintf(stderr, "pluto: PLUTO_RECORD_FRAMES: frame is too large; "
+                         "recording disabled\n");
+    std::fclose(record_file_);
+    record_file_ = nullptr;
+    return;
+  }
+  const size_t frame_size =
+      frame_recording::kMinimumFrameBytes + bounds_size + payload_size;
+  const uint32_t payload_bytes = static_cast<uint32_t>(payload_size);
+  const uint32_t frame_bytes = static_cast<uint32_t>(frame_size);
+  uint32_t crc = frame_recording::kCrc32Initial;
+  bool ok =
+      record_write_u32_crc(record_file_, frame_recording::kFrameMagic, &crc) &&
+      record_write_u32_crc(record_file_, frame_bytes, &crc) &&
+      record_write_u64_crc(record_file_, packet.presentation_time_ns, &crc) &&
+      record_write_u32_crc(record_file_, packet.width, &crc) &&
+      record_write_u32_crc(record_file_, packet.height, &crc) &&
+      record_write_u32_crc(record_file_, static_cast<uint32_t>(packet.format),
+                           &crc) &&
+      record_write_u32_crc(record_file_, packet.did_update ? 1u : 0u, &crc) &&
+      record_write_u32_crc(record_file_,
+                           static_cast<uint32_t>(packet.paint_bounds_count),
+                           &crc) &&
+      record_write_u32_crc(record_file_, payload_bytes, &crc);
+  for (size_t i = 0; ok && i < packet.paint_bounds_count; ++i) {
+    ok = record_write_crc(record_file_, &packet.paint_bounds[i],
+                          sizeof(PlutoRect), &crc);
+  }
   if (ok && payload_bytes != 0) {
     const auto *pixels = static_cast<const uint8_t *>(packet.pixels);
     for (uint32_t y = 0; ok && y < packet.height; ++y) {
-      ok = record_write(record_file_,
-                        pixels + static_cast<size_t>(y) * packet.row_bytes,
-                        row_bytes);
+      ok = record_write_crc(record_file_,
+                            pixels + static_cast<size_t>(y) * packet.row_bytes,
+                            row_bytes, &crc);
     }
   }
+  const uint32_t checksum = frame_recording::crc32_finish(crc);
+  ok = ok && record_write_u32(record_file_, checksum);
   if (!ok) {
     std::fprintf(stderr, "pluto: PLUTO_RECORD_FRAMES: write failed; "
                          "recording disabled\n");
@@ -2450,6 +2569,193 @@ void FrameRenderer::notify_present_complete(uint64_t frame_id) {
   }
   wake_.store(true, std::memory_order_release);
   cv_.notify_one();
+  presentation_completion_cv_.notify_all();
+}
+
+void FrameRenderer::note_accepted_flutter_frame_locked() {
+  if (flutter_surface_generation_ != UINT64_MAX) {
+    ++flutter_surface_generation_;
+  }
+  flutter_surface_cv_.notify_all();
+  // A proof worker may be waiting for older user work to become quiescent.
+  presentation_completion_cv_.notify_all();
+}
+
+uint64_t FrameRenderer::flutter_surface_generation() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return flutter_surface_generation_;
+}
+
+bool FrameRenderer::wait_for_flutter_surface_after(
+    uint64_t baseline, std::chrono::milliseconds timeout,
+    uint64_t *surface_generation) {
+  if (surface_generation == nullptr ||
+      timeout <= std::chrono::milliseconds::zero()) {
+    return false;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(mutex_);
+  const auto completed = [this, baseline, surface_generation] {
+    *surface_generation = flutter_surface_generation_;
+    return flutter_surface_generation_ > baseline;
+  };
+  if (completed()) {
+    return true;
+  }
+  while (!stop_) {
+    if (flutter_surface_cv_.wait_until(lock, deadline) ==
+        std::cv_status::timeout) {
+      return completed();
+    }
+    if (completed()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool FrameRenderer::begin_retained_surface_full_proof(uint64_t *token) {
+  if (token == nullptr) {
+    return false;
+  }
+  *token = 0;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!valid_ || stop_ || scheduler_ == nullptr || !retained_content_ready_ ||
+      width_ == 0 || height_ == 0 || !presenter_supports_health_contract_ ||
+      presentation_suspended_ || pixel_reset_phase_ != PixelResetPhase::kIdle ||
+      pixel_reset_render_hold_ || health_file_failed_ ||
+      scheduler_->real_completion_overdue() ||
+      presenter_device_lost_notified_.load(std::memory_order_acquire) ||
+      exact_proof_active_) {
+    return false;
+  }
+
+  uint64_t next_token = 0;
+  while (next_token == 0) {
+    next_token = next_exact_proof_token_++;
+  }
+  exact_proof_active_ = true;
+  exact_proof_token_ = next_token;
+  exact_proof_dispatch_armed_ = false;
+  exact_proof_present_accepted_ = false;
+  exact_proof_failed_ = false;
+  exact_proof_completed_ = false;
+  exact_proof_frame_id_ = 0;
+  exact_proof_surface_generation_ = 0;
+  *token = next_token;
+  return true;
+}
+
+bool FrameRenderer::cancel_retained_surface_full_proof(uint64_t token) {
+  if (token == 0) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!exact_proof_active_ || exact_proof_token_ != token ||
+      exact_proof_dispatch_armed_ || exact_proof_frame_id_ != 0) {
+    return false;
+  }
+  exact_proof_active_ = false;
+  exact_proof_token_ = 0;
+  exact_proof_dispatch_armed_ = false;
+  exact_proof_present_accepted_ = false;
+  exact_proof_failed_ = false;
+  exact_proof_completed_ = false;
+  exact_proof_frame_id_ = 0;
+  exact_proof_surface_generation_ = 0;
+  presentation_completion_cv_.notify_all();
+  wake_.store(true, std::memory_order_release);
+  cv_.notify_one();
+  return true;
+}
+
+bool FrameRenderer::present_retained_surface_full(
+    uint64_t token, std::chrono::milliseconds timeout,
+    ExactPresentationReceipt *receipt) {
+  if (token == 0 || receipt == nullptr ||
+      timeout <= std::chrono::milliseconds::zero()) {
+    return false;
+  }
+  *receipt = {};
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (!exact_proof_active_ || exact_proof_token_ != token) {
+    return false;
+  }
+  const auto finish = [this] {
+    exact_proof_active_ = false;
+    exact_proof_token_ = 0;
+    exact_proof_dispatch_armed_ = false;
+    exact_proof_present_accepted_ = false;
+    exact_proof_failed_ = false;
+    exact_proof_completed_ = false;
+    exact_proof_frame_id_ = 0;
+    exact_proof_surface_generation_ = 0;
+    presentation_completion_cv_.notify_all();
+    wake_.store(true, std::memory_order_release);
+    cv_.notify_one();
+  };
+
+  while (!stop_ && std::chrono::steady_clock::now() < deadline) {
+    const uint64_t now_us = decision_now_us();
+    drain_completions_locked();
+    scheduler_->poll_completions(now_us);
+    if (!valid_ || health_file_failed_ ||
+        scheduler_->real_completion_overdue() || exact_proof_failed_ ||
+        presenter_device_lost_notified_.load(std::memory_order_acquire)) {
+      finish();
+      return false;
+    }
+    if (exact_proof_completed_) {
+      receipt->surface_generation = exact_proof_surface_generation_;
+      receipt->frame_id = exact_proof_frame_id_;
+      const bool valid_receipt = receipt->surface_generation != 0 &&
+                                 receipt->frame_id != 0 &&
+                                 exact_proof_present_accepted_;
+      finish();
+      return valid_receipt;
+    }
+
+    // Drain only work that already crossed the irreversible presenter
+    // boundary. Flutter may have queued several intermediate route-transition
+    // frames before canvas-ready semantics arrived. Those never-dispatched
+    // requests are superseded by the current retained surface, and presenting
+    // each one before the dedicated Full needlessly spends a complete e-ink
+    // waveform per transition. Once the presenter is idle, drop every queued
+    // request without forgiving its ledgers; the dedicated Full below replays
+    // the newest retained pixels and repays the whole panel.
+    if (!exact_proof_dispatch_armed_ && exact_proof_frame_id_ == 0 &&
+        !scheduler_->anything_inflight() && scheduler_->discard_pending() &&
+        scheduler_->idle()) {
+      const PlutoRect full{0, 0, static_cast<int32_t>(width_),
+                           static_cast<int32_t>(height_)};
+      const PlutoRefreshClass quality = kPlutoRefreshFull;
+      exact_proof_dispatch_armed_ = true;
+      scheduler_->submit_damage(&full, &quality, 1, now_us);
+      scheduler_->tick(now_us, /*maintenance_allowed=*/false,
+                       /*intrusive_maintenance_allowed=*/false);
+    }
+
+    const auto poll_deadline =
+        std::min(deadline, std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(4));
+    presentation_completion_cv_.wait_until(lock, poll_deadline);
+  }
+  finish();
+  return false;
+}
+
+bool FrameRenderer::present_retained_surface_full(
+    std::chrono::milliseconds timeout, ExactPresentationReceipt *receipt) {
+  uint64_t token = 0;
+  if (!begin_retained_surface_full_proof(&token)) {
+    return false;
+  }
+  if (present_retained_surface_full(token, timeout, receipt)) {
+    return true;
+  }
+  (void)cancel_retained_surface_full_proof(token);
+  return false;
 }
 
 size_t FrameRenderer::queued_present_completions_for_testing() const {
@@ -2564,7 +2870,7 @@ void FrameRenderer::publish_presenter_pen_focus_locked(
     const PlutoRect &logical_focus, bool contact, uint64_t sequence) {
   const PlutoPresenterOps *ops = config_.presenter_ops;
   PlutoPresenter *presenter = config_.presenter;
-  if (!presenter_has_pen_focus_hook(ops) || presenter == nullptr) {
+  if (!presenter_ops_are_current(ops) || presenter == nullptr) {
     presenter_pen_focus_active_ = false;
     return;
   }
@@ -2601,12 +2907,13 @@ bool FrameRenderer::clear_presenter_pen_focus_locked(bool force) {
   const PlutoPresenterOps *ops = config_.presenter_ops;
   PlutoPresenter *presenter = config_.presenter;
   if ((force || presenter_pen_focus_active_) &&
-      presenter_has_pen_focus_hook(ops) && presenter != nullptr) {
+      presenter_ops_are_current(ops) && presenter != nullptr) {
     const PlutoPenFocus clear{sizeof(PlutoPenFocus),
                               {},
                               kPlutoPenFocusNone,
                               presenter_pen_focus_sequence_};
-    if (ops->set_pen_focus(presenter, &clear) != kPlutoStatusOk) {
+    const PlutoStatus status = ops->set_pen_focus(presenter, &clear);
+    if (status != kPlutoStatusOk && status != kPlutoStatusUnsupported) {
       return false;
     }
   }
@@ -2616,17 +2923,20 @@ bool FrameRenderer::clear_presenter_pen_focus_locked(bool force) {
   return true;
 }
 
-bool FrameRenderer::poll_presenter_health_locked() {
+bool FrameRenderer::poll_presenter_health_locked(uint64_t now_us,
+                                                 bool *presenter_idle) {
+  if (presenter_idle != nullptr) {
+    *presenter_idle = false;
+  }
   if (presenter_device_lost_notified_.load(std::memory_order_acquire)) {
     return true;
   }
   const PlutoPresenterOps *ops = config_.presenter_ops;
   PlutoPresenter *presenter = config_.presenter;
-  if (presenter == nullptr || !presenter_has_wait_idle_hook(ops)) {
+  if (presenter == nullptr || !presenter_ops_are_current(ops)) {
     return false;
   }
   constexpr uint64_t kHealthPollIntervalUs = 250'000;
-  const uint64_t now_us = monotonic_us();
   if (next_presenter_health_poll_us_ != 0 &&
       now_us < next_presenter_health_poll_us_) {
     return false;
@@ -2634,7 +2944,11 @@ bool FrameRenderer::poll_presenter_health_locked() {
   next_presenter_health_poll_us_ = now_us > UINT64_MAX - kHealthPollIntervalUs
                                        ? UINT64_MAX
                                        : now_us + kHealthPollIntervalUs;
-  if (ops->wait_idle(presenter, 0) != kPlutoStatusDeviceLost) {
+  const PlutoStatus status = ops->wait_idle(presenter, 0);
+  if (status != kPlutoStatusDeviceLost) {
+    if (presenter_idle != nullptr && status == kPlutoStatusOk) {
+      *presenter_idle = true;
+    }
     return false;
   }
   notify_presenter_device_lost();
@@ -2643,14 +2957,40 @@ bool FrameRenderer::poll_presenter_health_locked() {
 
 void FrameRenderer::tick_locked(uint64_t now_us) {
   drain_completions_locked();
+  if (scheduler_ != nullptr) {
+    scheduler_->poll_completions(now_us);
+    if (health_file_ != nullptr && scheduler_->real_completion_overdue()) {
+      health_file_failed_ = true;
+      valid_ = false;
+      std::fprintf(stderr,
+                   "pluto: presenter completion exceeded health deadline\n");
+      if (config_.on_health_file_failure) {
+        config_.on_health_file_failure();
+      }
+      return;
+    }
+  }
   // Async scan/color faults can arise after present() returned Ok. A bounded
   // nonblocking health sample closes that otherwise silent failure edge even
   // when no later frame is queued. Four polls per second is negligible beside
   // the existing 25 Hz idle renderer tick.
-  if (poll_presenter_health_locked()) {
+  bool presenter_idle = false;
+  if (poll_presenter_health_locked(now_us, &presenter_idle)) {
+    return;
+  }
+  maybe_publish_health_locked(now_us, presenter_idle);
+  if (health_file_failed_) {
     return;
   }
   if (advance_pixel_reset_locked(now_us)) {
+    return;
+  }
+  if (exact_proof_active_) {
+    // The proof worker owns dispatch ordering until its dedicated Full frame
+    // completes. Work already accepted by the presenter progresses
+    // independently and is retired above; do not dispatch queued intermediate
+    // Flutter frames that the proof will replace from the retained surface.
+    presentation_completion_cv_.notify_all();
     return;
   }
   const bool automatic_policy_enabled =
@@ -2787,8 +3127,8 @@ bool FrameRenderer::advance_pixel_reset_locked(uint64_t now_us) {
   // retained-content stages too: otherwise a lost final callback would leave
   // ordinary presentation serialized forever even though the panel is idle.
   if (now_us >= pixel_reset_deadline_us_ && scheduler_->anything_inflight() &&
-      config_.presenter_ops != nullptr && config_.presenter != nullptr &&
-      config_.presenter_ops->wait_idle != nullptr &&
+      presenter_ops_are_current(config_.presenter_ops) &&
+      config_.presenter != nullptr &&
       config_.presenter_ops->wait_idle(config_.presenter, 0) ==
           kPlutoStatusOk) {
     (void)scheduler_->retire_pixel_reset_after_presenter_idle();
@@ -2955,9 +3295,20 @@ bool FrameRenderer::advance_pixel_reset_locked(uint64_t now_us) {
 
 void FrameRenderer::drain_completions_locked() {
   uint64_t frame_id = 0;
+  bool progressed = false;
   while (completion_queue_.pop(&frame_id)) {
-    if (scheduler_ != nullptr) {
-      scheduler_->notify_completion(frame_id);
+    if (scheduler_ != nullptr && scheduler_->notify_completion(frame_id)) {
+      // A callback is only health evidence when it names a present that this
+      // scheduler actually accepted. Stale/unknown callbacks cannot arm the
+      // supervisor record.
+      if (presenter_completion_count_ != UINT64_MAX) {
+        ++presenter_completion_count_;
+        progressed = true;
+      }
+      if (exact_proof_active_ && exact_proof_present_accepted_ &&
+          frame_id == exact_proof_frame_id_) {
+        exact_proof_completed_ = true;
+      }
     }
   }
   const size_t dropped =
@@ -2968,6 +3319,40 @@ void FrameRenderer::drain_completions_locked() {
                  "completions\n",
                  dropped);
   }
+  if (progressed) {
+    presentation_completion_cv_.notify_all();
+  }
+}
+
+void FrameRenderer::maybe_publish_health_locked(uint64_t now_us,
+                                                bool presenter_idle) {
+  // Leave one health-poll interval of scheduling margin below the supervisor
+  // contract's one-second observed cadence.
+  constexpr uint64_t kHealthPublishIntervalUs = 750'000;
+  const bool completion_progressed =
+      presenter_completion_count_ > health_published_completion_count_;
+  if (health_file_ == nullptr || health_file_failed_ ||
+      presenter_completion_count_ == 0 ||
+      (!presenter_idle && !completion_progressed) ||
+      (next_health_publish_us_ != 0 && now_us < next_health_publish_us_)) {
+    return;
+  }
+
+  int error_code = 0;
+  if (!health_file_->publish(now_us, &error_code)) {
+    health_file_failed_ = true;
+    valid_ = false;
+    std::fprintf(stderr, "pluto: health publish failed for %s: %s\n",
+                 config_.health_file_path.c_str(), std::strerror(error_code));
+    if (config_.on_health_file_failure) {
+      config_.on_health_file_failure();
+    }
+    return;
+  }
+  health_published_completion_count_ = presenter_completion_count_;
+  next_health_publish_us_ = now_us > UINT64_MAX - kHealthPublishIntervalUs
+                                ? UINT64_MAX
+                                : now_us + kHealthPublishIntervalUs;
 }
 
 void FrameRenderer::mark_ready_after_present_locked() {
@@ -3009,8 +3394,8 @@ void FrameRenderer::shutdown() {
     if (shutdown_complete_) {
       return;
     }
-    have_presenter =
-        config_.presenter_ops != nullptr && config_.presenter != nullptr;
+    have_presenter = presenter_ops_are_current(config_.presenter_ops) &&
+                     config_.presenter != nullptr;
   }
   if (have_presenter) {
     // Give the optical FSM its complete 15s recovery + 5s raster-release
@@ -3032,6 +3417,8 @@ void FrameRenderer::shutdown() {
     wake_.store(true, std::memory_order_release);
   }
   cv_.notify_all();
+  presentation_completion_cv_.notify_all();
+  flutter_surface_cv_.notify_all();
   if (thread_.joinable()) {
     thread_.join();
   }
@@ -3062,8 +3449,8 @@ bool FrameRenderer::presenter_ready(void *user_data, PlutoRefreshClass cls) {
        self->presenter_device_lost_notified_.load(std::memory_order_acquire))) {
     return false;
   }
-  if (self == nullptr || self->config_.presenter_ops == nullptr ||
-      self->config_.presenter_ops->ready == nullptr ||
+  if (self == nullptr ||
+      !presenter_ops_are_current(self->config_.presenter_ops) ||
       self->config_.presenter == nullptr) {
     return true;
   }
@@ -3085,10 +3472,31 @@ void FrameRenderer::notify_presenter_device_lost() {
 bool FrameRenderer::presenter_present(void *user_data,
                                       const PlutoPresentRequest *request) {
   auto *self = static_cast<FrameRenderer *>(user_data);
-  if (self == nullptr || self->config_.presenter_ops == nullptr ||
-      self->config_.presenter_ops->present == nullptr ||
+  if (self == nullptr ||
+      !presenter_ops_are_current(self->config_.presenter_ops) ||
       self->config_.presenter == nullptr) {
     return true;
+  }
+  if (self->exact_proof_dispatch_armed_) {
+    const bool exact_full =
+        request != nullptr && request->refresh_class == kPlutoRefreshFull &&
+        request->flags == kPlutoPresentFlagNone && request->damage_count == 1 &&
+        request->damage != nullptr && request->damage[0].x == 0 &&
+        request->damage[0].y == 0 &&
+        request->damage[0].width == static_cast<int32_t>(self->width_) &&
+        request->damage[0].height == static_cast<int32_t>(self->height_) &&
+        request->frame_id != 0;
+    self->exact_proof_dispatch_armed_ = false;
+    if (!exact_full) {
+      self->exact_proof_failed_ = true;
+      self->presentation_completion_cv_.notify_all();
+      return false;
+    }
+    // Capture before the presenter call. A synchronous completion can now be
+    // enqueued safely and will still name this exact provisional scheduler
+    // frame when it is reconciled after present() returns.
+    self->exact_proof_frame_id_ = request->frame_id;
+    self->exact_proof_surface_generation_ = self->flutter_surface_generation_;
   }
   // Final edge check at the irreversible presenter boundary. The planner
   // and scheduler already sample the same gate, but touch/pen publication is
@@ -3142,6 +3550,12 @@ bool FrameRenderer::presenter_present(void *user_data,
       self->notify_presenter_device_lost();
     }
     const bool ok = status == kPlutoStatusOk;
+    if (self->exact_proof_active_ && request != nullptr &&
+        request->frame_id == self->exact_proof_frame_id_) {
+      self->exact_proof_present_accepted_ = ok;
+      self->exact_proof_failed_ = !ok;
+      self->presentation_completion_cv_.notify_all();
+    }
     if (ok) {
       self->mark_ready_after_present_locked();
       note_auto_accepted();
@@ -3159,6 +3573,12 @@ bool FrameRenderer::presenter_present(void *user_data,
     self->notify_presenter_device_lost();
   }
   const bool ok = status == kPlutoStatusOk;
+  if (self->exact_proof_active_ && request != nullptr &&
+      request->frame_id == self->exact_proof_frame_id_) {
+    self->exact_proof_present_accepted_ = ok;
+    self->exact_proof_failed_ = !ok;
+    self->presentation_completion_cv_.notify_all();
+  }
   if (ok) {
     self->mark_ready_after_present_locked();
     note_auto_accepted();

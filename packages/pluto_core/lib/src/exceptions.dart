@@ -31,24 +31,6 @@ final class PlutoPermissionException extends PlutoException {
   const PlutoPermissionException(super.message, {super.cause});
 }
 
-/// The embedder and Dart package protocol versions are incompatible.
-final class PlutoProtocolException extends PlutoException {
-  /// Creates a protocol-version mismatch failure.
-  PlutoProtocolException({
-    required this.clientProtocol,
-    required this.embedderProtocol,
-  }) : super(
-         'Pluto protocol mismatch: package speaks $clientProtocol, '
-         'embedder speaks $embedderProtocol. Re-run `pluto provision`.',
-       );
-
-  /// Protocol version spoken by the Dart package.
-  final int clientProtocol;
-
-  /// Protocol version spoken by the embedder.
-  final int embedderProtocol;
-}
-
 /// A platform-side I/O or state error.
 final class PlutoPlatformException extends PlutoException {
   /// Creates a platform failure with a stable machine-readable [code].

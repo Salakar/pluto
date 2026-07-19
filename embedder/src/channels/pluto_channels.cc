@@ -64,7 +64,6 @@ void register_pluto_channels(ChannelRegistry* registry) {
       });
   // Replaced with the live PenService when EngineHost wires input.
   registry->register_standard_method_channel("pluto/pen", control_stub);
-  registry->register_standard_method_channel("pluto/launcher", control_stub);
   // pluto/core, pluto/device, pluto/paths, pluto/session,
   // pluto/settings, and pluto/apps.
   register_service_channels(registry, service_paths_from_env());

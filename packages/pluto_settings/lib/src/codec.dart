@@ -6,13 +6,32 @@ Map<String, Object?> stringMap(Object? value, String path) {
     final Map<String, Object?> result = <String, Object?>{};
     for (final MapEntry<Object?, Object?> entry in value.entries) {
       final Object? key = entry.key;
-      if (key is String) {
-        result[key] = entry.value;
+      if (key is! String) {
+        throw FormatException('Expected every $path key to be a string.');
       }
+      result[key] = entry.value;
     }
     return result;
   }
   throw FormatException('Expected $path to be a map.');
+}
+
+/// Requires exactly [required] plus any present keys from [optional].
+void requireExactKeys(
+  Map<String, Object?> map,
+  String path, {
+  required Set<String> required,
+  Set<String> optional = const <String>{},
+}) {
+  final Set<String> actual = map.keys.toSet();
+  final Set<String> allowed = <String>{...required, ...optional};
+  if (!actual.containsAll(required) || !allowed.containsAll(actual)) {
+    throw FormatException(
+      'Expected exact $path keys; required '
+      '${required.toList()..sort()}, optional ${optional.toList()..sort()}, '
+      'got ${actual.toList()..sort()}.',
+    );
+  }
 }
 
 /// Converts a protocol value into an object list.

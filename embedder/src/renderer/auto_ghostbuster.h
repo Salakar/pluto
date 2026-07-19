@@ -68,7 +68,6 @@ struct AutoGhostbusterPlaneState {
 };
 
 struct AutoGhostbusterState {
-  uint32_t version = 1;
   TileGrid grid{};
   AutoGhostbusterConfig config{};
   uint64_t display_pixels = 0;
@@ -107,7 +106,6 @@ struct AutoGhostbusterState {
 // repayment operation itself, not fresh app damage.
 class AutoGhostbuster final {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   static constexpr uint16_t kFastAccrualQ8 = 3 * 256;
   static constexpr uint16_t kUiAccrualQ8 = 2 * 256;
 

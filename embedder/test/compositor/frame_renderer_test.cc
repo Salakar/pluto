@@ -22,8 +22,10 @@
 #include <thread>
 #include <vector>
 
+#include "compositor/frame_recording.h"
 #include "compositor/software_compositor.h"
 #include "input/ink_thread.h"
+#include "presenter_ops_test_support.h"
 #include "renderer/bluenoise_64.h"
 #include "renderer/quantize.h"
 #include "renderer/rect_utils.h"
@@ -73,6 +75,9 @@ struct MonoCapture {
   bool completion_on_wait_sent = false;
   bool complete_latest_frame_on_wait = false;
   uint64_t latest_frame_completed_on_wait = 0;
+  FrameRenderer *synchronous_completion_target = nullptr;
+  bool complete_present_synchronously = false;
+  uint64_t synchronous_wrong_frame_id = 0;
   bool block_next_wait_idle = false;
   bool wait_idle_entered = false;
   bool release_wait_idle = false;
@@ -115,6 +120,9 @@ void reset_mono_capture() {
   g_mono_capture.completion_on_wait_sent = false;
   g_mono_capture.complete_latest_frame_on_wait = false;
   g_mono_capture.latest_frame_completed_on_wait = 0;
+  g_mono_capture.synchronous_completion_target = nullptr;
+  g_mono_capture.complete_present_synchronously = false;
+  g_mono_capture.synchronous_wrong_frame_id = 0;
   g_mono_capture.block_next_wait_idle = false;
   g_mono_capture.wait_idle_entered = false;
   g_mono_capture.release_wait_idle = false;
@@ -145,9 +153,8 @@ void reset_mono_capture() {
 
 const PlutoPresenterOps *mono_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "mono-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("mono-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
       PlutoDisplayInfo info{};
@@ -168,21 +175,37 @@ const PlutoPresenterOps *mono_capture_ops() {
       return kPlutoStatusOk;
     };
     o.present = [](PlutoPresenter *, const PlutoPresentRequest *request) {
-      std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-      ++g_mono_capture.presents;
-      g_mono_capture.last_flags = request->flags;
-      g_mono_capture.last_class = request->refresh_class;
-      g_mono_capture.last_rect = request->damage[0];
-      const auto *px =
-          reinterpret_cast<const uint16_t *>(request->surface.pixels);
-      const size_t row_pixels = request->surface.stride_bytes / sizeof(*px);
-      g_mono_capture.last_pixels.assign(
-          px, px + row_pixels * static_cast<size_t>(request->surface.height));
-      g_mono_capture.flags_history.push_back(request->flags);
-      g_mono_capture.class_history.push_back(request->refresh_class);
-      g_mono_capture.frame_id_history.push_back(request->frame_id);
-      g_mono_capture.pixel_history.push_back(g_mono_capture.last_pixels);
-      return g_mono_capture.present_status;
+      FrameRenderer *completion_target = nullptr;
+      bool complete_exact = false;
+      uint64_t wrong_frame_id = 0;
+      PlutoStatus status = kPlutoStatusInternal;
+      {
+        std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+        ++g_mono_capture.presents;
+        g_mono_capture.last_flags = request->flags;
+        g_mono_capture.last_class = request->refresh_class;
+        g_mono_capture.last_rect = request->damage[0];
+        const auto *px =
+            reinterpret_cast<const uint16_t *>(request->surface.pixels);
+        const size_t row_pixels = request->surface.stride_bytes / sizeof(*px);
+        g_mono_capture.last_pixels.assign(
+            px, px + row_pixels * static_cast<size_t>(request->surface.height));
+        g_mono_capture.flags_history.push_back(request->flags);
+        g_mono_capture.class_history.push_back(request->refresh_class);
+        g_mono_capture.frame_id_history.push_back(request->frame_id);
+        g_mono_capture.pixel_history.push_back(g_mono_capture.last_pixels);
+        completion_target = g_mono_capture.synchronous_completion_target;
+        complete_exact = g_mono_capture.complete_present_synchronously;
+        wrong_frame_id = g_mono_capture.synchronous_wrong_frame_id;
+        status = g_mono_capture.present_status;
+      }
+      if (completion_target != nullptr && wrong_frame_id != 0) {
+        completion_target->notify_present_complete(wrong_frame_id);
+      }
+      if (completion_target != nullptr && complete_exact) {
+        completion_target->notify_present_complete(request->frame_id);
+      }
+      return status;
     };
     o.ready = [](PlutoPresenter *, PlutoRefreshClass) {
       std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
@@ -289,16 +312,6 @@ const PlutoPresenterOps *mono_capture_ops() {
   return &ops;
 }
 
-const PlutoPresenterOps *mono_capture_ops_without_wait_idle() {
-  static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps copy = *mono_capture_ops();
-    copy.name = "mono-capture-no-wait-idle";
-    copy.wait_idle = nullptr;
-    return copy;
-  }();
-  return &ops;
-}
-
 FrameRendererConfig mono_capture_config() {
   FrameRendererConfig config{};
   config.width = 64;
@@ -363,6 +376,32 @@ std::string read_file(const std::filesystem::path &path) {
                      std::istreambuf_iterator<char>());
 }
 
+struct ParsedHealthRecord {
+  long pid = 0;
+  uint64_t sequence = 0;
+  uint64_t monotonic_ms = 0;
+};
+
+bool parse_health_record(const std::string &record, ParsedHealthRecord *out) {
+  if (out == nullptr) {
+    return false;
+  }
+  unsigned long long sequence = 0;
+  unsigned long long monotonic_ms = 0;
+  int consumed = 0;
+  const int fields =
+      std::sscanf(record.c_str(), "pid=%ld seq=%llu mono_ms=%llu%n", &out->pid,
+                  &sequence, &monotonic_ms, &consumed);
+  if (fields != 3 || consumed < 0 ||
+      static_cast<size_t>(consumed) + 1 != record.size() ||
+      record[static_cast<size_t>(consumed)] != '\n') {
+    return false;
+  }
+  out->sequence = static_cast<uint64_t>(sequence);
+  out->monotonic_ms = static_cast<uint64_t>(monotonic_ms);
+  return true;
+}
+
 // The diff runs after quantization: a sub-quantum RGB change (different
 // bytes, identical luma) quantizes to identical levels and produces ZERO
 // scheduler activity -- no damage, no diffed frame, no present.
@@ -415,6 +454,396 @@ TEST(FrameRendererTest, DetachRejectsFramesAndAttachRebuildsPresenterState) {
       mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
   EXPECT_TRUE(renderer.valid());
   EXPECT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 3)));
+}
+
+TEST(FrameRendererTest,
+     PrearmedExactFullCollapsesRouteFramesAndRejectsUnrelatedCompletions) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::uint64_t pre_action_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 1u);
+    pre_action_frame_id = g_mono_capture.frame_id_history.front();
+  }
+
+  std::uint64_t proof_token = 0;
+  ASSERT_TRUE(renderer.begin_retained_surface_full_proof(&proof_token));
+  ASSERT_NE(proof_token, 0u);
+  std::uint64_t competing_token = UINT64_MAX;
+  EXPECT_FALSE(renderer.begin_retained_surface_full_proof(&competing_token));
+  EXPECT_EQ(competing_token, 0u);
+  EXPECT_FALSE(renderer.cancel_retained_surface_full_proof(proof_token + 1));
+
+  // Model the complete gallery -> chooser -> canvas transaction before the
+  // proof worker starts. Every frame remains valid Flutter retained truth, but
+  // the prearmed gate must keep both route-transition requests away from the
+  // physical presenter.
+  pixels[0] = 0;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2)));
+  pixels[1] = 0;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 3)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u);
+  }
+
+  FrameRenderer::ExactPresentationReceipt unrelated_receipt{UINT64_MAX,
+                                                            UINT64_MAX};
+  EXPECT_FALSE(renderer.present_retained_surface_full(
+      proof_token + 1, std::chrono::milliseconds(5), &unrelated_receipt));
+  EXPECT_EQ(unrelated_receipt.surface_generation, 0u);
+  EXPECT_EQ(unrelated_receipt.frame_id, 0u);
+
+  bool completed = true;
+  FrameRenderer::ExactPresentationReceipt receipt{UINT64_MAX, UINT64_MAX};
+  std::atomic<bool> waiter_started{false};
+  std::atomic<bool> waiter_done{false};
+  std::thread control_worker([&] {
+    waiter_started.store(true, std::memory_order_release);
+    completed = renderer.present_retained_surface_full(
+        proof_token, std::chrono::milliseconds(500), &receipt);
+    waiter_done.store(true, std::memory_order_release);
+  });
+  while (!waiter_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  // Future ids arriving out of order, an unrelated maintenance/Sparkle-like
+  // id, and stale duplicates are not proof. The real older presents must
+  // retire before the dedicated Full dispatch.
+  renderer.notify_present_complete(pre_action_frame_id + 1);
+  renderer.notify_present_complete(pre_action_frame_id + 2);
+  renderer.notify_present_complete(999999);
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  EXPECT_FALSE(waiter_done.load(std::memory_order_acquire));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u);
+  }
+  renderer.notify_present_complete(pre_action_frame_id);
+  ASSERT_TRUE(wait_for_present_count(2));
+  std::uint64_t proof_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 2u);
+    proof_frame_id = g_mono_capture.frame_id_history.back();
+    EXPECT_EQ(g_mono_capture.class_history.back(), kPlutoRefreshFull);
+    EXPECT_EQ(g_mono_capture.flags_history.back(),
+              kPlutoPresentFlagPreDithered);
+    ASSERT_TRUE(!g_mono_capture.pixel_history.back().empty());
+    EXPECT_EQ(g_mono_capture.pixel_history.back()[0], 0u);
+    EXPECT_EQ(g_mono_capture.pixel_history.back()[1], 0u);
+    EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 64, 64}));
+  }
+  ASSERT_EQ(proof_frame_id, pre_action_frame_id + 1);
+  renderer.notify_present_complete(pre_action_frame_id);
+  renderer.notify_present_complete(proof_frame_id + 50);
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  EXPECT_FALSE(waiter_done.load(std::memory_order_acquire));
+  renderer.notify_present_complete(proof_frame_id);
+  control_worker.join();
+
+  EXPECT_TRUE(completed);
+  EXPECT_EQ(receipt.surface_generation, 3u);
+  EXPECT_EQ(receipt.frame_id, proof_frame_id);
+}
+
+TEST(FrameRendererTest,
+     CancellingPrearmedExactFullReleasesQueuedWorkAndInvalidatesToken) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::uint64_t initial_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(initial_frame_id);
+  const auto initial_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  while (std::chrono::steady_clock::now() < initial_deadline &&
+         renderer.queued_present_completions_for_testing() != 0) {
+    std::this_thread::yield();
+  }
+
+  std::uint64_t proof_token = 0;
+  ASSERT_TRUE(renderer.begin_retained_surface_full_proof(&proof_token));
+  pixels[0] = 0;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u);
+  }
+
+  EXPECT_FALSE(renderer.cancel_retained_surface_full_proof(proof_token + 1));
+  EXPECT_TRUE(renderer.cancel_retained_surface_full_proof(proof_token));
+  EXPECT_FALSE(renderer.cancel_retained_surface_full_proof(proof_token));
+  ASSERT_TRUE(wait_for_present_count(2));
+
+  std::uint64_t released_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    released_frame_id = g_mono_capture.frame_id_history.back();
+    ASSERT_TRUE(!g_mono_capture.pixel_history.back().empty());
+    EXPECT_EQ(g_mono_capture.pixel_history.back()[0], 0u);
+  }
+  renderer.notify_present_complete(released_frame_id);
+
+  std::uint64_t next_token = 0;
+  ASSERT_TRUE(renderer.begin_retained_surface_full_proof(&next_token));
+  EXPECT_NE(next_token, 0u);
+  EXPECT_NE(next_token, proof_token);
+  EXPECT_TRUE(renderer.cancel_retained_surface_full_proof(next_token));
+}
+
+TEST(FrameRendererTest, ExactFullReceiptHandlesSynchronousExactCompletion) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  uint64_t initial_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(initial_frame_id);
+  // Reconcile the initial completion before enabling synchronous callbacks.
+  const auto initial_deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+  while (std::chrono::steady_clock::now() < initial_deadline) {
+    if (renderer.queued_present_completions_for_testing() == 0) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.synchronous_completion_target = &renderer;
+    g_mono_capture.synchronous_wrong_frame_id = 777777;
+    g_mono_capture.complete_present_synchronously = true;
+  }
+
+  FrameRenderer::ExactPresentationReceipt receipt;
+  ASSERT_TRUE(renderer.present_retained_surface_full(
+      std::chrono::milliseconds(250), &receipt));
+  EXPECT_EQ(receipt.surface_generation, 1u);
+  EXPECT_NE(receipt.frame_id, 0u);
+}
+
+TEST(FrameRendererTest, ExactFullReceiptTimesOutWithoutItsExactCompletion) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  uint64_t initial_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(initial_frame_id);
+
+  FrameRenderer::ExactPresentationReceipt receipt{UINT64_MAX, UINT64_MAX};
+  EXPECT_FALSE(renderer.present_retained_surface_full(
+      std::chrono::milliseconds(35), &receipt));
+  EXPECT_EQ(receipt.surface_generation, 0u);
+  EXPECT_EQ(receipt.frame_id, 0u);
+}
+
+TEST(FrameRendererTest, FlutterSurfaceFenceRequiresStrictlyNewFrame) {
+  reset_mono_capture();
+  FrameRenderer renderer(mono_capture_config());
+  ASSERT_TRUE(renderer.valid());
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  const uint64_t baseline = renderer.flutter_surface_generation();
+  ASSERT_EQ(baseline, 1u);
+  uint64_t generation = 0;
+  EXPECT_FALSE(renderer.wait_for_flutter_surface_after(
+      baseline, std::chrono::milliseconds(2), &generation));
+  EXPECT_EQ(generation, baseline);
+  renderer.notify_idle_frame();
+  EXPECT_TRUE(renderer.wait_for_flutter_surface_after(
+      baseline, std::chrono::milliseconds(20), &generation));
+  EXPECT_EQ(generation, baseline + 1);
+}
+
+TEST(FrameRendererTest,
+     ReattachReplaysRetainedSurfaceAndRecreatesHealthWithoutFlutterFrame) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+    g_mono_capture.handoff_enabled = true;
+  }
+  TempReadyMarker health("health-warm-resume");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0x0000);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  ASSERT_TRUE(wait_for_present_count(1));
+
+  uint64_t initial_frame_id = 0;
+  uint16_t initial_presented_pixel = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 1u);
+    initial_frame_id = g_mono_capture.frame_id_history.back();
+    ASSERT_TRUE(!g_mono_capture.pixel_history.back().empty());
+    initial_presented_pixel = g_mono_capture.pixel_history.back()[0];
+  }
+  renderer.notify_present_complete(initial_frame_id);
+
+  ParsedHealthRecord initial_health{};
+  const auto initial_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < initial_deadline) {
+    if (std::filesystem::exists(health.marker()) &&
+        parse_health_record(read_file(health.marker()), &initial_health)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(initial_health.pid, static_cast<long>(::getpid()));
+  ASSERT_EQ(initial_health.sequence, 1u);
+
+  ASSERT_TRUE(renderer.detach_presenter());
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(g_mono_capture.handoff_available);
+  }
+
+  // This is the supervisor's real warm-resume boundary: stale proof from the
+  // stopped presenter generation is removed before SIGCONT/SIGUSR2.
+  ASSERT_TRUE(std::filesystem::remove(health.marker()));
+  ASSERT_TRUE(!std::filesystem::exists(health.marker()));
+
+  // No Flutter packet is submitted after attach. Reattach itself must replay
+  // the retained app surface, including the zero-diff/same-glass case.
+  ASSERT_TRUE(renderer.attach_presenter(
+      mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
+  ASSERT_TRUE(wait_for_present_count(2));
+  EXPECT_EQ(renderer.submitted_frames(), 1u)
+      << "an exact same-surface handoff should skip full tile traversal";
+
+  uint64_t resumed_frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_EQ(g_mono_capture.frame_id_history.size(), 2u);
+    resumed_frame_id = g_mono_capture.frame_id_history.back();
+    EXPECT_EQ(g_mono_capture.class_history.back(), kPlutoRefreshFast);
+    EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 1, 1}));
+    ASSERT_TRUE(!g_mono_capture.last_pixels.empty());
+    EXPECT_EQ(g_mono_capture.last_pixels[0], initial_presented_pixel);
+  }
+  renderer.notify_present_complete(resumed_frame_id);
+
+  ParsedHealthRecord resumed_health{};
+  const auto resumed_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < resumed_deadline) {
+    if (std::filesystem::exists(health.marker()) &&
+        parse_health_record(read_file(health.marker()), &resumed_health)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(resumed_health.pid, static_cast<long>(::getpid()));
+  EXPECT_GT(resumed_health.sequence, initial_health.sequence);
+  EXPECT_GE(resumed_health.monotonic_ms, initial_health.monotonic_ms);
+}
+
+TEST(FrameRendererTest,
+     WarmReattachReconcilesDifferentForegroundSurfaceBeforeHealthProof) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.handoff_enabled = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.enable_auto_ghostbuster = false;
+  FrameRenderer resumed(config);
+  ASSERT_TRUE(resumed.valid());
+
+  const std::vector<uint16_t> resumed_pixels(64 * 64, 0x0000);
+  ASSERT_TRUE(resumed.submit_frame(packet_for(resumed_pixels, 64, 64, 1000)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  ASSERT_TRUE(resumed.detach_presenter());
+
+  // A different foreground owns the panel while the first isolate sleeps.
+  const std::vector<uint16_t> foreground_pixels(64 * 64, 0xffff);
+  {
+    FrameRenderer foreground(config);
+    ASSERT_TRUE(foreground.valid());
+    ASSERT_TRUE(
+        foreground.submit_frame(packet_for(foreground_pixels, 64, 64, 2000)));
+    ASSERT_TRUE(wait_for_present_count(2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    ASSERT_TRUE(foreground.detach_presenter());
+  }
+
+  size_t before_resume = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    before_resume = g_mono_capture.presents;
+  }
+  ASSERT_TRUE(resumed.attach_presenter(
+      mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
+  ASSERT_TRUE(wait_for_present_count(before_resume + 1));
+  EXPECT_EQ(resumed.submitted_frames(), 2u)
+      << "different glass must take the complete normal reconciliation path";
+  EXPECT_GT(resumed.last_damage_count(), 0u);
+  std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+  EXPECT_TRUE(g_mono_capture.last_pixels == resumed_pixels)
+      << "the sleeping app's retained pixels, not the outgoing handoff, must "
+         "be presented";
 }
 
 TEST(FrameRendererTest, RotationAndDetachDrainCompletionBeforeFrameIdReuse) {
@@ -668,16 +1097,11 @@ TEST(FrameRendererTest,
     EXPECT_TRUE(g_mono_capture.handoff_last_confirmed);
   }
 
-  // Resume schedules Flutter asynchronously. Until that frame is accepted,
-  // the ledger may describe the other warm app currently on glass; reset is
-  // deliberately unavailable. The first updated packet opens the gate even
-  // when its quantized content matches this app's retained state exactly.
-  EXPECT_FALSE(renderer.request_pixel_reset());
-  PlutoRect partial_bound{0, 0, 1, 1};
-  PlutoFramePacket resume = packet_for(pixels, 64, 64, 2);
-  resume.paint_bounds = &partial_bound;
-  resume.paint_bounds_count = 1;
-  ASSERT_TRUE(renderer.submit_frame(resume));
+  // Resume must not depend on Flutter deciding that an unchanged layer tree
+  // needs another raster. Reattach has already reconciled this app's complete
+  // retained surface against the imported physical baseline and queued a real
+  // presentation, so the reset source is app-owned before any new packet.
+  ASSERT_TRUE(wait_for_present_count(2));
   size_t before_reset = 0;
   {
     std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
@@ -1067,62 +1491,40 @@ TEST(FrameRendererTest, ActiveResetDetachBackpressureHonorsAbsoluteDeadline) {
   EXPECT_TRUE(renderer.detach_presenter(5000));
 }
 
-TEST(FrameRendererTest,
-     ActiveResetDetachWithoutWaitIdleCannotRetireAnUnfinishedRail) {
+TEST(FrameRendererTest, RejectsNonCurrentPresenterOperationTables) {
   reset_mono_capture();
-  {
-    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    g_mono_capture.reports_completion = true;
-  }
   FrameRendererConfig config = mono_capture_config();
-  config.presenter_ops = mono_capture_ops_without_wait_idle();
+
+  PlutoPresenterOps short_table = *mono_capture_ops();
+  short_table.struct_size = sizeof(short_table) - 1u;
+  config.presenter_ops = &short_table;
+  FrameRenderer short_renderer(config);
+  EXPECT_FALSE(short_renderer.valid());
+
+  PlutoPresenterOps oversized_table = *mono_capture_ops();
+  oversized_table.struct_size = sizeof(oversized_table) + 1u;
+  config.presenter_ops = &oversized_table;
+  FrameRenderer oversized_renderer(config);
+  EXPECT_FALSE(oversized_renderer.valid());
+
+  PlutoPresenterOps missing_hook = *mono_capture_ops();
+  missing_hook.wait_idle = nullptr;
+  config.presenter_ops = &missing_hook;
+  FrameRenderer missing_hook_renderer(config);
+  EXPECT_FALSE(missing_hook_renderer.valid());
+}
+
+TEST(FrameRendererTest, UnsupportedMandatoryPenFocusHookDoesNotBlockDetach) {
+  reset_mono_capture();
+  PlutoPresenterOps ops = *mono_capture_ops();
+  ops.set_pen_focus = [](PlutoPresenter *, const PlutoPenFocus *) {
+    return kPlutoStatusUnsupported;
+  };
+  FrameRendererConfig config = mono_capture_config();
+  config.presenter_ops = &ops;
+  config.presenter_pen_focus_from_host = true;
   FrameRenderer renderer(config);
   ASSERT_TRUE(renderer.valid());
-
-  std::vector<uint16_t> pixels(64 * 64, 0xffff);
-  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
-  const auto complete_latest = [&] {
-    uint64_t frame_id = 0;
-    {
-      std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-      ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
-      frame_id = g_mono_capture.frame_id_history.back();
-    }
-    renderer.notify_present_complete(frame_id);
-  };
-  const auto complete_and_change = [&](size_t pixel, uint64_t time_ns) {
-    complete_latest();
-    pixels[pixel] = 0x0000;
-    ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, time_ns)));
-  };
-
-  complete_latest();
-  ASSERT_TRUE(renderer.request_ghost_control(GhostControlMode::kBleachNow));
-  {
-    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    ASSERT_EQ(g_mono_capture.flags_history.size(), 2u);
-    EXPECT_NE(g_mono_capture.flags_history.back() &
-                  kPlutoPresentFlagPixelResetBlack,
-              0u);
-  }
-
-  const auto started = std::chrono::steady_clock::now();
-  EXPECT_FALSE(renderer.detach_presenter(25));
-  const auto elapsed = std::chrono::steady_clock::now() - started;
-  EXPECT_TRUE(elapsed < std::chrono::seconds(1));
-  EXPECT_TRUE(renderer.valid());
-  {
-    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
-    EXPECT_EQ(g_mono_capture.flags_history.size(), 2u)
-        << "sleeping without wait_idle is not optical completion proof";
-  }
-
-  // Complete the interrupted black/white/restore sequence explicitly so the
-  // fixture tears down without relying on the missing wait_idle operation.
-  complete_and_change(0, 2);
-  complete_and_change(1, 3);
-  complete_and_change(2, 4);
-  complete_latest();
   EXPECT_TRUE(renderer.detach_presenter());
 }
 
@@ -1323,6 +1725,53 @@ TEST(FrameRendererTest, DeferredSystemUiNeverPresentsTheStaleFrame) {
     EXPECT_GT(g_mono_capture.presents, 0u);
     EXPECT_EQ(g_mono_capture.last_class, kPlutoRefreshFull);
   }
+}
+
+TEST(FrameRendererTest,
+     WarmReattachKeepsNativeReplayHiddenUntilSystemUiReveal) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.handoff_enabled = true;
+  }
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0x7bef);
+  pixels[0] = 0x0000;
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1)));
+  ASSERT_TRUE(wait_for_present_count(1));
+  std::vector<uint16_t> expected_presented;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    expected_presented = g_mono_capture.pixel_history.back();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  ASSERT_TRUE(renderer.detach_presenter());
+
+  // EngineHost arms this gate after reopening the presenter but before attach
+  // when the warm launcher is about to route the switcher/status/power UI.
+  renderer.set_presentation_suspended(true);
+  ASSERT_TRUE(renderer.attach_presenter(
+      mono_capture_ops(), reinterpret_cast<PlutoPresenter *>(&g_mono_capture)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    EXPECT_EQ(g_mono_capture.presents, 1u)
+        << "the retained Home replay must not flash before routing";
+  }
+
+  // The watchdog/routed reveal discards all hidden replay work and emits one
+  // authoritative Full frame from the current retained surface.
+  ASSERT_TRUE(renderer.force_presentation_resume());
+  ASSERT_TRUE(wait_for_present_count(2));
+  std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+  EXPECT_EQ(g_mono_capture.presents, 2u);
+  EXPECT_EQ(g_mono_capture.last_class, kPlutoRefreshFull);
+  EXPECT_TRUE(rect_equals(g_mono_capture.last_rect, PlutoRect{0, 0, 64, 64}));
+  EXPECT_TRUE(g_mono_capture.last_pixels == expected_presented);
 }
 
 TEST(FrameRendererTest, DeferredSystemUiWatchdogCanForceCurrentFullFrame) {
@@ -1724,6 +2173,206 @@ TEST(FrameRendererTest, FirstSuccessfulPresentPublishesReadyMarkerOnce) {
   EXPECT_EQ(read_file(ready.marker()), "owned-by-observer\n");
 }
 
+TEST(FrameRendererTest,
+     HealthStartsAfterRealCompletionAndAdvancesWhileUiIsStatic) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  TempReadyMarker health("health-cadence");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  uint64_t frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
+    frame_id = g_mono_capture.frame_id_history.back();
+  }
+
+  // Presenter acceptance alone is not enough to arm liveness.
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  EXPECT_FALSE(std::filesystem::exists(health.marker()));
+  renderer.notify_present_complete(frame_id);
+
+  ParsedHealthRecord first{};
+  const auto first_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < first_deadline) {
+    if (std::filesystem::exists(health.marker()) &&
+        parse_health_record(read_file(health.marker()), &first)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(first.pid, static_cast<long>(::getpid()));
+  ASSERT_EQ(first.sequence, 1u);
+
+  // No more Flutter frames or presenter completions are supplied. The same
+  // renderer/presenter-loop health tick must still advance the record.
+  ParsedHealthRecord later{};
+  const auto cadence_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < cadence_deadline) {
+    if (parse_health_record(read_file(health.marker()), &later) &&
+        later.sequence > first.sequence) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_GT(later.sequence, first.sequence);
+  EXPECT_GE(later.monotonic_ms, first.monotonic_ms);
+}
+
+TEST(FrameRendererTest,
+     HealthDoesNotAdvanceOnPermanentBusyWithoutCompletionProgress) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+    g_mono_capture.wait_idle_status = kPlutoStatusTimeout;
+  }
+  TempReadyMarker health("health-busy");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  uint64_t frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
+    frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(frame_id);
+
+  ParsedHealthRecord first{};
+  const auto first_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < first_deadline) {
+    if (parse_health_record(read_file(health.marker()), &first)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(first.sequence, 1u);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1250));
+  ParsedHealthRecord stalled{};
+  ASSERT_TRUE(parse_health_record(read_file(health.marker()), &stalled));
+  EXPECT_EQ(stalled.sequence, first.sequence);
+
+  // Leave the fake presenter internally consistent for renderer teardown.
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.wait_idle_status = kPlutoStatusOk;
+  }
+}
+
+TEST(FrameRendererTest, MissingRealCompletionTriggersFatalHealthDeadline) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  TempReadyMarker health("health-overdue");
+  std::atomic<size_t> fatal_callbacks{0};
+  std::atomic<uint64_t> now_us{1'000'000};
+  const pluto::RegionSchedulerConfig scheduler_defaults{};
+  ASSERT_EQ(scheduler_defaults.fence_timeout_ms, 5500u);
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+  config.on_health_file_failure = [&fatal_callbacks] {
+    fatal_callbacks.fetch_add(1, std::memory_order_release);
+  };
+  config.monotonic_now_for_testing = [](void *context) {
+    return static_cast<std::atomic<uint64_t> *>(context)->load(
+        std::memory_order_acquire);
+  };
+  config.monotonic_now_context_for_testing = &now_us;
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  now_us.fetch_add(
+      static_cast<uint64_t>(scheduler_defaults.fence_timeout_ms) * 1000u + 1u,
+      std::memory_order_release);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (fatal_callbacks.load(std::memory_order_acquire) == 0u &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(fatal_callbacks.load(std::memory_order_acquire), 1u);
+  EXPECT_FALSE(renderer.valid());
+  EXPECT_FALSE(std::filesystem::exists(health.marker()));
+}
+
+TEST(FrameRendererTest, HealthPublicationFailureRequestsFatalShutdownOnce) {
+  reset_mono_capture();
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    g_mono_capture.reports_completion = true;
+  }
+  TempReadyMarker health("health-failure");
+  const auto missing_path =
+      health.marker().parent_path() / "missing" / "health";
+  std::atomic<size_t> fatal_callbacks{0};
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = missing_path.string();
+  config.on_health_file_failure = [&fatal_callbacks] {
+    fatal_callbacks.fetch_add(1, std::memory_order_release);
+  };
+  FrameRenderer renderer(config);
+  ASSERT_TRUE(renderer.valid());
+
+  std::vector<uint16_t> pixels(64 * 64, 0xffff);
+  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
+  uint64_t frame_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_mono_capture.mutex);
+    ASSERT_TRUE(!g_mono_capture.frame_id_history.empty());
+    frame_id = g_mono_capture.frame_id_history.back();
+  }
+  renderer.notify_present_complete(frame_id);
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (fatal_callbacks.load(std::memory_order_acquire) == 0u &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(fatal_callbacks.load(std::memory_order_acquire), 1u);
+  EXPECT_FALSE(renderer.valid());
+  EXPECT_FALSE(std::filesystem::exists(missing_path));
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  EXPECT_EQ(fatal_callbacks.load(std::memory_order_acquire), 1u);
+}
+
+TEST(FrameRendererTest, HealthRequiresCompletionCapablePresenterLoop) {
+  reset_mono_capture();
+  TempReadyMarker health("health-capabilities");
+  FrameRendererConfig config = mono_capture_config();
+  config.start_presenter_thread = true;
+  config.health_file_path = health.marker().string();
+
+  FrameRenderer renderer(config);
+  EXPECT_FALSE(renderer.valid());
+  EXPECT_FALSE(std::filesystem::exists(health.marker()));
+}
+
 TEST(FrameRendererTest, EmptyReadyPathLeavesPresentBehaviorUnchanged) {
   reset_mono_capture();
   FrameRendererConfig config = mono_capture_config();
@@ -1792,7 +2441,7 @@ TEST(FrameRendererTest, PreDitheredSetAndGray16OnMonoPanel) {
 // Color-panel contracts: sub-Full content reaches the glass
 // chroma-free with PreDithered set; the chroma-pending tiles settle as a
 // Full-class update whose delegated raw RGB keeps PreDithered UNSET
-// (backend_quantizes_color -- the qtfb path must receive raw RGB).
+// (backend_quantizes_color -- the presenter must receive raw RGB).
 struct ColorCapture {
   std::mutex mutex;
   struct Record {
@@ -1808,9 +2457,8 @@ ColorCapture g_color_capture;
 
 const PlutoPresenterOps *color_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "color-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("color-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);
@@ -1819,7 +2467,7 @@ const PlutoPresenterOps *color_capture_ops() {
       info.dpi = 264;
       info.preferred_format = kPlutoPixelFormatRgb565;
       info.is_color = true;
-      info.backend_quantizes_color = true; // qtfb shape
+      info.backend_quantizes_color = true;
       info.supports_overlap_supersession = true;
       info.rect_alignment = 8;
       for (int i = 0; i < 4; ++i) {
@@ -1958,9 +2606,8 @@ InkCapture g_ink_capture;
 
 const PlutoPresenterOps *ink_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "ink-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("ink-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);
@@ -2017,9 +2664,8 @@ InkCapture g_exact_focus_capture;
 
 const PlutoPresenterOps *exact_focus_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "exact-focus-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("exact-focus-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);
@@ -2134,29 +2780,6 @@ TEST(FrameRendererTest,
     EXPECT_EQ(g_mono_capture.pen_focus_history.back().flags, kPlutoPenFocusNone)
         << "rotation=" << test.rotation;
   }
-}
-
-TEST(FrameRendererTest, LegacyPresenterOpsNeverReadsOptionalPenFocusTail) {
-  reset_mono_capture();
-  static std::atomic<int> legacy_tail_calls{0};
-  legacy_tail_calls.store(0, std::memory_order_release);
-  PlutoPresenterOps legacy = *mono_capture_ops();
-  legacy.struct_size = offsetof(PlutoPresenterOps, set_pen_focus);
-  legacy.set_pen_focus = [](PlutoPresenter *, const PlutoPenFocus *) {
-    legacy_tail_calls.fetch_add(1, std::memory_order_relaxed);
-    return kPlutoStatusOk;
-  };
-  FrameRendererConfig config = mono_capture_config();
-  config.presenter_ops = &legacy;
-  FrameRenderer renderer(config);
-  ASSERT_TRUE(renderer.valid());
-  renderer.note_pen_render_hint(pen_hint_at(20, 20, false, 1));
-  std::vector<uint16_t> pixels(64u * 64u, 0xffffu);
-  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 1000)));
-  renderer.note_pen_render_hint(terminal_pen_hint_at(20, 20, 2));
-  pixels.back() = 0u;
-  ASSERT_TRUE(renderer.submit_frame(packet_for(pixels, 64, 64, 2000)));
-  EXPECT_EQ(legacy_tail_calls.load(std::memory_order_acquire), 0);
 }
 
 TEST(FrameRendererTest,
@@ -3174,11 +3797,26 @@ TEST(FrameRendererTest, FrameRecorderCapturesSubmittedPackets) {
     in.read(reinterpret_cast<char *>(&value), sizeof(value));
     return value;
   };
-  EXPECT_EQ(read_u32(), 0x52464c50u); // "PLFR"
-  EXPECT_EQ(read_u32(), 1u);          // version
+  const auto verify_checksum = [&in](std::streampos frame_start,
+                                     uint32_t frame_bytes, uint32_t checksum) {
+    const std::streampos end = in.tellg();
+    in.seekg(frame_start);
+    std::vector<uint8_t> bytes(frame_bytes - sizeof(checksum));
+    in.read(reinterpret_cast<char *>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    ASSERT_TRUE(in.good());
+    EXPECT_EQ(pluto::frame_recording::crc32(bytes.data(), bytes.size()),
+              checksum);
+    in.seekg(end);
+  };
+  EXPECT_EQ(read_u32(), pluto::frame_recording::kFileMagic);
 
   // Frame 1: did_update with full payload.
-  EXPECT_EQ(read_u32(), 0x304d5246u); // "FRM0"
+  const std::streampos first_start = in.tellg();
+  EXPECT_EQ(read_u32(), pluto::frame_recording::kFrameMagic);
+  const uint32_t first_bytes = read_u32();
+  EXPECT_EQ(first_bytes,
+            pluto::frame_recording::kMinimumFrameBytes + 8u * 8u * 2u);
   EXPECT_EQ(read_u64(), 1000u);
   EXPECT_EQ(read_u32(), 8u);
   EXPECT_EQ(read_u32(), 8u);
@@ -3192,9 +3830,14 @@ TEST(FrameRendererTest, FrameRecorderCapturesSubmittedPackets) {
   for (const uint16_t px : payload) {
     ASSERT_EQ(px, 0x1234u);
   }
+  const uint32_t first_checksum = read_u32();
+  verify_checksum(first_start, first_bytes, first_checksum);
 
   // Frame 2: idle, header only.
-  EXPECT_EQ(read_u32(), 0x304d5246u);
+  const std::streampos second_start = in.tellg();
+  EXPECT_EQ(read_u32(), pluto::frame_recording::kFrameMagic);
+  const uint32_t second_bytes = read_u32();
+  EXPECT_EQ(second_bytes, pluto::frame_recording::kMinimumFrameBytes);
   EXPECT_EQ(read_u64(), 2000u);
   EXPECT_EQ(read_u32(), 8u);
   EXPECT_EQ(read_u32(), 8u);
@@ -3202,6 +3845,8 @@ TEST(FrameRendererTest, FrameRecorderCapturesSubmittedPackets) {
   EXPECT_EQ(read_u32(), 0u); // did_update
   EXPECT_EQ(read_u32(), 0u); // paint_bounds_count
   EXPECT_EQ(read_u32(), 0u); // payload_bytes
+  const uint32_t second_checksum = read_u32();
+  verify_checksum(second_start, second_bytes, second_checksum);
   ASSERT_TRUE(in.good());
   in.get();
   EXPECT_TRUE(in.eof());
@@ -3229,9 +3874,8 @@ ScrollCap g_scroll_capture;
 
 const PlutoPresenterOps *scroll_capture_ops() {
   static PlutoPresenterOps ops = [] {
-    PlutoPresenterOps o{};
-    o.struct_size = sizeof(o);
-    o.name = "scroll-capture";
+    PlutoPresenterOps o =
+        pluto::test::current_test_presenter_ops("scroll-capture");
     o.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
       PlutoDisplayInfo info{};
       info.struct_size = sizeof(info);

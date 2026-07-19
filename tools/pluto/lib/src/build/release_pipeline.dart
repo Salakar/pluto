@@ -101,11 +101,12 @@ final class BuildOutput {
   final PlutoBuildMode mode;
 }
 
-/// Stable metadata written beside `manifest.json` in every Pluto layout.
+/// Exact current metadata written beside `manifest.json` in every Pluto layout.
 ///
 /// An AOT ELF alone cannot distinguish profile from release. Keeping the mode
 /// in the layout lets later package and provision commands reject accidental
-/// relabelling instead of guessing.
+/// relabelling instead of guessing. This unpublished contract is replaced in
+/// place: it has no schema, format, compatibility, or version discriminator.
 final class BuildLayoutMetadata {
   /// Creates build-layout metadata.
   const BuildLayoutMetadata({
@@ -116,11 +117,16 @@ final class BuildLayoutMetadata {
     this.target = 'linux-arm64',
   });
 
-  /// Metadata schema version.
-  static const int schema = 1;
-
   /// File name at the root of an installable build layout.
   static const String fileName = 'build-metadata.json';
+
+  static const Set<String> _exactFields = <String>{
+    'buildMode',
+    'engineFlavor',
+    'flutterVersion',
+    'engineCommit',
+    'target',
+  };
 
   /// Build mode used to create the layout.
   final PlutoBuildMode buildMode;
@@ -163,17 +169,34 @@ final class BuildLayoutMetadata {
             'bundle --debug`, or `pluto build package`.',
       );
     }
+    return BuildLayoutMetadata.decodeBytes(file.readAsBytesSync());
+  }
+
+  /// Decodes and validates the one current metadata object from [bytes].
+  factory BuildLayoutMetadata.decodeBytes(
+    List<int> bytes, {
+    String description = fileName,
+  }) {
     final Object? decoded;
     try {
-      decoded = jsonDecode(file.readAsStringSync());
+      decoded = jsonDecode(utf8.decode(bytes));
     } on FormatException catch (error) {
       throw ArtifactVerificationException(
-        message: '$fileName is not valid JSON: ${error.message}',
+        message: '$description is not valid UTF-8 JSON: ${error.message}',
       );
     }
-    if (decoded is! Map<String, Object?> || decoded['schema'] != schema) {
+    if (decoded is! Map<String, Object?>) {
       throw ArtifactVerificationException(
-        message: '$fileName must be a schema-$schema JSON object.',
+        message: '$description must be a JSON object.',
+      );
+    }
+    if (decoded.keys.toSet().difference(_exactFields).isNotEmpty ||
+        _exactFields.difference(decoded.keys.toSet()).isNotEmpty) {
+      throw ArtifactVerificationException(
+        message:
+            '$description fields must be exactly '
+            '${_exactFields.toList()..sort()}; format discriminators and '
+            'unknown fields are not supported.',
       );
     }
     final Object? rawMode = decoded['buildMode'];
@@ -186,35 +209,45 @@ final class BuildLayoutMetadata {
     final Object? target = decoded['target'];
     if (mode == null ||
         engineFlavor is! String ||
+        engineFlavor.isEmpty ||
         flutterVersion is! String ||
+        flutterVersion.isEmpty ||
         engineCommit is! String ||
-        target is! String) {
+        !RegExp(r'^[0-9a-f]{40}$').hasMatch(engineCommit) ||
+        target is! String ||
+        PlutoTargetPlatform.fromCliName(target) == null) {
       throw ArtifactVerificationException(
-        message: '$fileName is missing required build identity fields.',
+        message:
+            '$description has invalid build identity field types or values.',
       );
     }
-    return BuildLayoutMetadata(
+    final BuildLayoutMetadata metadata = BuildLayoutMetadata(
       buildMode: mode,
       engineFlavor: engineFlavor,
       flutterVersion: flutterVersion,
       engineCommit: engineCommit,
       target: target,
     );
+    metadata._validateIdentity(description);
+    return metadata;
   }
 
-  /// Writes this metadata to [layoutDirectory].
-  void write(String layoutDirectory) {
+  /// Encodes this identity as the one canonical metadata JSON document.
+  String encode() {
+    _validateIdentity(fileName);
     final Map<String, Object?> document = <String, Object?>{
-      'schema': schema,
       'buildMode': buildMode.cliName,
       'engineFlavor': engineFlavor,
       'flutterVersion': flutterVersion,
       'engineCommit': engineCommit,
       'target': target,
     };
-    File('$layoutDirectory/$fileName').writeAsStringSync(
-      '${const JsonEncoder.withIndent('  ').convert(document)}\n',
-    );
+    return '${const JsonEncoder.withIndent('  ').convert(document)}\n';
+  }
+
+  /// Writes this metadata to [layoutDirectory].
+  void write(String layoutDirectory) {
+    File('$layoutDirectory/$fileName').writeAsStringSync(encode());
   }
 
   /// Verifies mode, pin, manifest runtime, and payload shape as one unit.
@@ -224,33 +257,13 @@ final class BuildLayoutMetadata {
     PlutoBuildMode? expectedMode,
     PlutoTargetPlatform? expectedTargetPlatform,
   }) {
-    final PlutoTargetPlatform? targetPlatform = PlutoTargetPlatform.fromCliName(
-      target,
-    );
-    if (targetPlatform == null) {
-      throw ArtifactVerificationException(
-        message: 'Build target $target is not supported.',
-      );
-    }
+    final PlutoTargetPlatform targetPlatform = _validateIdentity(fileName);
     if (expectedTargetPlatform != null &&
         targetPlatform != expectedTargetPlatform) {
       throw ArtifactVerificationException(
         message:
             'Build layout target is $target, not '
             '${expectedTargetPlatform.cliName}.',
-      );
-    }
-    if (targetPlatform == PlutoTargetPlatform.linuxArm &&
-        buildMode != PlutoBuildMode.release) {
-      throw ArtifactVerificationException(
-        message: 'linux-arm currently supports release AOT layouts only.',
-      );
-    }
-    if (engineFlavor != buildMode.engineFlavor) {
-      throw ArtifactVerificationException(
-        message:
-            'Build mode ${buildMode.cliName} cannot use engine flavor '
-            '$engineFlavor.',
       );
     }
     if (expectedMode != null && buildMode != expectedMode) {
@@ -275,39 +288,38 @@ final class BuildLayoutMetadata {
 
     final File manifestFile = File('$layoutDirectory/manifest.json');
     _requireLayoutFile(manifestFile, 'manifest.json');
-    final Object? manifest;
-    try {
-      manifest = jsonDecode(manifestFile.readAsStringSync());
-    } on FormatException catch (error) {
+    final Result<AppManifest, ManifestError> manifestResult =
+        AppManifest.decode(manifestFile.readAsStringSync());
+    final AppManifest? manifest = manifestResult.valueOrNull;
+    if (manifest == null) {
       throw ArtifactVerificationException(
-        message: 'Layout manifest.json is not valid JSON: ${error.message}',
+        message:
+            'Layout manifest.json is not canonical: '
+            '${manifestResult.errorOrNull!.message}',
+        remediation: 'Rebuild the layout from the current pluto.yaml format.',
       );
     }
-    final Map<String, Object?>? manifestObject =
-        manifest is Map<String, Object?> ? manifest : null;
-    if (manifestObject != null) {
-      _requireDeclaredManifestAsset(
-        layoutDirectory,
-        manifestObject,
-        field: 'icon',
+    if (manifest.engine.flutterVersion != flutterVersion ||
+        manifest.engine.engineCommit != engineCommit) {
+      throw const ArtifactVerificationException(
+        message: 'Layout manifest engine identity does not match metadata.',
       );
+    }
+    _requireDeclaredManifestAsset(
+      layoutDirectory,
+      manifest.icon,
+      field: 'icon',
+    );
+    final String? iconMono = manifest.iconMono;
+    if (iconMono != null) {
       _requireDeclaredManifestAsset(
         layoutDirectory,
-        manifestObject,
+        iconMono,
         field: 'iconMono',
-        optional: true,
       );
     }
-    final Object? runtime = manifestObject?['runtime'];
-    final Object? runtimeType = runtime is Map<String, Object?>
-        ? runtime['type']
-        : null;
-    final AppRuntimeKind? runtimeKind = runtimeType is String
-        ? AppRuntimeKind.fromWireName(runtimeType)
-        : null;
-    final bool hasAot =
-        File('$layoutDirectory/bundle/lib/app.so').existsSync() ||
-        File('$layoutDirectory/bundle/app.so').existsSync();
+    final AppRuntimeKind runtimeKind = manifest.runtime.kind;
+    final bool hasAot = File('$layoutDirectory/bundle/lib/app.so').existsSync();
     final bool hasKernel = File(
       '$layoutDirectory/bundle/flutter_assets/kernel_blob.bin',
     ).existsSync();
@@ -324,11 +336,11 @@ final class BuildLayoutMetadata {
               'app.so, and contain no kernel_blob.bin.',
         );
       }
-      final String appSo =
-          File('$layoutDirectory/bundle/lib/app.so').existsSync()
-          ? '$layoutDirectory/bundle/lib/app.so'
-          : '$layoutDirectory/bundle/app.so';
-      verifyAotElfForMode(appSo, buildMode, targetPlatform: targetPlatform);
+      verifyAotElfForMode(
+        '$layoutDirectory/bundle/lib/app.so',
+        buildMode,
+        targetPlatform: targetPlatform,
+      );
     } else if (runtimeKind != AppRuntimeKind.flutterKernel ||
         !hasKernel ||
         hasAot) {
@@ -338,6 +350,28 @@ final class BuildLayoutMetadata {
             'and contain no app.so.',
       );
     }
+  }
+
+  PlutoTargetPlatform _validateIdentity(String description) {
+    final PlutoTargetPlatform? targetPlatform = PlutoTargetPlatform.fromCliName(
+      target,
+    );
+    if (engineFlavor != buildMode.engineFlavor ||
+        engineFlavor.isEmpty ||
+        flutterVersion.isEmpty ||
+        !RegExp(r'^[0-9a-f]{40}$').hasMatch(engineCommit) ||
+        targetPlatform == null) {
+      throw ArtifactVerificationException(
+        message: '$description has invalid or contradictory build identity.',
+      );
+    }
+    if (targetPlatform == PlutoTargetPlatform.linuxArm &&
+        buildMode != PlutoBuildMode.release) {
+      throw const ArtifactVerificationException(
+        message: 'linux-arm build metadata is release-only.',
+      );
+    }
+    return targetPlatform;
   }
 
   static void _requireLayoutFile(File file, String description) {
@@ -350,19 +384,10 @@ final class BuildLayoutMetadata {
 
   static void _requireDeclaredManifestAsset(
     String layoutDirectory,
-    Map<String, Object?> manifest, {
+    String rawPath, {
     required String field,
-    bool optional = false,
   }) {
-    final Object? rawPath = manifest.containsKey(field)
-        ? manifest[field]
-        : optional
-        ? null
-        : 'icon.png';
-    if (optional && rawPath == null) {
-      return;
-    }
-    if (rawPath is! String || !_isSafeRelativeLayoutPath(rawPath)) {
+    if (!_isSafeRelativeLayoutPath(rawPath)) {
       throw ArtifactVerificationException(
         message: 'Layout manifest $field must be a safe relative path.',
         remediation: 'Rebuild the layout from a valid pluto.yaml.',
@@ -457,6 +482,7 @@ final class LiveFlutterToolsBuildAdapter implements FlutterBuildAdapter {
       output: output,
       mode: request.mode,
       pins: pins,
+      targetPlatform: request.targetPlatform,
     );
 
     await _buildAssets(
@@ -868,6 +894,7 @@ final class LiveFlutterToolsBuildAdapter implements FlutterBuildAdapter {
     required String output,
     required PlutoBuildMode mode,
     required PlutoPins pins,
+    required PlutoTargetPlatform targetPlatform,
   }) {
     final File authored = File('$project/pluto.yaml');
     _requireFile(authored.path, 'pluto.yaml');
@@ -883,7 +910,6 @@ final class LiveFlutterToolsBuildAdapter implements FlutterBuildAdapter {
           engine: EngineRequirement(
             flutterVersion: pins.flutterVersion,
             engineCommit: pins.engineVersion,
-            plutoAbi: 1,
           ),
         );
     final AppManifest? manifest = decoded.valueOrNull;
@@ -891,6 +917,17 @@ final class LiveFlutterToolsBuildAdapter implements FlutterBuildAdapter {
       throw ArtifactVerificationException(
         message: 'pluto.yaml is invalid: ${decoded.errorOrNull!.message}',
         remediation: 'Fix the authored app manifest and rebuild.',
+      );
+    }
+    final AppTargetPlatform manifestTarget = AppTargetPlatform.fromWireName(
+      targetPlatform.cliName,
+    )!;
+    if (!manifest.targets.contains(manifestTarget)) {
+      throw ArtifactVerificationException(
+        message: '${manifest.name} does not support ${targetPlatform.cliName}.',
+        remediation:
+            'Build it for one of the declared targets: '
+            '${manifest.targets.map((AppTargetPlatform target) => target.wireName).join(', ')}.',
       );
     }
     File('$output/manifest.json').writeAsStringSync('${manifest.encode()}\n');

@@ -1,0 +1,6 @@
+schema=1
+name=remarkable-armv7-sdk-4.4.128-v2
+sha256=1924faf93726a28c12095f2f9e4b614801024801cd1523ff9654e27f0d711d0d
+gcc_version=11.5.0
+gcc_machine=arm-remarkable-linux-gnueabi
+regular_files=34793

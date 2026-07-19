@@ -31,7 +31,7 @@ flags for hot reload and can never become the boot default.
 
 | Path | What lives there |
 | --- | --- |
-| `embedder/` | Native embedder, renderer, compositor, presenters (`swtcon`, `qtfb`, host preview), CMake presets, C++ tests + benches |
+| `embedder/` | Native embedder, renderer, compositor, profile-selected panel drivers, host preview, CMake presets, C++ tests + benches |
 | `tools/pluto/` | The `pluto` CLI (standalone Dart package, resolves outside the workspace) |
 | `tools/setup/` | `setup.sh` bootstrap; `camera/` panel-capture helper |
 | `tools/build/` | Host and ARM device builds; target payload assemblers |
@@ -135,17 +135,17 @@ install, run, logs, screenshot, restore, and uninstall dispatch internally.
   more than four (re)starts in ten minutes trips `OnFailure` and can reboot the
   device. Run `systemctl reset-failed xochitl.service` before any restart, keep
   ≥3 minutes between stop/start cycles, and batch experiments.
-- Provisioning is **transactional and reversible**. The direct backend has a
-  fallback path and dead-man recovery; the QTFB backend uses a guarded,
-  checksummed integration activation with rollback.
+- Provisioning is **transactional and reversible**. Every supported device
+  uses the native boot-first runtime with a profile-selected panel driver,
+  bounded recovery, and a verified stock fallback.
 - Never leave the tablet UI-less. Recover through the common commands:
   `pluto provision --restore-remarkable` (keep runtime, stock boots) or
-  `pluto provision --uninstall` (full removal). The on-device layout, boot-first
-  and QTFB mechanisms, standby/suspend, and recovery are documented in
+  `pluto provision --uninstall` (full removal). The on-device layout,
+  boot-first mechanism, standby/suspend, and recovery are documented in
   `tools/device/README.md`.
 - Never bypass the CLI's device-target check or manually install a different
-  target's payload. Users must not install XOVI/AppLoad service overrides by
-  hand; the managed integration owns validation, activation, and rollback.
+  target's payload. The native runtime owns the display service; provisioning
+  refuses mixed-target content and validates boot recovery before activation.
 
 ## Running tests
 
@@ -199,7 +199,7 @@ cmake --preset host-release
 cmake --build --preset host-release
 ./build/host-release/pluto_renderer_bench      # tile pass, dither, scheduler
 ./build/host-release/pluto_presenter_bench     # NEON vs scalar sweep/deposit kernels
-./build/host-release/ct33_frontend_bench       # colour front-end
+./build/host-release/ct33_frontend_bench CT33_BIN  # colour front-end
 ```
 
 Budgets are in `embedder/bench/renderer/budgets.yaml` (device p99 targets). The
@@ -256,30 +256,26 @@ system-library ceiling match the target. Outputs live in the ignored
 
 ### Assemble release payloads
 
-Release maintainers prepare each native target, but users never choose the
-backend during provisioning. The direct payload assembler currently produces
-`build/pluto-payload`; the managed QTFB assembler produces
-`build/pluto-appload-arm/home/root/pluto-arm`. Both must contain the same
-release application identities and pass their target gates.
+Release maintainers use one public assembler. It privately builds both native
+targets, requires one clean source revision, and freezes the common pins plus
+every slice file hash under `build/pluto-release/release-manifest.json`.
 
 ```bash
-melos run build:embedder:device
-melos run build:device-payload -- --standard          # launcher + examples + validation_lab + codex
-bash tools/build/embedder-device-arm.sh
-bash tools/build/assemble-appload-arm-payload.sh
+melos run build:device-release
 ```
 
-The ARMv7 assembler packages a pinned, target-native Codex CLI. It rejects
-fake acceptance modes, a missing or tampered binary, the wrong version, and an
-ABI mismatch. Authentication is user-owned and never embedded in the payload.
+Application manifests declare their supported targets. The shared standard app
+set ships in both slices. Paper Codex is `linux-arm64` only because upstream
+Codex has no native ARMv7 release; the ARMv7 assembler omits it and rejects
+explicit selection. Pluto does not maintain a custom ARMv7 Codex port.
 
-Payload assembly gates every app as product AOT and verifies the matching
-engine against committed checksums. A bare bundle, mixed targets, or debug
-content in a normal release payload is rejected.
+Release assembly gates every app as product AOT and verifies the matching
+engine against committed checksums. A bare bundle, mixed target, missing slice,
+debug content, dirty source tree, or post-manifest file change is rejected.
 
 ### Provision the platform
 
-After both default payloads are prepared, the public command is identical for
+After the universal release is prepared, the public command is identical for
 every supported tablet:
 
 ```bash
@@ -289,10 +285,17 @@ pluto provision --device "$DEVICE"
 pluto provision --device "$DEVICE" --status
 ```
 
-`pluto provision` chooses the matching preassembled payload after probing the
-device. An explicit `--payload-dir` is target-checked and cannot override
-hardware identity. `--no-boot-default`, `--restore-remarkable`, and
-`--uninstall` also dispatch through the selected safe implementation.
+`pluto provision` verifies the universal manifest and chooses its matching
+slice after probing the device. Each slice contains all deployable payload
+files; checkout pin files and committed engine checksum metadata remain the
+local trust anchors. An explicit
+`--payload-dir` names a release-set root; it cannot override hardware identity
+or supply checkout fallbacks. The profile's `bootDefaultEnabled` recovery gate
+is enforced automatically. When that gate is closed, normal provisioning starts
+the common Pluto supervisor for the current boot only and leaves stock as the
+next-boot default; apps can still be launched immediately through the same CLI.
+`--no-boot-default`, `--restore-remarkable`, and `--uninstall` also dispatch
+through the selected safe implementation.
 
 ### Install and run a single app (release AOT)
 
@@ -318,12 +321,14 @@ pluto logs --device "$DEVICE"
 pluto screenshot --device "$DEVICE" -o shot.png
 ```
 
-Run Home, Ink, and real Codex through the CLI; require fresh presentation
+Run Home, the switcher, Counter, Motion Lab, Ink Lab, Validation Lab, and Ink
+through the CLI; require a deterministic Ink stroke, fresh presentation
 evidence, exact release/AOT process identity, camera-visible panel behavior,
 responsive layout at the presenter-reported viewport, and responsiveness
-measurements. The existing
+measurements. Paper Codex may additionally be checked on `linux-arm64`; it is
+not an RM1/RM2 acceptance requirement. The existing
 `tools/device/test/release-aot-hardware-smoke.sh` is additional coverage for
-the direct backend, not the whole compatibility gate.
+the native supervisor, not the whole all-device compatibility gate.
 
 ## Local development flow with hot reload
 
@@ -399,7 +404,9 @@ Run `pluto help <command>` for full flags.
   comments and typed signatures.
 - Release-only invariant: nothing outside explicit `--debug` flows may put a
   JIT kernel, debug engine, or VM service on the device.
-- C ABI changes must bump `PLUTO_ABI_VERSION`.
+- Pluto-owned presenter structs and operation tables are an unpublished,
+  single-release contract: update both sides together and require exact
+  current layouts.
 - Keep device payloads under their managed `/home/root/` roots; always go
   through `pluto provision` and the backend's transactional safety paths.
 - Keep mutable build output out of the repo; the pin-keyed `third_party/engine/`

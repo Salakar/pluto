@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:paper_ink/src/document/document_io.dart';
@@ -27,6 +29,43 @@ void main() {
     expect(find.text('import'), findsOneWidget);
     expect(find.text('harbor study'), findsOneWidget);
     expect(find.text('new artwork'), findsOneWidget);
+  });
+
+  testWidgets('acceptance controls expose exact tappable semantics', (
+    WidgetTester tester,
+  ) async {
+    final SemanticsHandle semantics = tester.ensureSemantics();
+    try {
+      final _WidgetGalleryOperations operations = _WidgetGalleryOperations(
+        entries: <GalleryEntry>[_entry('a')],
+      );
+      await _pumpGallery(tester, operations: operations);
+
+      expect(find.bySemanticsLabel('new artwork'), findsOneWidget);
+      final newArtwork = tester.getSemantics(find.text('new artwork'));
+      expect(newArtwork.label, 'new artwork');
+      expect(
+        newArtwork.getSemanticsData().hasAction(ui.SemanticsAction.tap),
+        isTrue,
+      );
+
+      tester.semantics.tap(find.semantics.byLabel('new artwork'));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.bySemanticsLabel('create'), findsOneWidget);
+      final create = tester.getSemantics(
+        find.widgetWithText(PaperButton, 'create'),
+      );
+      expect(create.label, 'create');
+      expect(
+        create.getSemanticsData().hasAction(ui.SemanticsAction.tap),
+        isTrue,
+      );
+      tester.semantics.tap(find.semantics.byLabel('create'));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(operations.createdSize?.preset, GalleryCanvasPreset.screen2x);
+    } finally {
+      semantics.dispose();
+    }
   });
 
   testWidgets('tapping an artwork invokes the editor route hook', (

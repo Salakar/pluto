@@ -200,6 +200,9 @@ class CameraToolTest(unittest.TestCase):
             [self.screen_refinement(number) for number in numbers],
         )
         completed = [self.with_boundary_fit(device) for device in completed]
+        profiles = {2: "rm1", 7: "rm2"}
+        for device in completed:
+            device["profile_id"] = profiles.get(int(device["number"]), "move")
         return detected, calibration, completed
 
     def valid_config(self):
@@ -326,6 +329,13 @@ class CameraToolTest(unittest.TestCase):
             framerate=30,
             settle=0.0,
             camera=None,
+            device_profile=[
+                (
+                    int(device["number"]),
+                    {2: "rm1", 7: "rm2"}.get(int(device["number"]), "move"),
+                )
+                for device in detection_devices
+            ],
             include_virtual=False,
             model="test-vision",
             camera_timeout=2.0,
@@ -881,18 +891,30 @@ Built in:
             "second": {"x": 90.0, "y": 20.0},
             "normal_sign": -1.0,
         }
+        multiscale_arguments = {
+            key: value for key, value in arguments.items() if key != "edge_name"
+        }
         with mock.patch.object(
             camera, "boundary_candidate_score", side_effect=score_for(3)
         ):
+            inward_multiscale = camera.fit_multiscale_physical_boundary_edge(
+                **multiscale_arguments
+            )
             inward = camera.fit_physical_boundary_edge(**arguments)
         with mock.patch.object(
             camera, "boundary_candidate_score", side_effect=score_for(-3)
         ):
+            outward_multiscale = camera.fit_multiscale_physical_boundary_edge(
+                **multiscale_arguments
+            )
             outward = camera.fit_physical_boundary_edge(**arguments)
 
+        self.assertIsNone(inward_multiscale)
         self.assertFalse(inward["accepted"])
         self.assertEqual(inward["first"], arguments["first"])
         self.assertEqual(inward["second"], arguments["second"])
+        self.assertIsNotNone(outward_multiscale)
+        self.assertTrue(outward_multiscale["multiscale_persistent"])
         self.assertTrue(outward["accepted"])
         self.assertLess(outward["first"]["y"], arguments["first"]["y"])
         self.assertLess(outward["second"]["y"], arguments["second"]["y"])
@@ -942,6 +964,12 @@ Built in:
                 )
                 self.assertEqual(metadata["accepted_edge_count"], 4)
                 self.assertTrue(metadata["geometry_accepted"])
+                self.assertTrue(
+                    all(
+                        edge["sample_deltas_pixels"][0] == 1
+                        for edge in metadata["edges"].values()
+                    )
+                )
                 for name in camera.SCREEN_CORNER_NAMES:
                     self.assertLess(
                         camera.point_distance(fitted[name], active[name]), 1.25
@@ -1297,14 +1325,16 @@ Built in:
             [0, 0],
         )
 
-    def test_pixel_conversion_and_even_video_crop(self):
+    def test_pixel_conversion_and_canonical_even_crop(self):
         pixels = camera.normalized_to_pixels(
             {"left": 101, "top": 101, "right": 402, "bottom": 803},
             width=1280,
             height=720,
         )
         self.assertEqual(pixels, {"x": 129, "y": 73, "width": 386, "height": 505})
-        even = camera.even_video_box(pixels, frame_width=1280, frame_height=720)
+        even = camera.canonical_even_box(
+            pixels, frame_width=1280, frame_height=720
+        )
         self.assertEqual(even, {"x": 128, "y": 72, "width": 388, "height": 506})
         self.assertTrue(all(even[key] % 2 == 0 for key in even))
 
@@ -1352,6 +1382,7 @@ Built in:
             "top_left"
         ]["x"] += 1
         device = self.with_boundary_fit(attached)
+        device["profile_id"] = "rm1"
         refinement = device["screen"]["refinement"]
         normalized_top_left = refinement["source_corners"]["normalized"][
             "top_left"
@@ -1393,6 +1424,21 @@ Built in:
             config["camera"]["width"] = "not-a-number"
             path.write_text(json.dumps(config), encoding="utf-8")
             with self.assertRaisesRegex(camera.CameraError, "invalid camera source"):
+                camera.load_config(path)
+
+    def test_load_config_requires_exact_device_profile_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".pluto-devices.json"
+            config = self.valid_config()
+            del config["devices"][0]["profile_id"]
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaisesRegex(camera.CameraError, "invalid device entry"):
+                camera.load_config(path)
+
+            config = self.valid_config()
+            config["devices"][0]["profile_id"] = "remarkable-1"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaisesRegex(camera.CameraError, "profile id"):
                 camera.load_config(path)
 
     def test_load_config_rejects_rotation_that_disagrees_with_corners(self):
@@ -1793,6 +1839,8 @@ Built in:
             [calibration], [refinement]
         )[0]
         expected = self.with_boundary_fit(expected)
+        rendered_expected = deepcopy(expected)
+        expected["profile_id"] = "rm1"
         self.assertEqual(
             stages,
             [
@@ -1802,7 +1850,7 @@ Built in:
                 "crop-verification-1",
             ],
         )
-        self.assertEqual(rendered, [calibration, expected])
+        self.assertEqual(rendered, [calibration, rendered_expected])
         self.assertEqual(config["devices"][0], expected)
 
     def test_model_approval_cannot_save_a_two_edge_physical_fit(self):
@@ -1926,10 +1974,15 @@ Built in:
         )
         originals = camera.attach_screen_refinements(calibration, refinements)
         originals = [self.with_boundary_fit(device) for device in originals]
+        rendered_originals = deepcopy(originals)
+        originals[0]["profile_id"] = "rm1"
+        originals[1]["profile_id"] = "rm2"
         corrected = camera.attach_screen_refinements(
             [calibration[1]], [corrected_seven]
         )[0]
         corrected = self.with_boundary_fit(corrected)
+        rendered_corrected = deepcopy(corrected)
+        corrected["profile_id"] = "rm2"
         self.assertEqual(
             stages,
             [
@@ -1946,10 +1999,10 @@ Built in:
             [
                 calibration[0],
                 calibration[1],
-                originals[0],
-                originals[1],
-                originals[0],
-                corrected,
+                rendered_originals[0],
+                rendered_originals[1],
+                rendered_originals[0],
+                rendered_corrected,
             ],
         )
         self.assertEqual(config["devices"][0], originals[0])
@@ -2277,11 +2330,6 @@ Built in:
             ]
         )
         self.assertEqual(args.config, "/tmp/custom.json")
-
-    def test_legacy_invalid_duration_is_a_controlled_error(self):
-        with self.assertRaisesRegex(camera.CameraError, "invalid --seconds"):
-            camera.legacy_capture(["/tmp/out.mp4", "--seconds", "nope"])
-
 
 if __name__ == "__main__":
     unittest.main()

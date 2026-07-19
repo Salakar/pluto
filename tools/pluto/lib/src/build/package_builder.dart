@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:pluto_manifest/pluto_manifest.dart';
 
 import '../artifacts/checksums.dart';
+import '../artifacts/host_metadata.dart';
 import '../errors.dart';
 import 'release_pipeline.dart';
 import 'tar_writer.dart';
@@ -18,7 +19,7 @@ final class PackageEntry {
     this.executable = false,
   });
 
-  /// Relative POSIX path inside the package.
+  /// Relative POSIX path inside the package source layout.
   final String path;
 
   /// File bytes.
@@ -34,7 +35,7 @@ abstract interface class PackageSource {
   Future<List<PackageEntry>> readEntries();
 }
 
-/// In-memory package source for tests.
+/// In-memory package source for tests and published multi-target builds.
 final class MemoryPackageSource implements PackageSource {
   /// Creates an in-memory source.
   const MemoryPackageSource(this.entries);
@@ -115,9 +116,6 @@ final class ExternalZstdCompressor implements ByteCompressor {
         '-19',
         '--stdout',
       ]);
-      // Consume output concurrently with input. Large application bundles can
-      // otherwise fill zstd's stdout pipe while Dart is still waiting for the
-      // input sink to flush and close.
       final Future<List<int>> stdoutFuture = process.stdout.fold<List<int>>(
         <int>[],
         (List<int> previous, List<int> chunk) {
@@ -147,7 +145,7 @@ final class ExternalZstdCompressor implements ByteCompressor {
   }
 }
 
-/// Metadata stamped into a package.
+/// Toolchain identity stamped into one target slice.
 final class PackageMetadata {
   /// Creates package metadata.
   const PackageMetadata({
@@ -168,14 +166,26 @@ final class PackageMetadata {
   /// Pluto CLI version.
   final String plutoVersion;
 
-  /// Runtime mode recorded for install-time engine selection.
+  /// Runtime mode recorded in the slice's build metadata.
   final String buildMode;
 
-  /// Engine flavor recorded for install-time engine selection.
+  /// Engine flavor recorded in the slice's build metadata.
   final String engineFlavor;
 
-  /// Device target recorded for package validation and engine selection.
+  /// Exact device target for this slice.
   final String target;
+}
+
+/// One source layout used to build a target slice in a published package.
+final class PackageSliceSource {
+  /// Creates one target slice source.
+  const PackageSliceSource({required this.source, required this.metadata});
+
+  /// Layout containing one manifest and target-native payload.
+  final PackageSource source;
+
+  /// Exact identity of this layout.
+  final PackageMetadata metadata;
 }
 
 /// Completed package bytes plus integrity metadata.
@@ -190,7 +200,7 @@ final class PlapPackage {
   final Map<String, Object?> integrity;
 }
 
-/// Builds `.plap` packages.
+/// Builds the canonical target-sliced `.plap` archive.
 final class PlapPackageBuilder {
   /// Creates a package builder.
   const PlapPackageBuilder({
@@ -204,27 +214,62 @@ final class PlapPackageBuilder {
   /// Tar writer.
   final TarArchiveWriter tarWriter;
 
-  /// Builds a package from [source].
+  /// Builds a device-aware package containing one selected target slice.
   Future<PlapPackage> build({
     required PackageSource source,
     required PackageMetadata metadata,
+  }) {
+    return buildSlices(
+      slices: <PackageSliceSource>[
+        PackageSliceSource(source: source, metadata: metadata),
+      ],
+    );
+  }
+
+  /// Builds a published package containing one or more exact target slices.
+  ///
+  /// Every source must describe the same app and toolchain. The manifest is
+  /// stored once at archive root; every other layout file is target-scoped.
+  Future<PlapPackage> buildSlices({
+    required List<PackageSliceSource> slices,
   }) async {
-    final List<PackageEntry> sourceEntries = await source.readEntries();
-    validatePackageLayout(sourceEntries, metadata: metadata);
-    final Map<String, String> digests = <String, String>{};
-    for (final PackageEntry entry in sourceEntries) {
-      digests[entry.path] = sha256Bytes(entry.bytes);
+    if (slices.isEmpty) {
+      throw const ArtifactVerificationException(
+        message: 'A .plap package must contain at least one target slice.',
+      );
     }
+
+    final List<_ValidatedPackageSlice> validated = <_ValidatedPackageSlice>[];
+    for (final PackageSliceSource slice in slices) {
+      validated.add(
+        _validatePackageLayout(
+          await slice.source.readEntries(),
+          metadata: slice.metadata,
+        ),
+      );
+    }
+    _validateSliceSet(validated);
+
+    final _ValidatedPackageSlice first = validated.first;
+    final List<PackageEntry> payload = <PackageEntry>[
+      PackageEntry(path: 'manifest.json', bytes: first.manifestBytes),
+      for (final _ValidatedPackageSlice slice in validated)
+        for (final PackageEntry entry in slice.sliceEntries)
+          PackageEntry(
+            path: 'targets/${slice.metadata.target}/${entry.path}',
+            bytes: entry.bytes,
+            executable: entry.executable,
+          ),
+    ];
+    payload.sort((PackageEntry a, PackageEntry b) => a.path.compareTo(b.path));
+
+    final Map<String, String> digests = <String, String>{
+      for (final PackageEntry entry in payload)
+        entry.path: sha256Bytes(entry.bytes),
+    };
     final Map<String, Object?> integrity = <String, Object?>{
-      'schema': 1,
-      'format': 'plap-tar-zst-v1',
       'compression': compressor.name,
-      'createdBy': 'pluto ${metadata.plutoVersion}',
-      'flutterVersion': metadata.flutterVersion,
-      'engineCommit': metadata.engineCommit,
-      'buildMode': metadata.buildMode,
-      'engineFlavor': metadata.engineFlavor,
-      'target': metadata.target,
+      'createdBy': 'pluto ${first.metadata.plutoVersion}',
       'files': Map<String, String>.fromEntries(
         digests.entries.toList(growable: false)..sort(
           (MapEntry<String, String> a, MapEntry<String, String> b) =>
@@ -233,8 +278,8 @@ final class PlapPackageBuilder {
       ),
       'treeSha256': sha256Tree(digests),
     };
-    final List<PackageEntry> entries = <PackageEntry>[
-      ...sourceEntries,
+    final List<PackageEntry> archiveEntries = <PackageEntry>[
+      ...payload,
       PackageEntry(
         path: 'INTEGRITY.json',
         bytes: Uint8List.fromList(
@@ -243,7 +288,7 @@ final class PlapPackageBuilder {
       ),
     ];
     final Uint8List tarBytes = tarWriter.write(
-      entries
+      archiveEntries
           .map(
             (PackageEntry entry) => TarFileEntry(
               path: entry.path,
@@ -260,23 +305,18 @@ final class PlapPackageBuilder {
   }
 }
 
-/// Validates the host package layout before archiving.
+/// Validates one host layout before archiving it as a target slice.
 void validatePackageLayout(
   List<PackageEntry> entries, {
   required PackageMetadata metadata,
 }) {
-  final Set<String> paths = entries
-      .map((PackageEntry entry) => entry.path)
-      .toSet();
-  final bool hasAssets = paths.any(
-    (String path) => path.startsWith('bundle/flutter_assets/'),
-  );
-  final bool hasAotElf =
-      paths.contains('bundle/lib/app.so') || paths.contains('bundle/app.so');
-  final bool hasKernel = paths.contains(
-    'bundle/flutter_assets/kernel_blob.bin',
-  );
-  final Set<String> modes = <String>{'debug', 'profile', 'release'};
+  _validatePackageLayout(entries, metadata: metadata);
+}
+
+_ValidatedPackageSlice _validatePackageLayout(
+  List<PackageEntry> sourceEntries, {
+  required PackageMetadata metadata,
+}) {
   final PlutoTargetPlatform? targetPlatform = PlutoTargetPlatform.fromCliName(
     metadata.target,
   );
@@ -285,7 +325,18 @@ void validatePackageLayout(
       message: 'Package target is invalid: ${metadata.target}.',
     );
   }
-  if (!modes.contains(metadata.buildMode) ||
+  if (metadata.flutterVersion.isEmpty ||
+      !RegExp(r'^[0-9a-f]{40}$').hasMatch(metadata.engineCommit) ||
+      metadata.plutoVersion.isEmpty) {
+    throw const ArtifactVerificationException(
+      message: 'Package build/toolchain identity is incomplete or invalid.',
+    );
+  }
+  if (!const <String>{
+        'debug',
+        'profile',
+        'release',
+      }.contains(metadata.buildMode) ||
       metadata.engineFlavor != metadata.buildMode) {
     throw ArtifactVerificationException(
       message:
@@ -297,13 +348,102 @@ void validatePackageLayout(
       metadata.buildMode != PlutoBuildMode.release.cliName) {
     throw const ArtifactVerificationException(
       message: 'linux-arm packages are release-only.',
-      remediation:
-          'Build a linux-arm release AOT layout for the cooperative '
-          'XOVI/AppLoad/QTFB runtime.',
+      remediation: 'Build a linux-arm release AOT layout.',
     );
   }
+
+  final Map<String, PackageEntry> entries = <String, PackageEntry>{};
+  for (final PackageEntry entry in sourceEntries) {
+    _validateLayoutPath(entry.path);
+    if (entries[entry.path] != null) {
+      throw ArtifactVerificationException(
+        message: 'Package source has duplicate entry ${entry.path}.',
+      );
+    }
+    entries[entry.path] = entry;
+  }
+  final PackageEntry? manifestEntry = entries['manifest.json'];
+  if (manifestEntry == null) {
+    throw const ArtifactVerificationException(
+      message: 'Package layout is incomplete: missing manifest.json.',
+    );
+  }
+  final Map<String, Object?> manifest = _decodeJsonObject(
+    manifestEntry.bytes,
+    description: 'Package manifest.json',
+  );
+  final AppManifest appManifest = _decodeCanonicalManifest(
+    manifestEntry.bytes,
+    description: 'Package manifest.json',
+  );
+  if (appManifest.engine.flutterVersion != metadata.flutterVersion ||
+      appManifest.engine.engineCommit != metadata.engineCommit) {
+    throw const ArtifactVerificationException(
+      message: 'Package manifest engine identity does not match its slice.',
+    );
+  }
+  final AppTargetPlatform manifestTarget = AppTargetPlatform.fromWireName(
+    metadata.target,
+  )!;
+  if (!appManifest.targets.contains(manifestTarget)) {
+    throw ArtifactVerificationException(
+      message: 'Package manifest does not support target ${metadata.target}.',
+      remediation: 'Build only target slices declared by the app manifest.',
+    );
+  }
+  final String iconPath = appManifest.icon;
+  _validateLayoutPath(iconPath);
+  if (!iconPath.startsWith('assets/')) {
+    throw const ArtifactVerificationException(
+      message: 'Package manifest icon must be under assets/.',
+    );
+  }
+  final String? iconMonoPath = appManifest.iconMono;
+  if (iconMonoPath != null) {
+    _validateLayoutPath(iconMonoPath);
+    if (!iconMonoPath.startsWith('assets/')) {
+      throw const ArtifactVerificationException(
+        message: 'Package manifest iconMono must be under assets/.',
+      );
+    }
+  }
+
+  for (final String path in entries.keys) {
+    final bool allowed =
+        path == 'manifest.json' ||
+        path == BuildLayoutMetadata.fileName ||
+        path == 'bundle/icudtl.dat' ||
+        path.startsWith('bundle/flutter_assets/') ||
+        path.startsWith('bundle/lib/') ||
+        path == iconPath ||
+        path == iconMonoPath;
+    if (!allowed) {
+      throw ArtifactVerificationException(
+        message: 'Package layout contains unsupported path $path.',
+        remediation:
+            'Only manifest.json, build-metadata.json, the canonical Flutter '
+            'asset/AOT layout, and the declared icon are package payloads.',
+      );
+    }
+  }
+
+  final PackageEntry metadataEntry =
+      entries[BuildLayoutMetadata.fileName] ??
+      PackageEntry(
+        path: BuildLayoutMetadata.fileName,
+        bytes: _encodeBuildMetadata(metadata),
+      );
+  _validateBuildMetadataDocument(metadataEntry.bytes, metadata);
+
+  final Set<String> paths = entries.keys.toSet();
+  final bool hasAssets = paths.any(
+    (String path) => path.startsWith('bundle/flutter_assets/'),
+  );
+  final bool hasAotElf = paths.contains('bundle/lib/app.so');
+  final bool hasKernel = paths.contains(
+    'bundle/flutter_assets/kernel_blob.bin',
+  );
   final List<String> missing = <String>[
-    if (!paths.contains('manifest.json')) 'manifest.json',
     if (!hasAssets) 'bundle/flutter_assets/',
     if (metadata.buildMode == 'debug' && !hasKernel)
       'bundle/flutter_assets/kernel_blob.bin',
@@ -325,54 +465,213 @@ void validatePackageLayout(
     );
   }
 
-  final PackageEntry manifestEntry = entries.firstWhere(
-    (PackageEntry entry) => entry.path == 'manifest.json',
-  );
-  final Object? manifest;
-  try {
-    manifest = jsonDecode(utf8.decode(manifestEntry.bytes));
-  } on FormatException catch (error) {
-    throw ArtifactVerificationException(
-      message: 'Package manifest.json is not valid JSON: ${error.message}',
-    );
-  }
-  final Object? runtime = manifest is Map<String, Object?>
-      ? manifest['runtime']
-      : null;
+  final Object? runtime = manifest['runtime'];
   final Object? runtimeType = runtime is Map<String, Object?>
       ? runtime['type']
       : null;
-  final AppRuntimeKind? runtimeKind = runtimeType is String
-      ? AppRuntimeKind.fromWireName(runtimeType)
-      : null;
   final bool runtimeMatches = metadata.buildMode == 'debug'
-      ? runtimeKind == AppRuntimeKind.flutterKernel
-      : runtimeKind == AppRuntimeKind.flutterAot;
+      ? runtimeType == AppRuntimeKind.flutterKernel.wireName
+      : runtimeType == AppRuntimeKind.flutterAot.wireName;
   if (!runtimeMatches) {
     throw ArtifactVerificationException(
       message:
-          'Package runtime $runtimeType does not match '
-          '${metadata.buildMode}.',
-      remediation:
-          'Debug must use flutter-kernel; profile/release must use '
-          'flutter-aot.',
+          'Package runtime $runtimeType does not match ${metadata.buildMode}.',
     );
   }
   if (metadata.buildMode != 'debug') {
     final PlutoBuildMode mode = metadata.buildMode == 'profile'
         ? PlutoBuildMode.profile
         : PlutoBuildMode.release;
-    final PackageEntry appSo = entries.firstWhere(
-      (PackageEntry entry) =>
-          entry.path == 'bundle/lib/app.so' || entry.path == 'bundle/app.so',
-    );
     verifyAotElfBytesForMode(
-      appSo.bytes,
+      entries['bundle/lib/app.so']!.bytes,
       mode,
-      description: appSo.path,
+      description: 'bundle/lib/app.so',
       targetPlatform: targetPlatform,
     );
   }
+
+  final List<PackageEntry> sliceEntries = <PackageEntry>[
+    metadataEntry,
+    for (final PackageEntry entry in sourceEntries)
+      if (entry.path != 'manifest.json' &&
+          entry.path != BuildLayoutMetadata.fileName)
+        entry,
+  ];
+  sliceEntries.sort(
+    (PackageEntry a, PackageEntry b) => a.path.compareTo(b.path),
+  );
+  return _ValidatedPackageSlice(
+    metadata: metadata,
+    manifest: manifest,
+    manifestBytes: manifestEntry.bytes,
+    sliceEntries: sliceEntries,
+  );
+}
+
+void _validateSliceSet(List<_ValidatedPackageSlice> slices) {
+  final _ValidatedPackageSlice first = slices.first;
+  final Set<String> targets = <String>{};
+  for (final _ValidatedPackageSlice slice in slices) {
+    if (!targets.add(slice.metadata.target)) {
+      throw ArtifactVerificationException(
+        message: 'Package has duplicate ${slice.metadata.target} slices.',
+      );
+    }
+    if (!_jsonEquivalent(slice.manifest, first.manifest)) {
+      throw ArtifactVerificationException(
+        message:
+            'Target ${slice.metadata.target} has a different app manifest.',
+        remediation: 'All target layouts must describe exactly one app.',
+      );
+    }
+    final PackageMetadata actual = slice.metadata;
+    final PackageMetadata expected = first.metadata;
+    if (actual.flutterVersion != expected.flutterVersion ||
+        actual.engineCommit != expected.engineCommit ||
+        actual.plutoVersion != expected.plutoVersion ||
+        actual.buildMode != expected.buildMode ||
+        actual.engineFlavor != expected.engineFlavor) {
+      throw ArtifactVerificationException(
+        message:
+            'Target ${actual.target} has a different build/toolchain identity.',
+        remediation:
+            'All target slices must use the same mode, Flutter pin, engine '
+            'pin, and Pluto builder.',
+      );
+    }
+  }
+}
+
+Map<String, Object?> _decodeJsonObject(
+  Uint8List bytes, {
+  required String description,
+}) {
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(utf8.decode(bytes));
+  } on FormatException catch (error) {
+    throw ArtifactVerificationException(
+      message: '$description is not valid JSON: ${error.message}',
+    );
+  }
+  if (decoded is! Map<String, Object?>) {
+    throw ArtifactVerificationException(
+      message: '$description must be a JSON object.',
+    );
+  }
+  return decoded;
+}
+
+AppManifest _decodeCanonicalManifest(
+  Uint8List bytes, {
+  required String description,
+}) {
+  final String source;
+  try {
+    source = utf8.decode(bytes);
+  } on FormatException catch (error) {
+    throw ArtifactVerificationException(
+      message: '$description is not valid UTF-8: ${error.message}',
+    );
+  }
+  final Result<AppManifest, ManifestError> result = AppManifest.decode(source);
+  final AppManifest? manifest = result.valueOrNull;
+  if (manifest == null) {
+    throw ArtifactVerificationException(
+      message: '$description is not canonical: ${result.errorOrNull!.message}',
+      remediation: 'Rebuild the app with the current Pluto builder.',
+    );
+  }
+  return manifest;
+}
+
+void _validateBuildMetadataDocument(Uint8List bytes, PackageMetadata expected) {
+  final BuildLayoutMetadata document = BuildLayoutMetadata.decodeBytes(
+    bytes,
+    description: BuildLayoutMetadata.fileName,
+  );
+  final Map<String, (Object?, Object?)> identity = <String, (Object?, Object?)>{
+    'buildMode': (document.buildMode.cliName, expected.buildMode),
+    'engineFlavor': (document.engineFlavor, expected.engineFlavor),
+    'flutterVersion': (document.flutterVersion, expected.flutterVersion),
+    'engineCommit': (document.engineCommit, expected.engineCommit),
+    'target': (document.target, expected.target),
+  };
+  for (final MapEntry<String, (Object?, Object?)> field in identity.entries) {
+    final (Object? actual, Object? wanted) = field.value;
+    if (actual != wanted) {
+      throw ArtifactVerificationException(
+        message:
+            '${BuildLayoutMetadata.fileName} ${field.key} does not match '
+            'the package slice ($actual vs $wanted).',
+      );
+    }
+  }
+}
+
+Uint8List _encodeBuildMetadata(PackageMetadata metadata) {
+  final PlutoBuildMode mode = PlutoBuildMode.values.firstWhere(
+    (PlutoBuildMode candidate) => candidate.cliName == metadata.buildMode,
+  );
+  final BuildLayoutMetadata document = BuildLayoutMetadata(
+    buildMode: mode,
+    engineFlavor: metadata.engineFlavor,
+    flutterVersion: metadata.flutterVersion,
+    engineCommit: metadata.engineCommit,
+    target: metadata.target,
+  );
+  return Uint8List.fromList(utf8.encode(document.encode()));
+}
+
+bool _jsonEquivalent(Object? a, Object? b) {
+  return _canonicalJson(a) == _canonicalJson(b);
+}
+
+String _canonicalJson(Object? value) {
+  if (value is Map<String, Object?>) {
+    final List<String> keys = value.keys.toList(growable: false)..sort();
+    return '{${keys.map((String key) => '${jsonEncode(key)}:'
+        '${_canonicalJson(value[key])}').join(',')}}';
+  }
+  if (value is List<Object?>) {
+    return '[${value.map(_canonicalJson).join(',')}]';
+  }
+  return jsonEncode(value);
+}
+
+void _validateLayoutPath(String path) {
+  final List<String> segments = path.split('/');
+  if (path.isEmpty ||
+      path.startsWith('/') ||
+      path.contains('\\') ||
+      path.codeUnits.any((int unit) => unit < 0x20 || unit == 0x7f) ||
+      segments.any(
+        (String segment) =>
+            segment.isEmpty || segment == '.' || segment == '..',
+      )) {
+    throw ArtifactVerificationException(
+      message: 'Unsafe package layout path: $path.',
+    );
+  }
+  if (isHostMetadataPath(path)) {
+    throw ArtifactVerificationException(
+      message: 'Package layout contains forbidden host metadata: $path.',
+    );
+  }
+}
+
+final class _ValidatedPackageSlice {
+  const _ValidatedPackageSlice({
+    required this.metadata,
+    required this.manifest,
+    required this.manifestBytes,
+    required this.sliceEntries,
+  });
+
+  final PackageMetadata metadata;
+  final Map<String, Object?> manifest;
+  final Uint8List manifestBytes;
+  final List<PackageEntry> sliceEntries;
 }
 
 String _relativePath(String root, String path) {

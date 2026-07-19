@@ -1,4 +1,5 @@
 #include "compositor/software_compositor.h"
+#include "presenter_ops_test_support.h"
 
 #include <array>
 #include <atomic>
@@ -120,9 +121,8 @@ TEST(SoftwareCompositor, FrameRendererQuantizesThroughPresentBridge) {
   static Capture capture;
   capture = Capture{};
 
-  static PlutoPresenterOps ops{};
-  ops.struct_size = sizeof(ops);
-  ops.name = "capture-stub";
+  static PlutoPresenterOps ops =
+      pluto::test::current_test_presenter_ops("capture-stub");
   ops.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
     PlutoDisplayInfo info{};
     info.struct_size = sizeof(info);
@@ -212,9 +212,8 @@ TEST(SoftwareCompositor, FrameRendererWaitsForAdvertisedCompletion) {
   static Capture capture;
   capture = Capture{};
 
-  static PlutoPresenterOps ops{};
-  ops.struct_size = sizeof(ops);
-  ops.name = "completion-stub";
+  static PlutoPresenterOps ops =
+      pluto::test::current_test_presenter_ops("completion-stub");
   ops.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
     PlutoDisplayInfo info{};
     info.struct_size = sizeof(info);
@@ -402,9 +401,8 @@ TEST(SoftwareCompositor, SynchronousCompletionPresenterCannotDeadlock) {
   static Ctx ctx;
   ctx = Ctx{};
 
-  static PlutoPresenterOps ops{};
-  ops.struct_size = sizeof(ops);
-  ops.name = "sync-completion-stub";
+  static PlutoPresenterOps ops =
+      pluto::test::current_test_presenter_ops("sync-completion-stub");
   ops.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
     PlutoDisplayInfo info{};
     info.struct_size = sizeof(info);
@@ -567,6 +565,39 @@ TEST(HostPreviewPresenter, NullPresenterDefersCompletionOffPresentStack) {
   run_deferred_completion_check(pluto_null_presenter_ops(), nullptr);
 }
 
+TEST(HostPreviewPresenter, RejectsNonCurrentPresenterStructLayouts) {
+  const PlutoPresenterOps *ops = pluto_null_presenter_ops();
+  ASSERT_EQ(ops->struct_size, sizeof(PlutoPresenterOps));
+  ASSERT_NE(ops->snapshot, nullptr);
+  ASSERT_NE(ops->set_pen_focus, nullptr);
+  ASSERT_NE(ops->stage_handoff, nullptr);
+  ASSERT_NE(ops->get_handoff, nullptr);
+  ASSERT_NE(ops->confirm_handoff, nullptr);
+
+  PlutoPresenterConfig config{};
+  config.backend_name = "null";
+  PlutoPresenter *presenter = nullptr;
+  config.struct_size = sizeof(config) - 1u;
+  EXPECT_EQ(ops->open(&config, &presenter), kPlutoStatusInvalidArgument);
+  config.struct_size = sizeof(config) + 1u;
+  EXPECT_EQ(ops->open(&config, &presenter), kPlutoStatusInvalidArgument);
+  config.struct_size = sizeof(config);
+  ASSERT_EQ(ops->open(&config, &presenter), kPlutoStatusOk);
+
+  PlutoDisplayInfo info{};
+  info.struct_size = sizeof(info) - 1u;
+  EXPECT_EQ(ops->info(presenter, &info), kPlutoStatusInvalidArgument);
+  info.struct_size = sizeof(info) + 1u;
+  EXPECT_EQ(ops->info(presenter, &info), kPlutoStatusInvalidArgument);
+
+  PlutoPresentRequest request{};
+  request.struct_size = sizeof(request) - 1u;
+  EXPECT_EQ(ops->present(presenter, &request), kPlutoStatusInvalidArgument);
+  request.struct_size = sizeof(request) + 1u;
+  EXPECT_EQ(ops->present(presenter, &request), kPlutoStatusInvalidArgument);
+  ops->close(presenter);
+}
+
 TEST(HostPreviewPresenter, HostPreviewDefersCompletionOffPresentStack) {
   const std::filesystem::path dir = std::filesystem::temp_directory_path() /
                                     "pluto-host-preview-completion-test";
@@ -576,9 +607,8 @@ TEST(HostPreviewPresenter, HostPreviewDefersCompletionOffPresentStack) {
 }
 
 TEST(SoftwareCompositor, FrameRendererMarksChromaTilesOnColorPanels) {
-  static PlutoPresenterOps ops{};
-  ops.struct_size = sizeof(ops);
-  ops.name = "chroma-stub";
+  static PlutoPresenterOps ops =
+      pluto::test::current_test_presenter_ops("chroma-stub");
   ops.info = [](PlutoPresenter *, PlutoDisplayInfo *out_info) {
     PlutoDisplayInfo info{};
     info.struct_size = sizeof(info);

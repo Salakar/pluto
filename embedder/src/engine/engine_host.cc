@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -14,12 +15,16 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <sstream>
+#include <string_view>
 #include <vector>
 
 #include "engine/pen_pointer_timestamp.h"
-#include "engine/qtfb_input_bridge.h"
+#include "generated/device_profiles.h"
 #include "input/evdev.h"
 #include "input/pen.h"
 #include "input/pen_ring.h"
@@ -27,11 +32,47 @@
 #include "input/transform.h"
 #include "presenter/host_preview.h"
 #include "presenter/png_encoder.h"
-#include "presenter/qtfb/qtfb_presenter.h"
+#include "presenter/presenter_contract.h"
 #include "sensors/iio.h"
 
 namespace pluto {
 namespace {
+
+constexpr std::chrono::milliseconds kDirectInkSemanticsTimeout{4200};
+constexpr std::chrono::milliseconds kDirectInkPresentationTimeout{4000};
+
+bool read_self_process_start_ticks(std::uint64_t *out_ticks) {
+  if (out_ticks == nullptr) {
+    return false;
+  }
+  std::ifstream input("/proc/self/stat");
+  std::string stat;
+  if (!std::getline(input, stat)) {
+    return false;
+  }
+  const std::size_t comm_end = stat.rfind(") ");
+  if (comm_end == std::string::npos) {
+    return false;
+  }
+  std::istringstream fields(stat.substr(comm_end + 2));
+  std::string token;
+  for (unsigned field = 3; field <= 22; ++field) {
+    if (!(fields >> token)) {
+      return false;
+    }
+    if (field == 22) {
+      char *end = nullptr;
+      errno = 0;
+      const unsigned long long parsed = std::strtoull(token.c_str(), &end, 10);
+      if (errno != 0 || end == token.c_str() || *end != '\0' || parsed == 0) {
+        return false;
+      }
+      *out_ticks = static_cast<std::uint64_t>(parsed);
+      return true;
+    }
+  }
+  return false;
+}
 
 std::string join_path(const std::string &base, const char *leaf) {
   return (std::filesystem::path(base) / leaf).string();
@@ -39,14 +80,6 @@ std::string join_path(const std::string &base, const char *leaf) {
 
 bool file_exists(const std::string &path) {
   return !path.empty() && std::filesystem::exists(path);
-}
-
-bool presenter_has_pen_focus_hook(const PlutoPresenterOps *ops) {
-  constexpr size_t kRequiredOpsSize =
-      offsetof(PlutoPresenterOps, set_pen_focus) +
-      sizeof(PlutoPresenterOps::set_pen_focus);
-  return ops != nullptr && ops->struct_size >= kRequiredOpsSize &&
-         ops->set_pen_focus != nullptr;
 }
 
 void trace_startup(const char *message) {
@@ -84,6 +117,341 @@ int32_t degrees_for_sensor_orientation(SensorOrientation orientation) {
 
 } // namespace
 
+std::uint64_t DirectInkSemanticsState::begin() {
+  std::lock_guard lock(mutex_);
+  active_ = true;
+  slots_ = {};
+  ++generation_;
+  changed_.notify_all();
+  return generation_;
+}
+
+void DirectInkSemanticsState::end() {
+  std::lock_guard lock(mutex_);
+  active_ = false;
+  slots_ = {};
+  changed_.notify_all();
+}
+
+void DirectInkSemanticsState::update(const FlutterSemanticsUpdate2 *update) {
+  constexpr std::size_t kTargetCount = 3;
+  if (update == nullptr ||
+      update->struct_size < offsetof(FlutterSemanticsUpdate2, view_id) +
+                                sizeof(FlutterSemanticsUpdate2::view_id) ||
+      (update->node_count != 0 && update->nodes == nullptr)) {
+    return;
+  }
+
+  std::array<std::optional<DirectInkSemanticsNode>, kTargetCount> candidates;
+  std::array<std::size_t, kTargetCount> counts{};
+  for (std::size_t index = 0; index < update->node_count; ++index) {
+    const FlutterSemanticsNode2 *node = update->nodes[index];
+    if (node == nullptr || node->id < 0 ||
+        node->struct_size < offsetof(FlutterSemanticsNode2, label) +
+                                sizeof(FlutterSemanticsNode2::label) ||
+        node->label == nullptr ||
+        (static_cast<std::uint64_t>(node->actions) &
+         static_cast<std::uint64_t>(kFlutterSemanticsActionTap)) == 0) {
+      continue;
+    }
+
+    std::optional<DirectInkSemanticsTarget> target;
+    const std::string_view label(node->label);
+    if (label == "Back to gallery") {
+      target = DirectInkSemanticsTarget::kCanvasReady;
+    } else if (label == "new artwork") {
+      target = DirectInkSemanticsTarget::kNewArtwork;
+    } else if (label == "create") {
+      target = DirectInkSemanticsTarget::kCreate;
+    }
+    if (!target.has_value()) {
+      continue;
+    }
+    const std::size_t slot = static_cast<std::size_t>(*target);
+    ++counts[slot];
+    if (!candidates[slot].has_value()) {
+      candidates[slot] = DirectInkSemanticsNode{
+          .view_id = update->view_id,
+          .node_id = static_cast<std::uint64_t>(node->id),
+      };
+    }
+  }
+
+  std::lock_guard lock(mutex_);
+  if (!active_) {
+    return;
+  }
+  ++generation_;
+  for (std::size_t slot = 0; slot < kTargetCount; ++slot) {
+    if (counts[slot] == 0) {
+      continue;
+    }
+    slots_[slot].node = *candidates[slot];
+    slots_[slot].node.generation = generation_;
+    slots_[slot].ambiguous = counts[slot] != 1;
+  }
+  changed_.notify_all();
+}
+
+std::uint64_t DirectInkSemanticsState::generation() const {
+  std::lock_guard lock(mutex_);
+  return generation_;
+}
+
+DirectInkSemanticsWait DirectInkSemanticsState::wait_for_any(
+    std::span<const DirectInkSemanticsTarget> targets,
+    std::uint64_t after_generation, std::chrono::milliseconds timeout,
+    DirectInkSemanticsTarget *matched, DirectInkSemanticsNode *node) {
+  if (targets.empty() || matched == nullptr || node == nullptr ||
+      timeout < std::chrono::milliseconds::zero()) {
+    return DirectInkSemanticsWait::kInactive;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock lock(mutex_);
+  for (;;) {
+    if (!active_) {
+      return DirectInkSemanticsWait::kInactive;
+    }
+    for (const DirectInkSemanticsTarget target : targets) {
+      const Slot &slot = slots_[static_cast<std::size_t>(target)];
+      if (slot.node.generation <= after_generation) {
+        continue;
+      }
+      if (slot.ambiguous) {
+        return DirectInkSemanticsWait::kAmbiguous;
+      }
+      *matched = target;
+      *node = slot.node;
+      return DirectInkSemanticsWait::kFound;
+    }
+    if (changed_.wait_until(lock, deadline) == std::cv_status::timeout) {
+      return DirectInkSemanticsWait::kTimedOut;
+    }
+  }
+}
+
+bool prepare_direct_ink_canvas_from_semantics(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap, std::chrono::milliseconds timeout,
+    std::size_t *action_count, DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (state == nullptr || !toggle || !tap || action_count == nullptr ||
+      failure == nullptr || timeout <= std::chrono::milliseconds::zero()) {
+    return fail("invalid-control", "invalid Ink canvas preparation state");
+  }
+  *action_count = 0;
+
+  struct SessionCleanup {
+    DirectInkSemanticsState *state;
+    const DirectInkSemanticsToggle *toggle;
+    bool enabled = false;
+    ~SessionCleanup() {
+      state->end();
+      if (enabled) {
+        try {
+          (void)(*toggle)(false);
+        } catch (...) {
+        }
+      }
+    }
+  } cleanup{state, &toggle};
+
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const std::uint64_t initial_generation = state->begin();
+  if (!toggle(true)) {
+    return fail("semantics-unavailable",
+                "Flutter semantics could not be enabled for Ink");
+  }
+  cleanup.enabled = true;
+
+  const auto remaining = [&deadline] {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return std::chrono::milliseconds::zero();
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                 now);
+  };
+  const auto wait_failure = [&fail](DirectInkSemanticsWait wait,
+                                    const char *timeout_message) {
+    if (wait == DirectInkSemanticsWait::kAmbiguous) {
+      return fail("ambiguous-ink-ui",
+                  "Ink exposed duplicate acceptance controls");
+    }
+    if (wait == DirectInkSemanticsWait::kInactive) {
+      return fail("semantics-unavailable",
+                  "Ink semantics became unavailable during preparation");
+    }
+    return fail("ink-ui-timeout", timeout_message);
+  };
+
+  constexpr std::array initial_targets{
+      DirectInkSemanticsTarget::kCanvasReady,
+      DirectInkSemanticsTarget::kCreate,
+      DirectInkSemanticsTarget::kNewArtwork,
+  };
+  DirectInkSemanticsTarget matched{};
+  DirectInkSemanticsNode node;
+  DirectInkSemanticsWait wait = state->wait_for_any(
+      initial_targets, initial_generation, remaining(), &matched, &node);
+  if (wait != DirectInkSemanticsWait::kFound) {
+    return wait_failure(wait,
+                        "Ink did not expose a gallery, chooser, or canvas");
+  }
+  if (matched == DirectInkSemanticsTarget::kCanvasReady) {
+    return true;
+  }
+
+  if (matched == DirectInkSemanticsTarget::kNewArtwork) {
+    const std::uint64_t before_open = state->generation();
+    if (!tap(node)) {
+      return fail("semantics-action-failed",
+                  "Ink rejected its new-artwork action");
+    }
+    ++*action_count;
+    constexpr std::array create_target{DirectInkSemanticsTarget::kCreate};
+    wait = state->wait_for_any(create_target, before_open, remaining(),
+                               &matched, &node);
+    if (wait != DirectInkSemanticsWait::kFound) {
+      return wait_failure(wait,
+                          "Ink's new-artwork chooser did not expose create");
+    }
+  }
+
+  const std::uint64_t before_create = state->generation();
+  if (!tap(node)) {
+    return fail("semantics-action-failed", "Ink rejected its create action");
+  }
+  ++*action_count;
+  constexpr std::array canvas_target{DirectInkSemanticsTarget::kCanvasReady};
+  wait = state->wait_for_any(canvas_target, before_create, remaining(),
+                             &matched, &node);
+  if (wait != DirectInkSemanticsWait::kFound) {
+    return wait_failure(wait,
+                        "Ink did not mount an editor canvas after create");
+  }
+  return true;
+}
+
+bool prepare_direct_ink_canvas_with_presentation_receipt(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap,
+    const DirectInkPresentationTracker &presentation,
+    std::chrono::milliseconds semantics_timeout,
+    std::chrono::milliseconds presentation_timeout, std::size_t *action_count,
+    DirectInkPresentationProof *proof, DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (!presentation.begin || !presentation.cancel || !presentation.prove ||
+      action_count == nullptr || proof == nullptr || failure == nullptr ||
+      presentation_timeout <= std::chrono::milliseconds::zero()) {
+    return fail("invalid-control", "invalid Ink presentation tracker");
+  }
+  *action_count = 0;
+  *proof = {};
+  if (!presentation.begin()) {
+    return fail("presentation-unavailable",
+                "Ink presentation transaction could not be armed");
+  }
+  struct PresentationCleanup {
+    const DirectInkPresentationTracker *tracker;
+    bool active = true;
+    ~PresentationCleanup() {
+      if (active) {
+        tracker->cancel();
+      }
+    }
+  } cleanup{&presentation};
+  if (!prepare_direct_ink_canvas_from_semantics(
+          state, toggle, tap, semantics_timeout, action_count, failure)) {
+    return false;
+  }
+  // Canvas-ready semantics are only the content predicate. Always cross a
+  // fresh Flutter raster fence and prove one exact retained-surface Full
+  // presenter completion, including the already-mounted actionCount=0 path.
+  if (!presentation.prove(presentation_timeout, proof) ||
+      proof->surface_generation == 0 || proof->frame_id == 0) {
+    return fail("presentation-timeout",
+                "Ink canvas did not complete its exact Full panel proof");
+  }
+  cleanup.active = false;
+  return true;
+}
+
+std::optional<std::string>
+read_direct_switcher_target(const std::string &run_dir) {
+  constexpr std::size_t kMaximumStateBytes = 4096;
+  const std::filesystem::path path =
+      std::filesystem::path(run_dir) / "switcher-active";
+  const int fd =
+      ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0) {
+    return std::nullopt;
+  }
+  struct stat metadata {};
+  if (::fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+      metadata.st_uid != ::geteuid() || metadata.st_nlink != 1 ||
+      metadata.st_size <= 0 ||
+      static_cast<std::uint64_t>(metadata.st_size) > kMaximumStateBytes) {
+    ::close(fd);
+    return std::nullopt;
+  }
+
+  std::string state(static_cast<std::size_t>(metadata.st_size), '\0');
+  std::size_t offset = 0;
+  while (offset < state.size()) {
+    const ssize_t count =
+        ::read(fd, state.data() + offset, state.size() - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    ::close(fd);
+    return std::nullopt;
+  }
+  ::close(fd);
+
+  const std::size_t first_end = state.find('\n');
+  const std::size_t second_end = first_end == std::string::npos
+                                     ? std::string::npos
+                                     : state.find('\n', first_end + 1);
+  if (first_end == std::string::npos || second_end == std::string::npos ||
+      first_end == 0 || second_end == first_end + 1) {
+    return std::nullopt;
+  }
+  const std::string_view origin(state.data(), first_end);
+  const std::string_view target(state.data() + first_end + 1,
+                                second_end - first_end - 1);
+  const auto valid_app_id = [](std::string_view value) {
+    if (value.empty() || value.size() > 128) {
+      return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](const char byte) {
+      return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+             (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' ||
+             byte == '-';
+    });
+  };
+  if (!valid_app_id(origin) || !valid_app_id(target) || origin == target) {
+    return std::nullopt;
+  }
+  return std::string(target);
+}
+
 const char *engine_mode_name(EngineMode mode) {
   switch (mode) {
   case EngineMode::kDebug:
@@ -102,6 +470,12 @@ bool apply_presenter_display_info(const PlutoDisplayInfo &info,
   if (config == nullptr) {
     if (error != nullptr) {
       *error = "presenter display info has no destination config";
+    }
+    return false;
+  }
+  if (info.struct_size != sizeof(PlutoDisplayInfo)) {
+    if (error != nullptr) {
+      *error = "presenter reported a non-current display info layout";
     }
     return false;
   }
@@ -182,21 +556,7 @@ void EngineHost::resolve_paths() {
     config_.assets_path = join_path(config_.bundle_path, "flutter_assets");
   }
   if (config_.aot_elf_path.empty() && !config_.bundle_path.empty()) {
-    const std::string canonical_aot =
-        join_path(config_.bundle_path, "lib/app.so");
-    const std::string legacy_aot = join_path(config_.bundle_path, "app.so");
-    // New packages always use bundle/lib/app.so. Keep reading the former
-    // bundle/app.so layout so already-installed bundles remain launchable,
-    // but prefer the canonical file when both happen to be present.
-    config_.aot_elf_path =
-        file_exists(canonical_aot) || !file_exists(legacy_aot) ? canonical_aot
-                                                               : legacy_aot;
-  }
-  if (config_.engine_path.empty()) {
-    config_.engine_path = "third_party/engine/linux-arm64/libflutter_engine.so";
-  }
-  if (config_.icu_data_path.empty()) {
-    config_.icu_data_path = "third_party/engine/linux-arm64/icudtl.dat";
+    config_.aot_elf_path = join_path(config_.bundle_path, "lib/app.so");
   }
 }
 
@@ -207,6 +567,26 @@ bool EngineHost::initialize(std::string *error) {
     if (error != nullptr) {
       *error = "startup configuration failed: --ready-file must be an "
                "absolute path";
+    }
+    return false;
+  }
+  if (!config_.health_file_path.empty() &&
+      !std::filesystem::path(config_.health_file_path).is_absolute()) {
+    if (error != nullptr) {
+      *error = "startup configuration failed: --health-file must be an "
+               "absolute path";
+    }
+    return false;
+  }
+  if (config_.engine_path.empty()) {
+    if (error != nullptr) {
+      *error = "startup configuration failed: --engine is required";
+    }
+    return false;
+  }
+  if (config_.icu_data_path.empty()) {
+    if (error != nullptr) {
+      *error = "startup configuration failed: --icu-data is required";
     }
     return false;
   }
@@ -395,27 +775,12 @@ bool EngineHost::send_synthetic_tap(double x, double y) {
     return false;
   }
   const size_t now_us = static_cast<size_t>(event_loop_.now_nanos() / 1000ull);
-  FlutterPointerEvent events[4]{};
-  auto fill = [&](size_t index, FlutterPointerPhase phase, size_t delta_us) {
-    events[index].struct_size = sizeof(FlutterPointerEvent);
-    events[index].phase = phase;
-    events[index].timestamp = now_us + delta_us;
-    events[index].x = x;
-    events[index].y = y;
-    events[index].device = 1;
-    events[index].signal_kind = kFlutterPointerSignalKindNone;
-    events[index].device_kind = kFlutterPointerDeviceKindTouch;
-    events[index].view_id = 0;
-    events[index].pressure = phase == kDown || phase == kMove ? 1.0 : 0.0;
-    events[index].pressure_min = 0.0;
-    events[index].pressure_max = 1.0;
-  };
-  fill(0, kAdd, 0);
-  fill(1, kDown, 1000);
-  fill(2, kUp, 32000);
-  fill(3, kRemove, 33000);
-  return engine_library_.procs().SendPointerEvent(engine_, events, 4) ==
-         kSuccess;
+  std::array<FlutterPointerEvent, kDirectTouchTapEventCount> events{};
+  if (!build_direct_touch_tap_events(x, y, now_us, &events)) {
+    return false;
+  }
+  return engine_library_.procs().SendPointerEvent(engine_, events.data(),
+                                                  events.size()) == kSuccess;
 }
 
 bool EngineHost::transition_lifecycle(LifecycleState state) {
@@ -507,8 +872,370 @@ bool EngineHost::capture_direct_screenshot(
   return true;
 }
 
+bool build_direct_ink_stroke_events(
+    std::int32_t width, std::int32_t height, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectInkStrokeEventCount> *events) {
+  if (events == nullptr || width <= 0 || height <= 0) {
+    return false;
+  }
+  constexpr std::size_t kMoveCount = kDirectInkStrokeEventCount - 4;
+  *events = {};
+  const double panel_width = static_cast<double>(width);
+  const double panel_height = static_cast<double>(height);
+  const double start_x = panel_width * 0.30;
+  const double start_y = panel_height * 0.56;
+  const double end_x = panel_width * 0.70;
+  const double end_y = panel_height * 0.46;
+
+  const auto fill = [&](std::size_t index, FlutterPointerPhase phase, double x,
+                        double y, double pressure) {
+    FlutterPointerEvent &event = (*events)[index];
+    event.struct_size = sizeof(FlutterPointerEvent);
+    event.phase = phase;
+    event.timestamp = started_us + index * 4000u;
+    event.x = x;
+    event.y = y;
+    event.device = 900;
+    event.signal_kind = kFlutterPointerSignalKindNone;
+    event.device_kind = kFlutterPointerDeviceKindStylus;
+    event.view_id = 0;
+    event.pressure = pressure;
+    event.pressure_min = 0.0;
+    event.pressure_max = 1.0;
+  };
+
+  fill(0, kAdd, start_x, start_y, 0.0);
+  fill(1, kDown, start_x, start_y, 0.55);
+  for (std::size_t index = 0; index < kMoveCount; ++index) {
+    const double t = static_cast<double>(index + 1) / kMoveCount;
+    // A shallow S-curve is unmistakably a drawn stroke in camera evidence
+    // while remaining inside Ink's responsive central canvas on every panel.
+    const double bend = (t - 0.5) * (t - 0.5) * (t < 0.5 ? -1.0 : 1.0);
+    fill(index + 2, kMove, start_x + (end_x - start_x) * t,
+         start_y + (end_y - start_y) * t + panel_height * 0.12 * bend, 0.55);
+  }
+  fill(kDirectInkStrokeEventCount - 2, kUp, end_x, end_y, 0.0);
+  fill(kDirectInkStrokeEventCount - 1, kRemove, end_x, end_y, 0.0);
+  return true;
+}
+
+bool build_direct_touch_tap_events(
+    double x, double y, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectTouchTapEventCount> *events) {
+  if (events == nullptr || !std::isfinite(x) || !std::isfinite(y) || x < 0.0 ||
+      y < 0.0) {
+    return false;
+  }
+  *events = {};
+  const auto fill = [&](std::size_t index, FlutterPointerPhase phase,
+                        std::size_t delta_us) {
+    FlutterPointerEvent &event = (*events)[index];
+    event.struct_size = sizeof(FlutterPointerEvent);
+    event.phase = phase;
+    event.timestamp = started_us + delta_us;
+    event.x = x;
+    event.y = y;
+    event.device = 1;
+    event.signal_kind = kFlutterPointerSignalKindNone;
+    event.device_kind = kFlutterPointerDeviceKindTouch;
+    event.view_id = 0;
+    event.pressure = phase == kDown || phase == kMove ? 1.0 : 0.0;
+    event.pressure_min = 0.0;
+    event.pressure_max = 1.0;
+  };
+  fill(0, kAdd, 0);
+  fill(1, kDown, 1000);
+  fill(2, kUp, 32000);
+  fill(3, kRemove, 33000);
+  return true;
+}
+
+bool EngineHost::send_direct_ink_stroke(const std::string &requested_app_id,
+                                        std::int64_t expected_pid,
+                                        DirectPointerResult *result,
+                                        DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (result == nullptr || failure == nullptr) {
+    return false;
+  }
+  const std::int64_t process_pid = static_cast<std::int64_t>(::getpid());
+  if (expected_pid != process_pid) {
+    return fail("wrong-pid", "expected PID is not the foreground Ink embedder");
+  }
+  if (requested_app_id != config_.app_id) {
+    return fail("wrong-app", "requested app is not the foreground embedder");
+  }
+  if (config_.app_id != "dev.pluto.ink") {
+    return fail("unsupported-app", "draw-stroke is restricted to Pluto Ink");
+  }
+  if (engine_ == nullptr || !engine_library_.loaded()) {
+    return fail("unavailable", "Flutter engine is unavailable");
+  }
+
+  std::array<FlutterPointerEvent, kDirectInkStrokeEventCount> events{};
+  struct timespec monotonic {};
+  if (::clock_gettime(CLOCK_MONOTONIC, &monotonic) != 0) {
+    return fail("clock-failed", "could not timestamp programmatic stroke");
+  }
+  const std::int64_t monotonic_us =
+      static_cast<std::int64_t>(monotonic.tv_sec) * 1000000ll +
+      static_cast<std::int64_t>(monotonic.tv_nsec / 1000);
+  const std::size_t started_us = flutter_pen_pointer_timestamp_us(monotonic_us);
+  if (!build_direct_ink_stroke_events(config_.panel_width, config_.panel_height,
+                                      started_us, &events)) {
+    return fail("invalid-geometry", "panel geometry cannot host an Ink stroke");
+  }
+
+  if (engine_library_.procs().SendPointerEvent(engine_, events.data(),
+                                               events.size()) != kSuccess) {
+    return fail("pointer-send-failed",
+                "Flutter rejected the programmatic Ink stroke");
+  }
+  *result = DirectPointerResult{
+      .app_id = config_.app_id,
+      .pid = process_pid,
+      .event_count = events.size(),
+  };
+  return true;
+}
+
+bool EngineHost::schedule_frame_on_platform_thread(
+    std::chrono::steady_clock::time_point deadline,
+    std::uint64_t *pre_schedule_surface_generation) {
+  if (pre_schedule_surface_generation == nullptr ||
+      frame_renderer_ == nullptr) {
+    return false;
+  }
+  const auto schedule = [this](std::uint64_t *generation) {
+    *generation = frame_renderer_->flutter_surface_generation();
+    return engine_ != nullptr && engine_library_.loaded() &&
+           engine_library_.procs().ScheduleFrame != nullptr &&
+           engine_library_.procs().ScheduleFrame(engine_) == kSuccess;
+  };
+  if (event_loop_.runs_on_loop_thread()) {
+    return schedule(pre_schedule_surface_generation);
+  }
+  struct Result {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool done = false;
+    bool success = false;
+    std::uint64_t generation = 0;
+  };
+  const auto result = std::make_shared<Result>();
+  event_loop_.post_closure([result, schedule] {
+    std::uint64_t generation = 0;
+    const bool success = schedule(&generation);
+    {
+      std::lock_guard<std::mutex> lock(result->mutex);
+      result->success = success;
+      result->generation = generation;
+      result->done = true;
+    }
+    result->changed.notify_all();
+  });
+  std::unique_lock<std::mutex> lock(result->mutex);
+  if (!result->changed.wait_until(lock, deadline,
+                                  [&] { return result->done; }) ||
+      !result->success) {
+    return false;
+  }
+  *pre_schedule_surface_generation = result->generation;
+  return true;
+}
+
+bool EngineHost::prove_direct_ink_presentation(
+    std::chrono::milliseconds timeout, std::uint64_t proof_token,
+    DirectInkPresentationProof *proof) {
+  if (proof == nullptr || proof_token == 0 || frame_renderer_ == nullptr ||
+      timeout <= std::chrono::milliseconds::zero()) {
+    return false;
+  }
+  *proof = {};
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const auto remaining = [&] {
+    const auto now = std::chrono::steady_clock::now();
+    return now >= deadline
+               ? std::chrono::milliseconds::zero()
+               : std::chrono::duration_cast<std::chrono::milliseconds>(
+                     deadline - now);
+  };
+
+  // The first boundary may be a Flutter frame that was already in flight when
+  // canvas-ready semantics arrived. Requesting and observing a second frame
+  // only after that callback closes the race and makes it post-semantics.
+  std::uint64_t scheduled_after_generation = 0;
+  std::uint64_t generation = 0;
+  if (!schedule_frame_on_platform_thread(deadline,
+                                         &scheduled_after_generation) ||
+      !frame_renderer_->wait_for_flutter_surface_after(
+          scheduled_after_generation, remaining(), &generation)) {
+    return false;
+  }
+  if (!schedule_frame_on_platform_thread(deadline,
+                                         &scheduled_after_generation) ||
+      !frame_renderer_->wait_for_flutter_surface_after(
+          scheduled_after_generation, remaining(), &generation)) {
+    return false;
+  }
+
+  FrameRenderer::ExactPresentationReceipt exact;
+  if (!frame_renderer_->present_retained_surface_full(proof_token, remaining(),
+                                                      &exact) ||
+      exact.surface_generation < generation || exact.frame_id == 0) {
+    return false;
+  }
+  proof->surface_generation = exact.surface_generation;
+  proof->frame_id = exact.frame_id;
+  return true;
+}
+
+bool EngineHost::send_direct_prepare_ink_canvas(
+    const std::string &requested_app_id, std::int64_t expected_pid,
+    DirectInkCanvasResult *result, DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (result == nullptr || failure == nullptr) {
+    return false;
+  }
+  const std::int64_t process_pid = static_cast<std::int64_t>(::getpid());
+  if (expected_pid != process_pid) {
+    return fail("wrong-pid", "expected PID is not the foreground Ink embedder");
+  }
+  if (requested_app_id != config_.app_id) {
+    return fail("wrong-app", "requested app is not the foreground embedder");
+  }
+  if (config_.app_id != "dev.pluto.ink") {
+    return fail("unsupported-app",
+                "prepare-ink-canvas is restricted to Pluto Ink");
+  }
+  if (engine_ == nullptr || !engine_library_.loaded() ||
+      engine_library_.procs().UpdateSemanticsEnabled == nullptr ||
+      engine_library_.procs().SendSemanticsAction == nullptr) {
+    return fail("unavailable", "Flutter semantics are unavailable");
+  }
+
+  const DirectInkSemanticsToggle toggle = [this](bool enabled) {
+    return engine_library_.procs().UpdateSemanticsEnabled(engine_, enabled) ==
+           kSuccess;
+  };
+  const DirectInkSemanticsTap tap = [this](const DirectInkSemanticsNode &node) {
+    FlutterSendSemanticsActionInfo info{};
+    info.struct_size = sizeof(info);
+    info.view_id = node.view_id;
+    info.node_id = node.node_id;
+    info.action = kFlutterSemanticsActionTap;
+    return engine_library_.procs().SendSemanticsAction(engine_, &info) ==
+           kSuccess;
+  };
+  if (frame_renderer_ == nullptr) {
+    return fail("unavailable", "native presentation tracking is unavailable");
+  }
+  std::uint64_t proof_token = 0;
+  const DirectInkPresentationTracker presentation{
+      .begin =
+          [this, &proof_token]() {
+            return frame_renderer_->begin_retained_surface_full_proof(
+                &proof_token);
+          },
+      .cancel =
+          [this, &proof_token]() {
+            (void)frame_renderer_->cancel_retained_surface_full_proof(
+                proof_token);
+          },
+      .prove =
+          [this, &proof_token](std::chrono::milliseconds timeout,
+                               DirectInkPresentationProof *proof) {
+            return prove_direct_ink_presentation(timeout, proof_token, proof);
+          }};
+  std::size_t action_count = 0;
+  DirectInkPresentationProof proof;
+  if (!prepare_direct_ink_canvas_with_presentation_receipt(
+          &direct_ink_semantics_, toggle, tap, presentation,
+          kDirectInkSemanticsTimeout, kDirectInkPresentationTimeout,
+          &action_count, &proof, failure)) {
+    return false;
+  }
+  std::uint64_t process_start_ticks = 0;
+  if (!read_self_process_start_ticks(&process_start_ticks)) {
+    return fail("identity-unavailable",
+                "could not bind Ink proof to process start ticks");
+  }
+  *result = DirectInkCanvasResult{
+      .app_id = config_.app_id,
+      .pid = process_pid,
+      .process_start_ticks = process_start_ticks,
+      .action_count = action_count,
+      .canvas_ready = true,
+      .surface_generation = proof.surface_generation,
+      .proof_frame_id = proof.frame_id,
+  };
+  return true;
+}
+
+bool EngineHost::send_direct_switcher_preview_tap(
+    const std::string &requested_app_id, DirectPointerResult *result,
+    DirectControlFailure *failure) {
+  const auto fail = [failure](const char *code, const char *message) {
+    if (failure != nullptr) {
+      failure->code = code;
+      failure->message = message;
+    }
+    return false;
+  };
+  if (result == nullptr || failure == nullptr) {
+    return false;
+  }
+  if (requested_app_id != config_.app_id) {
+    return fail("wrong-app", "requested app is not the foreground embedder");
+  }
+  if (config_.app_id != "dev.pluto.launcher") {
+    return fail("unsupported-app",
+                "tap-switcher-preview is restricted to Pluto Home");
+  }
+  if (engine_ == nullptr || !engine_library_.loaded()) {
+    return fail("unavailable", "Flutter engine is unavailable");
+  }
+
+  // The center of every responsive switcher viewport is inside the selected
+  // preview. Require the supervisor-authored activation to contain an actual
+  // non-origin target before sending a pointer; this keeps the acceptance-only
+  // control from turning into a generic launcher automation endpoint.
+  if (!read_direct_switcher_target(config_.run_dir).has_value()) {
+    return fail("unavailable", "no selectable switcher preview is active");
+  }
+
+  const double width = static_cast<double>(logical_width(config_));
+  const double height = static_cast<double>(logical_height(config_));
+  if (width <= 0.0 || height <= 0.0) {
+    return fail("invalid-geometry",
+                "panel geometry cannot host a switcher tap");
+  }
+  if (!send_synthetic_tap(width * 0.5, height * 0.5)) {
+    return fail("pointer-send-failed",
+                "Flutter rejected the programmatic switcher tap");
+  }
+  *result = DirectPointerResult{
+      .app_id = config_.app_id,
+      .pid = static_cast<std::int64_t>(::getpid()),
+      .event_count = kDirectTouchTapEventCount,
+  };
+  return true;
+}
+
 void EngineHost::start_foreground_services() {
-  if (config_.presenter_name == "swtcon") {
+  if (config_.presenter_name == "native") {
     if (direct_control_server_ == nullptr) {
       DirectControlServerConfig control;
       control.run_dir = config_.run_dir;
@@ -520,27 +1247,39 @@ void EngineHost::start_foreground_services() {
             return capture_direct_screenshot(surface, requested_app_id, capture,
                                              failure);
           };
+      control.draw_stroke =
+          [this](const std::string &requested_app_id, std::int64_t expected_pid,
+                 DirectPointerResult *result, DirectControlFailure *failure) {
+            return send_direct_ink_stroke(requested_app_id, expected_pid,
+                                          result, failure);
+          };
+      control.prepare_ink_canvas = [this](const std::string &requested_app_id,
+                                          std::int64_t expected_pid,
+                                          DirectInkCanvasResult *result,
+                                          DirectControlFailure *failure) {
+        return send_direct_prepare_ink_canvas(requested_app_id, expected_pid,
+                                              result, failure);
+      };
+      control.tap_switcher_preview = [this](const std::string &requested_app_id,
+                                            DirectPointerResult *result,
+                                            DirectControlFailure *failure) {
+        return send_direct_switcher_preview_tap(requested_app_id, result,
+                                                failure);
+      };
       direct_control_server_ =
           std::make_unique<DirectControlServer>(std::move(control));
     }
     std::string error;
     if (!direct_control_server_->start(&error)) {
-      std::cerr << "screenshot-control: " << error << "\n";
+      std::cerr << "direct-control: " << error << "\n";
     }
   }
-  if (qtfb_input_enabled_) {
-    if (!qtfb_input_thread_.joinable()) {
-      qtfb_input_stop_.store(false, std::memory_order_release);
-      qtfb_input_thread_ = std::thread(&EngineHost::qtfb_input_loop, this);
-    }
-  } else {
-    if (config_.enable_touch && !touch_thread_.joinable()) {
-      touch_stop_.store(false, std::memory_order_release);
-      touch_thread_ = std::thread(&EngineHost::touch_input_loop, this);
-    }
-    if (config_.enable_pen && ink_thread_ == nullptr) {
-      start_ink_thread();
-    }
+  if (config_.enable_touch && !touch_thread_.joinable()) {
+    touch_stop_.store(false, std::memory_order_release);
+    touch_thread_ = std::thread(&EngineHost::touch_input_loop, this);
+  }
+  if (config_.enable_pen && ink_thread_ == nullptr) {
+    start_ink_thread();
   }
   if (config_.enable_bezel_redraw && !bezel_redraw_thread_.joinable()) {
     bezel_redraw_stop_.store(false, std::memory_order_release);
@@ -551,10 +1290,6 @@ void EngineHost::start_foreground_services() {
 void EngineHost::stop_foreground_services() {
   if (direct_control_server_ != nullptr) {
     direct_control_server_->stop();
-  }
-  qtfb_input_stop_.store(true, std::memory_order_release);
-  if (qtfb_input_thread_.joinable()) {
-    qtfb_input_thread_.join();
   }
   touch_stop_.store(true, std::memory_order_release);
   if (touch_thread_.joinable()) {
@@ -817,115 +1552,6 @@ void EngineHost::touch_input_loop() {
   source.close();
 }
 
-void EngineHost::dispatch_qtfb_pointer_batch(const QtfbPointerBatch &batch) {
-  if (batch.event_count != 0 && engine_ != nullptr &&
-      engine_library_.loaded()) {
-    engine_library_.procs().SendPointerEvent(engine_, batch.events.data(),
-                                             batch.event_count);
-  }
-  // Raw contact state gates disruptive e-ink maintenance even when an input
-  // packet is not usable as a Flutter phase (for example, a repeated update).
-  if (frame_renderer_ != nullptr) {
-    frame_renderer_->set_touch_active(batch.touch_active);
-    frame_renderer_->set_pen_active(batch.pen_active);
-  }
-  vsync_pacer_.set_pen_proximity(batch.pen_active);
-}
-
-void EngineHost::dispatch_qtfb_key_batch(const QtfbKeyBatch &batch) {
-  if (engine_ == nullptr || !engine_library_.loaded()) {
-    return;
-  }
-  for (std::size_t index = 0; index < batch.event_count; ++index) {
-    const FlutterKeyEvent event = batch.events[index].flutter_event();
-    const FlutterEngineResult result =
-        engine_library_.procs().SendKeyEvent(engine_, &event, nullptr, nullptr);
-    if (result != kSuccess) {
-      std::cerr << "qtfb-input: FlutterEngineSendKeyEvent returned "
-                << static_cast<int>(result) << "\n";
-    }
-  }
-}
-
-void EngineHost::qtfb_input_loop() {
-  QtfbInputTranslator pointer_translator(config_.enable_touch,
-                                         config_.enable_pen);
-  QtfbKeyTranslator key_translator;
-  auto now_monotonic_us = [] {
-    struct timespec mono {};
-    clock_gettime(CLOCK_MONOTONIC, &mono);
-    return static_cast<std::size_t>(
-        static_cast<int64_t>(mono.tv_sec) * 1000000ll + mono.tv_nsec / 1000ll);
-  };
-  auto pause_ms = [](long milliseconds) {
-    timespec remaining{milliseconds / 1000,
-                       (milliseconds % 1000) * 1000 * 1000};
-    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
-    }
-  };
-
-  std::cerr << "qtfb-input: AppLoad cooperative pointer/key bridge active\n";
-  bool device_lost = false;
-  unsigned int consecutive_errors = 0;
-  while (!qtfb_input_stop_.load(std::memory_order_acquire)) {
-    qtfb::UserInputContents input{};
-    const PlutoStatus status = qtfb_receive_user_input(presenter_, &input);
-    if (status == kPlutoStatusOk) {
-      consecutive_errors = 0;
-      const std::size_t timestamp_us = now_monotonic_us();
-      const QtfbPointerBatch pointer_batch =
-          pointer_translator.consume(input, timestamp_us);
-      const QtfbKeyBatch key_batch =
-          key_translator.consume(input, timestamp_us);
-      dispatch_qtfb_pointer_batch(pointer_batch);
-      dispatch_qtfb_key_batch(key_batch);
-      if (pointer_batch.event_count == 0 && key_batch.event_count == 0) {
-        // Disabled, unknown, or out-of-sequence packets are still a valid
-        // server response. Bound a noisy peer even though there is nothing to
-        // deliver to Flutter.
-        pause_ms(1);
-      }
-      continue;
-    }
-    if (status == kPlutoStatusAgain) {
-      consecutive_errors = 0;
-      pause_ms(3); // non-blocking socket: bounded latency without busy-spin
-      continue;
-    }
-    if (status == kPlutoStatusUnsupported) {
-      // A non-input server packet was consumed. Yield before polling again so
-      // an unexpected packet stream cannot monopolize a core.
-      consecutive_errors = 0;
-      pause_ms(1);
-      continue;
-    }
-    if (status == kPlutoStatusDeviceLost) {
-      device_lost = true;
-      break;
-    }
-    if (consecutive_errors++ == 0) {
-      std::cerr << "qtfb-input: receive returned " << static_cast<int>(status)
-                << "\n";
-    }
-    if (consecutive_errors >= 20) {
-      device_lost = true;
-      break;
-    }
-    pause_ms(5);
-  }
-
-  const std::size_t cancel_timestamp_us = now_monotonic_us();
-  dispatch_qtfb_pointer_batch(
-      pointer_translator.cancel_all(cancel_timestamp_us));
-  dispatch_qtfb_key_batch(key_translator.cancel_all(cancel_timestamp_us));
-  if (device_lost && !qtfb_input_stop_.load(std::memory_order_acquire)) {
-    std::cerr << "qtfb-input: AppLoad connection lost; stopping app\n";
-    // The input thread cannot close its own presenter. Let the platform loop
-    // run the normal shutdown sequence after this reader has returned.
-    event_loop_.post_closure([this] { request_shutdown(); });
-  }
-}
-
 // Pen input + render hints: InkThread owns the device (poll-driven and
 // EVIOCGRAB'd), forwards pointer events to the app, and publishes a cheap
 // hover/contact trajectory hint. It never creates pixels or damage. The
@@ -1000,7 +1626,7 @@ void EngineHost::start_ink_thread() {
     // renderer present(). InkThread is joined before presenter detach/close
     // and is started only after attach, so this pointer has a lifecycle fence.
     // The hook carries metadata only: it cannot create pixels or damage.
-    if (presenter_has_pen_focus_hook(presenter_ops_) && presenter_ != nullptr) {
+    if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
       const Point previous =
           input.has_previous ? input.previous : input.current;
       const Point predicted =
@@ -1371,8 +1997,7 @@ bool EngineHost::hibernate() {
     frame_renderer_->set_auto_maintenance_allowed(true);
     return false;
   }
-  if (presenter_ops_ != nullptr && presenter_ops_->close != nullptr &&
-      presenter_ != nullptr) {
+  if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
     presenter_ops_->close(presenter_);
   }
   presenter_ = nullptr;
@@ -1409,8 +2034,7 @@ bool EngineHost::resume() {
   if (frame_renderer_ == nullptr ||
       !frame_renderer_->attach_presenter(presenter_ops_, presenter_)) {
     std::cerr << "resume: renderer could not attach reopened presenter\n";
-    if (presenter_ops_ != nullptr && presenter_ops_->close != nullptr &&
-        presenter_ != nullptr) {
+    if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
       presenter_ops_->close(presenter_);
     }
     presenter_ = nullptr;
@@ -1547,8 +2171,7 @@ void EngineHost::shutdown() {
     engine_library_.procs().CollectAOTData(aot_data_);
     aot_data_ = nullptr;
   }
-  if (presenter_ops_ != nullptr && presenter_ops_->close != nullptr &&
-      presenter_ != nullptr) {
+  if (presenter_ops_are_current(presenter_ops_) && presenter_ != nullptr) {
     presenter_ops_->close(presenter_);
   }
   presenter_ = nullptr;
@@ -1612,6 +2235,15 @@ void EngineHost::pre_engine_restart_callback(void *user_data) {
   auto *self = static_cast<EngineHost *>(user_data);
   if (self != nullptr) {
     self->lifecycle_ = LifecycleStateMachine();
+    self->direct_ink_semantics_.end();
+  }
+}
+
+void EngineHost::update_semantics_callback(
+    const FlutterSemanticsUpdate2 *update, void *user_data) {
+  auto *self = static_cast<EngineHost *>(user_data);
+  if (self != nullptr) {
+    self->direct_ink_semantics_.update(update);
   }
 }
 
@@ -1635,13 +2267,10 @@ bool EngineHost::open_presenter(std::string *error) {
     }
     return false;
   }
-  const QtfbInputPolicy input_policy =
-      qtfb_input_policy(config_.presenter_name, std::getenv("QTFB_KEY"),
-                        config_.enable_touch, config_.enable_pen);
-  if (input_policy == QtfbInputPolicy::kRejectMissingKey) {
+  if (!presenter_ops_are_current(presenter_ops_)) {
     if (error != nullptr) {
-      *error = "startup step 4 failed: qtfb touch/pen input requires "
-               "QTFB_KEY; refusing unsafe evdev fallback";
+      *error = "startup step 4 failed: presenter operation table is not "
+               "current";
     }
     presenter_ops_ = nullptr;
     return false;
@@ -1662,34 +2291,25 @@ bool EngineHost::open_presenter(std::string *error) {
     return false;
   }
   presenter_display_info_valid_ = false;
-  if (presenter_ops_->info != nullptr) {
-    PlutoDisplayInfo info{};
-    info.struct_size = sizeof(info);
-    const PlutoStatus info_status = presenter_ops_->info(presenter_, &info);
-    std::string geometry_error;
-    if (info_status != kPlutoStatusOk ||
-        !apply_presenter_display_info(info, &config_, &geometry_error)) {
-      if (presenter_ops_->close != nullptr) {
-        presenter_ops_->close(presenter_);
-      }
-      presenter_ = nullptr;
-      presenter_ops_ = nullptr;
-      if (error != nullptr) {
-        *error = info_status != kPlutoStatusOk
-                     ? "startup step 4 failed: presenter info returned " +
-                           std::to_string(static_cast<int>(info_status))
-                     : "startup step 4 failed: " + geometry_error;
-      }
-      return false;
+  PlutoDisplayInfo info{};
+  info.struct_size = sizeof(info);
+  const PlutoStatus info_status = presenter_ops_->info(presenter_, &info);
+  std::string geometry_error;
+  if (info_status != kPlutoStatusOk ||
+      !apply_presenter_display_info(info, &config_, &geometry_error)) {
+    presenter_ops_->close(presenter_);
+    presenter_ = nullptr;
+    presenter_ops_ = nullptr;
+    if (error != nullptr) {
+      *error = info_status != kPlutoStatusOk
+                   ? "startup step 4 failed: presenter info returned " +
+                         std::to_string(static_cast<int>(info_status))
+                   : "startup step 4 failed: " + geometry_error;
     }
-    presenter_display_info_ = info;
-    presenter_display_info_valid_ = true;
+    return false;
   }
-  qtfb_input_enabled_ = input_policy == QtfbInputPolicy::kCooperative;
-  if (qtfb_input_enabled_) {
-    std::cerr << "qtfb-input: using AppLoad pointer/key input; evdev "
-                 "touch/pen disabled\n";
-  }
+  presenter_display_info_ = info;
+  presenter_display_info_valid_ = true;
   rebuild_channel_context();
   return true;
 }
@@ -1703,15 +2323,17 @@ bool EngineHost::setup_renderer(std::string *error) {
   renderer_config.presenter_ops = presenter_ops_;
   renderer_config.presenter = presenter_;
   renderer_config.ready_file_path = config_.ready_file_path;
+  renderer_config.health_file_path = config_.health_file_path;
   renderer_config.start_presenter_thread = true;
   renderer_config.presenter_pen_focus_from_host =
-      presenter_has_pen_focus_hook(presenter_ops_);
-  // Automatic optical hygiene requires BOTH waveform-class control and real
-  // device completion. Direct SWTCON has those capabilities. qtfb only sends
-  // ALL/PARTIAL framebuffer updates to Xochitl and reports timer estimates,
-  // so it must fail closed until a real ghost-control/completion bridge exists.
+      presenter_ops_are_current(presenter_ops_);
+  // Automatic optical hygiene requires both waveform-class control and real
+  // device completion. Select it from behavior instead of a model or backend
+  // name so every native driver follows the same scheduler path.
   renderer_config.pigment_hygiene_supported =
-      config_.presenter_name == "swtcon";
+      presenter_display_info_valid_ &&
+      presenter_display_info_.controls_refresh_class &&
+      presenter_display_info_.reports_completion;
   renderer_config.enable_auto_ghostbuster =
       renderer_config.pigment_hygiene_supported;
   renderer_config.set_flutter_rendering_paused = [this](bool paused) {
@@ -1724,6 +2346,15 @@ bool EngineHost::setup_renderer(std::string *error) {
     event_loop_.post_closure([this] {
       std::cerr << "presenter: device lost; stopping for cold supervisor "
                    "restart\n";
+      request_shutdown();
+    });
+  };
+  renderer_config.on_health_file_failure = [this] {
+    // The record is the supervisor's proof that this exact renderer process
+    // and presenter loop are advancing. Stop rather than running unmonitored;
+    // the supervisor's independent stale deadline remains the final backstop.
+    event_loop_.post_closure([this] {
+      std::cerr << "renderer: health publication failed; stopping\n";
       request_shutdown();
     });
   };
@@ -1781,6 +2412,7 @@ bool EngineHost::assemble_project_args(std::string *error) {
   project_args_.command_line_argc = static_cast<int>(engine_argv_.size());
   project_args_.command_line_argv = engine_argv_.data();
   project_args_.platform_message_callback = &platform_message_callback;
+  project_args_.update_semantics_callback2 = &update_semantics_callback;
   project_args_.custom_task_runners = event_loop_.custom_task_runners();
   project_args_.compositor = &flutter_compositor_;
   project_args_.vsync_callback =
@@ -1868,10 +2500,22 @@ void EngineHost::rebuild_channel_context() {
   if (presenter_display_info_valid_) {
     context.is_color = presenter_display_info_.is_color;
   }
-  context.rotation = config_.rotation;
   context.pixel_format =
       config_.pixel_format == kPlutoPixelFormatGray8 ? "gray8" : "rgb565";
-  context.presenter_name = config_.presenter_name;
+  if (const GeneratedDeviceProfile *profile =
+          generated_device_profile_by_id(device_identity_.profile_id);
+      profile != nullptr) {
+    context.frontlight_brightness_path =
+        std::string(profile->runtime.frontlight_brightness_path);
+    if (!profile->runtime.vpdd_timeout_path.empty()) {
+      context.vpdd_length_path =
+          (std::filesystem::path(
+               std::string(profile->runtime.vpdd_timeout_path))
+               .parent_path() /
+           "vpdd_length")
+              .string();
+    }
+  }
   context.request_shutdown = [this] { request_shutdown(); };
   if (config_.enable_hibernation) {
     context.request_hibernate = [this] { request_hibernate(); };
@@ -1895,7 +2539,6 @@ void EngineHost::rebuild_channel_context() {
     return frame_renderer_->request_ghost_control(control);
   };
   context.system_ui_ready = [this] { return reveal_system_ui(); };
-  context.set_rotation = [this](int32_t rotation) { apply_rotation(rotation); };
   channels_.set_context(std::move(context));
 }
 

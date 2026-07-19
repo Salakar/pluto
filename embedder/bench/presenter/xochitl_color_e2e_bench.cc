@@ -1,5 +1,5 @@
 #include "pluto/presenter.h"
-#include "presenter/swtcon/drm_swtcon_presenter.h"
+#include "presenter/native/gallery3_drm_backend.h"
 #include "presenter/swtcon/phase_emit.h"
 #include "presenter/swtcon/pixel_engine.h"
 #include "presenter/swtcon/swtcon_constants.h"
@@ -757,7 +757,7 @@ class PenTruthPresenterHarness final {
         paths.eink + ",ct33_std=" + paths.ct33_std +
         ",ct33_best=" + paths.ct33_best + ",ct33_pen=" + paths.ct33_pen +
         ",ct33_fast=" + paths.ct33_fast;
-    ops_ = pluto_presenter_by_name("swtcon");
+    ops_ = pluto_gallery3_drm_presenter_ops();
     if (ops_ == nullptr) {
       if (error != nullptr) {
         *error = "swtcon presenter is not registered";
@@ -766,7 +766,7 @@ class PenTruthPresenterHarness final {
     }
     PlutoPresenterConfig config{};
     config.struct_size = sizeof(config);
-    config.backend_name = "swtcon";
+    config.backend_name = "gallery3_drm";
     config.options = options_.c_str();
     const PlutoStatus opened = ops_->open(&config, &presenter_);
     if (opened != kPlutoStatusOk || presenter_ == nullptr) {
@@ -844,9 +844,9 @@ class PenTruthPresenterHarness final {
     if (!run_iteration(-2, false) || !run_iteration(-1, false)) {
       return false;
     }
-    PlutoSwtconDebugStats before{};
+    PlutoGallery3DrmDebugStats before{};
     before.struct_size = sizeof(before);
-    if (pluto_swtcon_presenter_debug_stats(presenter_, &before) !=
+    if (pluto_gallery3_drm_presenter_debug_stats(presenter_, &before) !=
         kPlutoStatusOk) {
       if (error != nullptr) {
         *error = "PenTruth presenter pre-run stats failed";
@@ -858,9 +858,9 @@ class PenTruthPresenterHarness final {
         return false;
       }
     }
-    PlutoSwtconDebugStats after{};
+    PlutoGallery3DrmDebugStats after{};
     after.struct_size = sizeof(after);
-    if (pluto_swtcon_presenter_debug_stats(presenter_, &after) !=
+    if (pluto_gallery3_drm_presenter_debug_stats(presenter_, &after) !=
         kPlutoStatusOk) {
       if (error != nullptr) {
         *error = "PenTruth presenter post-run stats failed";

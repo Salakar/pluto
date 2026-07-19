@@ -12,7 +12,7 @@ void main() {
   });
 
   test(
-    'discovery probes model, firmware, runtime, xovi, and AppLoad',
+    'discovery probes model, firmware, and the native runtime marker',
     () async {
       late FakeTransport fake;
       final RemarkableDeviceDiscovery discovery = RemarkableDeviceDiscovery(
@@ -24,6 +24,12 @@ void main() {
                 return const CommandResult(
                   exitCode: 0,
                   stdout: 'imx93-chiappa',
+                );
+              }
+              if (command == 'cat /proc/device-tree/compatible') {
+                return const CommandResult(
+                  exitCode: 0,
+                  stdout: 'fsl,imx93\u0000',
                 );
               }
               if (command == 'cat /etc/version') {
@@ -41,6 +47,12 @@ void main() {
               if (command == 'uname -m') {
                 return const CommandResult(exitCode: 0, stdout: 'AARCH64\n');
               }
+              if (command == 'uname -r') {
+                return const CommandResult(
+                  exitCode: 0,
+                  stdout: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8\n',
+                );
+              }
               if (command.startsWith('test -e')) {
                 return const CommandResult(exitCode: 0);
               }
@@ -57,7 +69,7 @@ void main() {
 
       expect(devices, hasLength(1));
       expect(devices.single.model, 'chiappa');
-      expect(devices.single.runtimeBackend, PlutoRuntimeBackend.direct);
+      expect(devices.single.nativeRuntimeEnabled, isTrue);
       expect(devices.single.buildTarget, 'linux-arm64');
       expect(devices.single.buildModes, <String>[
         'release',
@@ -67,12 +79,15 @@ void main() {
       expect(devices.single.capabilities, contains('screenshot'));
       expect(devices.single.capabilities, contains('hot-reload'));
       expect(devices.single.architecture, 'aarch64');
+      expect(
+        devices.single.kernelRelease,
+        '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
+      );
       expect(devices.single.firmwareBuild, '20260629074044');
       expect(devices.single.firmwareVersion, '3.28.0.162');
       expect(devices.single.provisioned, isTrue);
-      expect(devices.single.xoviAvailable, isTrue);
-      expect(devices.single.appLoadAvailable, isTrue);
       expect(fake.commands, contains('cat /etc/version'));
+      expect(fake.commands, contains('uname -r'));
       expect(fake.commands, contains('cat /usr/share/remarkable/update.conf'));
       expect(devices.single.formatSummary(), contains('linux-arm64'));
     },
@@ -84,6 +99,12 @@ void main() {
       execHandler: (String command) async {
         if (command == 'cat /sys/devices/soc0/machine') {
           return const CommandResult(exitCode: 0, stdout: 'reMarkable 1.0');
+        }
+        if (command == 'cat /proc/device-tree/compatible') {
+          return const CommandResult(
+            exitCode: 0,
+            stdout: 'remarkable,zero-gravitas\u0000fsl,imx6sl',
+          );
         }
         if (command == 'cat /etc/version') {
           return const CommandResult(exitCode: 0, stdout: '20260612085811');
@@ -100,6 +121,12 @@ void main() {
         if (command == 'uname -m') {
           return const CommandResult(exitCode: 0, stdout: 'armv7l');
         }
+        if (command == 'uname -r') {
+          return const CommandResult(
+            exitCode: 0,
+            stdout: '5.4.70-v1.6.3-rm10x',
+          );
+        }
         return const CommandResult(exitCode: 1);
       },
     );
@@ -110,13 +137,22 @@ void main() {
 
     expect(device.firmwareBuild, '20260612085811');
     expect(device.firmwareVersion, '3.27.3.0');
+    expect(device.kernelRelease, '5.4.70-v1.6.3-rm10x');
   });
 
   test('probe normalizes live reMarkable 1 and 2 machine identities', () async {
-    for (final ({String machine, String model}) fixture
-        in <({String machine, String model})>[
-          (machine: 'reMarkable 1.0', model: 'zero-gravitas'),
-          (machine: 'reMarkable 2.0', model: 'zero-sugar'),
+    for (final ({String machine, String compatible, String model}) fixture
+        in <({String machine, String compatible, String model})>[
+          (
+            machine: 'reMarkable 1.0',
+            compatible: 'remarkable,zero-gravitas\u0000fsl,imx6sl',
+            model: 'zero-gravitas',
+          ),
+          (
+            machine: 'reMarkable 2.0',
+            compatible: 'fsl,imx7d-sdb\u0000fsl,imx7d',
+            model: 'zero-sugar',
+          ),
         ]) {
       final FakeTransport transport = FakeTransport(
         endpoint: const DeviceEndpoint(host: 'device'),
@@ -127,6 +163,9 @@ void main() {
           if (command == 'uname -m') {
             return const CommandResult(exitCode: 0, stdout: 'armv7l');
           }
+          if (command == 'cat /proc/device-tree/compatible') {
+            return CommandResult(exitCode: 0, stdout: fixture.compatible);
+          }
           return const CommandResult(exitCode: 1);
         },
       );
@@ -136,11 +175,6 @@ void main() {
       ).probe(id: 'usb', name: 'USB');
 
       expect(device.model, fixture.model, reason: fixture.machine);
-      expect(
-        device.runtimeBackend,
-        PlutoRuntimeBackend.cooperative,
-        reason: fixture.machine,
-      );
       expect(device.buildTarget, 'linux-arm', reason: fixture.machine);
       expect(device.buildModes, <String>['release'], reason: fixture.machine);
       expect(device.capabilities, isNot(contains('hot-reload')));
@@ -149,21 +183,29 @@ void main() {
   });
 
   test(
-    'probe falls back to legacy device-tree compatible identities',
+    'probe accepts device-tree model plus compatible conjunctively',
     () async {
-      for (final ({String compatible, String model}) fixture
-          in <({String compatible, String model})>[
+      for (final ({String compatible, String treeModel, String model}) fixture
+          in <({String compatible, String treeModel, String model})>[
             (
               compatible: 'remarkable,zero-gravitas\u0000fsl,imx7d',
+              treeModel: 'reMarkable 1.n',
               model: 'zero-gravitas',
             ),
-            (compatible: 'fsl,imx7d-sdb\u0000fsl,imx7d', model: 'zero-sugar'),
+            (
+              compatible: 'fsl,imx7d-sdb\u0000fsl,imx7d',
+              treeModel: 'reMarkable 2.n',
+              model: 'zero-sugar',
+            ),
           ]) {
         final FakeTransport transport = FakeTransport(
           endpoint: const DeviceEndpoint(host: 'device'),
           execHandler: (String command) async {
             if (command == 'cat /proc/device-tree/compatible') {
               return CommandResult(exitCode: 0, stdout: fixture.compatible);
+            }
+            if (command == 'cat /proc/device-tree/model') {
+              return CommandResult(exitCode: 0, stdout: fixture.treeModel);
             }
             if (command == 'uname -m') {
               return const CommandResult(exitCode: 0, stdout: 'armv7l');
@@ -197,7 +239,7 @@ void main() {
 
     final RemarkableDevice device = await DeviceProbe(
       transport: transport,
-    ).probe(id: 'usb', name: 'USB', allowHostnameFallback: false);
+    ).probe(id: 'usb', name: 'USB');
 
     expect(device.model, isNull);
     expect(transport.commands, isNot(contains('hostname')));
@@ -218,7 +260,9 @@ void main() {
           if (command == 'cat /proc/device-tree/compatible') {
             return const CommandResult(
               exitCode: 0,
-              stdout: 'remarkable,zero-sugar\u0000fsl,imx7d-sdb',
+              stdout:
+                  'remarkable,zero-gravitas\u0000fsl,imx6sl\u0000'
+                  'fsl,imx7d-sdb',
             );
           }
           if (command == 'hostname') {
@@ -236,7 +280,7 @@ void main() {
       ).probe(id: 'usb', name: 'USB');
 
       expect(device.model, isNull);
-      expect(device.runtimeBackend, isNull);
+      expect(device.nativeRuntimeEnabled, isFalse);
       expect(
         transport.commands,
         containsAll(<String>[
@@ -248,4 +292,23 @@ void main() {
       expect(transport.commands, isNot(contains('hostname')));
     },
   );
+
+  test('Dart matcher accepts and rejects every generated fixture', () {
+    for (final DeviceIdentityFixture fixture
+        in generatedAcceptedIdentityFixtures) {
+      expect(
+        matchDeviceProfile(fixture.evidence)?.id,
+        fixture.profileId,
+        reason: fixture.machine + fixture.deviceTreeModel,
+      );
+    }
+    for (final DeviceIdentityFixture fixture
+        in generatedRejectedIdentityFixtures) {
+      expect(
+        matchDeviceProfile(fixture.evidence),
+        isNull,
+        reason: fixture.machine + fixture.deviceTreeModel,
+      );
+    }
+  });
 }

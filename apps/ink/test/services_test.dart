@@ -99,7 +99,6 @@ void main() {
         ),
       );
 
-      expect(facts.model, RemarkableModel.paperProMove);
       expect(facts.panelWidth, 1000);
       expect(facts.panelHeight, 1700);
       expect(facts.dpi, 300);
@@ -120,14 +119,12 @@ void main() {
 
     test('presenterDrivesColor follows isColor exactly', () {
       const DeviceFacts color = DeviceFacts(
-        model: RemarkableModel.unknown,
         panelWidth: 1,
         panelHeight: 1,
         dpi: 1,
         isColor: true,
       );
       const DeviceFacts monochrome = DeviceFacts(
-        model: RemarkableModel.paperProMove,
         panelWidth: 1,
         panelHeight: 1,
         dpi: 1,
@@ -141,16 +138,14 @@ void main() {
       );
     });
 
-    test('physical class follows the hardware model, not color readiness', () {
+    test('physical class follows the generated panel capability', () {
       const DeviceFacts moveWithoutColor = DeviceFacts(
-        model: RemarkableModel.paperProMove,
         panelWidth: 1,
         panelHeight: 1,
         dpi: 1,
         isColor: false,
       );
       const DeviceFacts otherWithColor = DeviceFacts(
-        model: RemarkableModel.paperPro,
         panelWidth: 1,
         panelHeight: 1,
         dpi: 1,
@@ -159,7 +154,7 @@ void main() {
 
       expect(
         InkDisplayCaps.fromDevice(moveWithoutColor).physicalPanelClass,
-        InkPhysicalPanelClass.gallery3,
+        InkPhysicalPanelClass.monochrome,
       );
       expect(
         InkDisplayCaps.fromDevice(otherWithColor).physicalPanelClass,

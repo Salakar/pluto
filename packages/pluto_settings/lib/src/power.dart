@@ -38,18 +38,7 @@ final class PowerSettings {
       arguments: <String, Object?>{'ms': delay.inMilliseconds},
     );
   }
-
-  /// Suspends the device immediately.
-  Future<void> suspendNow() async {
-    await invokeVoid(_transport, powerSuspendNowMethod);
-  }
-
-  /// Compatibility alias for earlier scaffold consumers.
-  Future<void> suspend() => suspendNow();
 }
-
-/// Compatibility alias for older docs that used `Power`.
-typedef Power = PowerSettings;
 
 /// Immutable power policy snapshot.
 final class PowerPolicy {
@@ -61,6 +50,11 @@ final class PowerPolicy {
 
   /// Creates a power policy from a protocol map.
   factory PowerPolicy.fromMap(Map<String, Object?> map) {
+    requireExactKeys(
+      map,
+      'power.policy',
+      required: const <String>{'idleSuspendDelayMs', 'suspendPowerOffDelayMs'},
+    );
     return PowerPolicy(
       idleSuspendDelay: Duration(
         milliseconds: intAt(map, 'idleSuspendDelayMs'),

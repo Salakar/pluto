@@ -8,17 +8,8 @@ project(
 
 option(PLUTO_BUILD_TESTS "Build Pluto native tests" ON)
 option(PLUTO_FETCH_GTEST "Fetch GoogleTest when it is not installed" OFF)
-option(PLUTO_BUILD_SWTCON_PROBE "Build standalone SWTCON probe" OFF)
 
 find_package(Threads REQUIRED)
-
-add_library(pluto_abi STATIC src/abi.cc)
-target_include_directories(
-  pluto_abi
-  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_compile_features(pluto_abi PUBLIC cxx_std_20)
 
 add_library(
   pluto_renderer
@@ -48,7 +39,6 @@ target_include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(pluto_renderer PUBLIC pluto_abi)
 target_compile_features(pluto_renderer PUBLIC cxx_std_20)
 
 add_library(
@@ -92,13 +82,19 @@ add_library(
     src/engine/device_identity.cc
     src/engine/engine_host.cc
     src/engine/engine_loader.cc
-    src/engine/qtfb_input_bridge.cc
     src/ffi/dart_dl.cc
     src/glass_handoff.cc
     src/presenter/host_preview.cc
+    src/presenter/native/mxcfb/mxcfb_backend.cc
+    src/presenter/native/mxcfb/mxcfb_device.cc
+    src/presenter/native/native_presenter.cc
+    src/presenter/native/rm2/lcdif_tcon_backend.cc
+    src/presenter/native/rm2/mxs_lcdif_device.cc
+    src/presenter/native/rm2/rm2_cpu_frequency_lease.cc
+    src/presenter/native/rm2/rm2_scan_encoder.cc
+    src/presenter/native/rm2/rm2_waveform_program.cc
+    src/presenter/native/rm2/wbf_decoder.cc
     src/presenter/png_encoder.cc
-    src/presenter/qtfb/qtfb_client.cc
-    src/presenter/qtfb/qtfb_presenter.cc
     src/presenter/registry.cc
     src/presenter/swtcon/admission_mailbox.cc
     src/presenter/swtcon/ct33_frontend.cc
@@ -124,6 +120,7 @@ add_library(
     src/presenter/swtcon/xochitl_selector16.cc
     src/runtime/direct_control_server.cc
     src/runtime/event_loop.cc
+    src/runtime/health_file.cc
     src/runtime/lifecycle.cc
     src/runtime/sha256.cc
     src/runtime/vsync_pacer.cc
@@ -134,7 +131,7 @@ set_source_files_properties(
   src/presenter/host_preview.cc
   PROPERTIES
     COMPILE_DEFINITIONS
-      "pluto_presenter_by_name=pluto_host_preview_presenter_by_name_legacy;pluto_presenter_probe=pluto_host_preview_presenter_probe_legacy"
+      "pluto_presenter_by_name=pluto_host_preview_presenter_by_name_internal;pluto_presenter_probe=pluto_host_preview_presenter_probe_internal"
 )
 target_include_directories(
   pluto_embedder_core
@@ -146,7 +143,6 @@ target_include_directories(
 target_link_libraries(
   pluto_embedder_core
   PUBLIC
-    pluto_abi
     pluto_renderer
     pluto_input
     Threads::Threads
@@ -161,6 +157,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(pluto-embedder PRIVATE -Wl,--export-dynamic-symbol=pluto_*)
 endif()
 
+if(NOT CMAKE_CROSSCOMPILING)
+  add_executable(pluto_wbf_inspect tools/wbf_inspect.cc)
+  target_link_libraries(pluto_wbf_inspect PRIVATE pluto_embedder_core)
+  target_compile_features(pluto_wbf_inspect PRIVATE cxx_std_20)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(pluto_wbf_inspect PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endif()
+
 add_executable(pluto_renderer_bench bench/renderer/simple_bench.cc)
 target_link_libraries(pluto_renderer_bench PRIVATE pluto_renderer)
 target_compile_features(pluto_renderer_bench PRIVATE cxx_std_20)
@@ -171,6 +176,40 @@ add_executable(pluto_presenter_bench bench/presenter/engine_bench.cc)
 target_link_libraries(pluto_presenter_bench PRIVATE pluto_embedder_core)
 target_include_directories(pluto_presenter_bench PRIVATE test/presenter)
 target_compile_features(pluto_presenter_bench PRIVATE cxx_std_20)
+
+# RM2 preparation evidence: exhaustive RGB565 correctness, WBF representation,
+# exact scan-cell packing, and paced phase soak. ARMv7 is the release gate.
+add_executable(rm2_encoder_bench bench/presenter/rm2_encoder_bench.cc)
+target_link_libraries(rm2_encoder_bench PRIVATE pluto_embedder_core)
+target_include_directories(rm2_encoder_bench PRIVATE test/presenter)
+target_compile_features(rm2_encoder_bench PRIVATE cxx_std_20)
+
+# RM1 warm-handoff optical-state A/B. The target is deliberately part of the
+# ARMv7 build so the generated RGB565 LUT is accepted from Cortex-A9 numbers,
+# not host extrapolation.
+add_executable(
+  rm1_handoff_lut_bench
+  bench/presenter/rm1_handoff_lut_bench.cc
+)
+target_link_libraries(rm1_handoff_lut_bench PRIVATE pluto_renderer)
+target_compile_features(rm1_handoff_lut_bench PRIVATE cxx_std_20)
+
+# RM1 framebuffer ownership A/B. This is a CPU/RSS-only target: it models the
+# exact panel and framebuffer strides without opening /dev/fb0, so it can run
+# beside stock Xochitl on an acceptance tablet.
+add_executable(
+  rm1_framebuffer_copy_bench
+  bench/presenter/rm1_framebuffer_copy_bench.cc
+)
+target_compile_features(rm1_framebuffer_copy_bench PRIVATE cxx_std_20)
+
+# RM1 damage-policy area accounting. This target models the exact panel
+# geometry only and never opens /dev/fb0, so it can run beside stock Xochitl.
+add_executable(
+  rm1_damage_amplification_bench
+  bench/presenter/rm1_damage_amplification_bench.cc
+)
+target_compile_features(rm1_damage_amplification_bench PRIVATE cxx_std_20)
 
 # Full Paper Pro Move warm-handoff bundle benchmark. This intentionally uses
 # the production serializer (including checksums, fsync, and atomic rename)
@@ -249,16 +288,16 @@ add_executable(renderer_replay tools/renderer_replay.cc)
 target_link_libraries(renderer_replay PRIVATE pluto_embedder_core)
 target_compile_features(renderer_replay PRIVATE cxx_std_20)
 
-if(PLUTO_BUILD_SWTCON_PROBE)
-  add_subdirectory(src/presenter/swtcon/tools)
-endif()
-
 include(CTest)
 if(BUILD_TESTING)
   add_test(NAME pluto_embedder_smoke COMMAND pluto-embedder)
   add_test(
     NAME pluto_embedder_default_release
-    COMMAND pluto-embedder --print-config
+    COMMAND
+      pluto-embedder
+      --engine=/explicit/test-engine.so
+      --icu-data=/explicit/test-icudtl.dat
+      --print-config
   )
   set_tests_properties(
     pluto_embedder_default_release
@@ -266,7 +305,12 @@ if(BUILD_TESTING)
   )
   add_test(
     NAME pluto_embedder_explicit_debug
-    COMMAND pluto-embedder --debug --print-config
+    COMMAND
+      pluto-embedder
+      --engine=/explicit/test-engine.so
+      --icu-data=/explicit/test-icudtl.dat
+      --debug
+      --print-config
   )
   set_tests_properties(
     pluto_embedder_explicit_debug
@@ -282,20 +326,25 @@ if(BUILD_TESTING)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(pluto_abi PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_renderer PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_input PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_embedder_core PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto-embedder PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_renderer_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(pluto_presenter_bench PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(rm2_encoder_bench PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(rm1_handoff_lut_bench PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(
+    rm1_framebuffer_copy_bench PRIVATE -Wall -Wextra -Wpedantic
+  )
+  target_compile_options(
+    rm1_damage_amplification_bench PRIVATE -Wall -Wextra -Wpedantic
+  )
   target_compile_options(xochitl_mapped_sweep_bench PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(renderer_replay PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
-  add_subdirectory(test)
-
   find_package(GTest QUIET)
   if(NOT GTest_FOUND AND PLUTO_FETCH_GTEST)
     include(FetchContent)
@@ -426,14 +475,18 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
     test/engine/engine_host_test.cc
     test/engine/engine_loader_test.cc
     test/engine/lifecycle_test.cc
-    test/engine/qtfb_input_bridge_test.cc
+    test/presenter/mxcfb_backend_test.cc
+    test/presenter/mxcfb_device_test.cc
     test/presenter/png_encoder_test.cc
+    test/presenter/native_presenter_test.cc
     test/runtime/sha256_test.cc
+    test/runtime/health_file_test.cc
     test/runtime/vsync_pacer_test.cc
     test/sensors/iio_test.cc
   )
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND PLUTO_EMBEDDER_CORE_TEST_SOURCES
+      test/runtime/direct_control_server_test.cc
       test/runtime/event_loop_test.cc
     )
   endif()
@@ -474,6 +527,116 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
       target_compile_options(pluto_embedder_core_test PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME pluto_embedder_core_test COMMAND pluto_embedder_core_test)
+  endif()
+
+  # Keep the RM1 MXCFB safety and warm-handoff contract independently
+  # runnable. The focused target is used for host sanitizer gates
+  # without pulling unrelated engine/channel tests into the result.
+  if(DEFINED PLUTO_RENDERER_GTEST_MAIN)
+    add_executable(
+      pluto_rm1_native_test
+      test/presenter/mxcfb_backend_test.cc
+      test/presenter/mxcfb_device_test.cc
+    )
+    target_link_libraries(
+      pluto_rm1_native_test
+      PRIVATE
+        pluto_embedder_core
+        ${PLUTO_RENDERER_GTEST_MAIN}
+    )
+    gtest_discover_tests(pluto_rm1_native_test)
+  else()
+    add_executable(
+      pluto_rm1_native_test
+      test/presenter/mxcfb_backend_test.cc
+      test/presenter/mxcfb_device_test.cc
+      test/renderer/gtest_main.cc
+    )
+    target_include_directories(pluto_rm1_native_test PRIVATE test/renderer)
+    target_link_libraries(pluto_rm1_native_test PRIVATE pluto_embedder_core)
+    add_test(NAME pluto_rm1_native_test COMMAND pluto_rm1_native_test)
+  endif()
+  target_compile_features(pluto_rm1_native_test PRIVATE cxx_std_20)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+      pluto_rm1_native_test PRIVATE -Wall -Wextra -Wpedantic
+    )
+  endif()
+
+  if(DEFINED PLUTO_RENDERER_GTEST_MAIN)
+    add_executable(
+      pluto_wbf_decoder_test
+      test/presenter/wbf_decoder_test.cc
+    )
+    target_link_libraries(
+      pluto_wbf_decoder_test
+      PRIVATE
+        pluto_embedder_core
+        ${PLUTO_RENDERER_GTEST_MAIN}
+    )
+    gtest_discover_tests(pluto_wbf_decoder_test)
+  else()
+    add_executable(
+      pluto_wbf_decoder_test
+      test/presenter/wbf_decoder_test.cc
+      test/renderer/gtest_main.cc
+    )
+    target_include_directories(pluto_wbf_decoder_test PRIVATE test/renderer)
+    target_link_libraries(pluto_wbf_decoder_test PRIVATE pluto_embedder_core)
+    add_test(NAME pluto_wbf_decoder_test COMMAND pluto_wbf_decoder_test)
+  endif()
+  target_compile_features(pluto_wbf_decoder_test PRIVATE cxx_std_20)
+  target_compile_definitions(
+    pluto_wbf_decoder_test
+    PRIVATE
+      PLUTO_RM2_WBF_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../analysis/native-cutover/rm2/vendor/active.wbf"
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+      pluto_wbf_decoder_test PRIVATE -Wall -Wextra -Wpedantic
+    )
+  endif()
+
+  if(DEFINED PLUTO_RENDERER_GTEST_MAIN)
+    add_executable(
+      pluto_rm2_native_test
+      test/presenter/lcdif_tcon_backend_test.cc
+      test/presenter/mxs_lcdif_device_test.cc
+      test/presenter/rm2_cpu_frequency_lease_test.cc
+      test/presenter/rm2_scan_encoder_test.cc
+      test/presenter/rm2_waveform_program_test.cc
+    )
+    target_link_libraries(
+      pluto_rm2_native_test
+      PRIVATE
+        pluto_embedder_core
+        ${PLUTO_RENDERER_GTEST_MAIN}
+    )
+    gtest_discover_tests(pluto_rm2_native_test)
+  else()
+    add_executable(
+      pluto_rm2_native_test
+      test/presenter/lcdif_tcon_backend_test.cc
+      test/presenter/mxs_lcdif_device_test.cc
+      test/presenter/rm2_cpu_frequency_lease_test.cc
+      test/presenter/rm2_scan_encoder_test.cc
+      test/presenter/rm2_waveform_program_test.cc
+      test/renderer/gtest_main.cc
+    )
+    target_include_directories(pluto_rm2_native_test PRIVATE test/renderer)
+    target_link_libraries(pluto_rm2_native_test PRIVATE pluto_embedder_core)
+    add_test(NAME pluto_rm2_native_test COMMAND pluto_rm2_native_test)
+  endif()
+  target_compile_features(pluto_rm2_native_test PRIVATE cxx_std_20)
+  target_compile_definitions(
+    pluto_rm2_native_test
+    PRIVATE
+      PLUTO_RM2_WBF_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/../analysis/native-cutover/rm2/vendor/active.wbf"
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(
+      pluto_rm2_native_test PRIVATE -Wall -Wextra -Wpedantic
+    )
   endif()
 
   # Keep the bundle's corruption/atomicity/large exact-color tests independently
@@ -519,7 +682,6 @@ if(BUILD_TESTING AND PLUTO_BUILD_TESTS)
     test/presenter/l0_trace_test.cc
     test/presenter/phase_emit_test.cc
     test/presenter/pixel_engine_test.cc
-    test/presenter/qtfb_presenter_test.cc
     test/presenter/scan_loop_test.cc
     test/presenter/sweep_kernels_test.cc
     test/presenter/swtcon_dc_ledger_test.cc

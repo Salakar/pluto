@@ -3,6 +3,11 @@
 A port of [paper-codex](../../../paper-codex) to Pluto: an intelligent paper
 notebook, driven by the OpenAI Codex CLI running on-device.
 
+Paper Codex targets `linux-arm64` only. Upstream Codex does not publish a
+native ARMv7 CLI, and Pluto deliberately does not maintain its own port.
+reMarkable 1 and 2 therefore omit this optional app while using the same Pluto
+release, provision, launcher, and app-management flow for their supported set.
+
 The page is the product. Conversation lives on ruled paper: your words in blue
 Caveat handwriting, Codex's replies in EB Garamond ink that writes itself onto
 the page like the Marauder's Map. No chrome, no bubbles, no toolbars — every

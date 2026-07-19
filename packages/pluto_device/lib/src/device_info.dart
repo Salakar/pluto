@@ -2,44 +2,7 @@ import 'dart:ui';
 
 import 'package:pluto_core/pluto_core.dart';
 
-/// Known reMarkable models, keyed by board codename.
-enum RemarkableModel {
-  /// reMarkable 1.
-  remarkable1(codename: 'zero-gravitas'),
-
-  /// reMarkable 2.
-  remarkable2(codename: 'zero-sugar'),
-
-  /// reMarkable Paper Pro.
-  paperPro(codename: 'ferrari'),
-
-  /// reMarkable Paper Pro Move.
-  paperProMove(codename: 'chiappa'),
-
-  /// reMarkable Paper Pure.
-  paperPure(codename: 'tatsu'),
-
-  /// Unrecognized hardware.
-  unknown(codename: '');
-
-  const RemarkableModel({required this.codename});
-
-  /// Board codename.
-  final String codename;
-
-  /// Returns the model for a protocol enum [name] or board [codename].
-  static RemarkableModel parse(String name, String codename) {
-    for (final RemarkableModel model in RemarkableModel.values) {
-      if (model.name == name || model.codename == codename) {
-        return model;
-      }
-    }
-    return RemarkableModel.unknown;
-  }
-}
-
-/// Compatibility alias retained for older package consumers.
-typedef DeviceModel = RemarkableModel;
+import 'generated/remarkable_models.g.dart';
 
 /// Panel pixel formats Pluto renders to.
 enum PanelPixelFormat {
@@ -135,7 +98,7 @@ final class DeviceInfo {
     this.serialNumber,
   });
 
-  /// Recognized model, or [RemarkableModel.unknown].
+  /// Exact model accepted by the generated release profile table.
   final RemarkableModel model;
 
   /// Raw board codename.

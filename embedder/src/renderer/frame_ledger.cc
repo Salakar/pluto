@@ -80,7 +80,6 @@ bool FrameLedger::export_state(FrameLedgerState *out) const {
     return false;
   }
   FrameLedgerState state;
-  state.version = kStateVersion;
   state.config = FrameLedgerConfig{width_, height_, tile_px_};
   state.stride = stride_;
   state.chroma_stride = chroma_stride_;
@@ -98,11 +97,10 @@ bool FrameLedger::export_state(FrameLedgerState *out) const {
 }
 
 bool FrameLedger::import_state(const FrameLedgerState &state) {
-  if (!valid_ || state.version != kStateVersion ||
-      state.config.width != width_ || state.config.height != height_ ||
-      state.config.tile_px != tile_px_ || state.stride != stride_ ||
-      state.chroma_stride != chroma_stride_ || state.cur_hash > 1u ||
-      state.levels.size() != l_cur_.size() ||
+  if (!valid_ || state.config.width != width_ ||
+      state.config.height != height_ || state.config.tile_px != tile_px_ ||
+      state.stride != stride_ || state.chroma_stride != chroma_stride_ ||
+      state.cur_hash > 1u || state.levels.size() != l_cur_.size() ||
       state.chroma_bits.size() != chroma_bits_.size() ||
       state.row_hash[0].size() != row_hash_[0].size() ||
       state.row_hash[1].size() != row_hash_[1].size() ||

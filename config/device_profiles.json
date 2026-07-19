@@ -1,0 +1,326 @@
+{
+  "profiles": [
+    {
+      "id": "rm1",
+      "wireModel": "remarkable1",
+      "codename": "zero-gravitas",
+      "marketingName": "reMarkable 1",
+      "testedOs": "3.27.3.0",
+      "identity": {
+        "architectures": [
+          "armv7l"
+        ],
+        "boardTokens": [
+          "remarkable 1.0",
+          "remarkable 1.n",
+          "zero-gravitas"
+        ],
+        "compatibleTokens": [
+          "remarkable,zero-gravitas",
+          "fsl,imx6sl"
+        ]
+      },
+      "targetSlice": "linux-arm",
+      "displayDriver": "mxcfb_epdc",
+      "panel": {
+        "width": 1404,
+        "height": 1872,
+        "dpi": 226,
+        "signature": "ES103CS1",
+        "sourcePixelFormat": "rgb565",
+        "color": false
+      },
+      "runtime": {
+        "nativeSessionEnabled": true,
+        "firmwareBuild": "20260612085811",
+        "kernelRelease": "5.4.70-v1.6.3-rm10x",
+        "maxResidentApps": 2,
+        "takeoverQuiesceMilliseconds": 5500,
+        "supervisorControlPollMilliseconds": 200,
+        "displayDevice": "/dev/fb0",
+        "display": {
+          "scanoutWidth": 1404,
+          "scanoutHeight": 1872,
+          "virtualWidth": 1408,
+          "virtualHeight": 3840,
+          "strideBytes": 2816,
+          "mappingBytes": 10813440,
+          "bitsPerPixel": 16,
+          "rotation": 1,
+          "bufferSlots": null,
+          "slotBytes": null,
+          "damageAlignmentPixels": 1,
+          "phaseIntervalNanoseconds": null
+        },
+        "waveform": {
+          "discoveryPaths": [
+            "/lib/firmware/imx/epdc/epdc_ES103CS1.fw"
+          ],
+          "acceptedSources": [
+            {
+              "path": "/lib/firmware/imx/epdc/epdc_ES103CS1.fw",
+              "sha256": "185515bebf37d3e9d99ffa1f13a2804bbb2b64464fa6fc5067475fb6f65ff6b0",
+              "panelSignature": "ES103CS1"
+            }
+          ]
+        },
+        "waveformOptionKey": null,
+        "presenterOptions": null,
+        "pen": {
+          "byPath": "/dev/input/by-path/platform-21a4000.i2c-event-mouse",
+          "name": "Wacom I2C Digitizer"
+        },
+        "touch": {
+          "byPath": "/dev/input/by-path/platform-21a8000.i2c-event",
+          "name": "cyttsp5_mt"
+        },
+        "powerKey": {
+          "byPath": "/dev/input/by-path/platform-gpio-keys-event",
+          "name": "gpio-keys"
+        },
+        "frontlightBrightnessPath": null,
+        "vpddTimeoutPath": null,
+        "bezelRedrawIioPath": null,
+        "bezelRedrawEnablePath": null,
+        "recovery": {
+          "confirmationStrategy": "uboot_env",
+          "failureStrategy": "uboot_env_force_reboot",
+          "bootDefaultEnabled": false,
+          "mmcDevice": "/dev/mmcblk1",
+          "rootPartitions": [
+            2,
+            3
+          ],
+          "expectedBootLimit": 1,
+          "helperPath": null,
+          "counterDirectory": null
+        },
+        "suspendCommand": "systemctl start --wait suspend.target"
+      },
+      "buildModes": [
+        "release"
+      ],
+      "capabilities": [
+        "pen",
+        "touch",
+        "refresh-control",
+        "real-completion"
+      ]
+    },
+    {
+      "id": "rm2",
+      "wireModel": "remarkable2",
+      "codename": "zero-sugar",
+      "marketingName": "reMarkable 2",
+      "testedOs": "3.28.0.162",
+      "identity": {
+        "architectures": [
+          "armv7l"
+        ],
+        "boardTokens": [
+          "remarkable 2.0",
+          "remarkable 2.n",
+          "zero-sugar"
+        ],
+        "compatibleTokens": [
+          "fsl,imx7d-sdb"
+        ]
+      },
+      "targetSlice": "linux-arm",
+      "displayDriver": "lcdif_tcon",
+      "panel": {
+        "width": 1404,
+        "height": 1872,
+        "dpi": 226,
+        "signature": "ED103TC2C5",
+        "sourcePixelFormat": "rgb565",
+        "color": false
+      },
+      "runtime": {
+        "nativeSessionEnabled": true,
+        "firmwareBuild": "20260629074044",
+        "kernelRelease": "5.4.70-v1.6.3-rm11x",
+        "maxResidentApps": 4,
+        "takeoverQuiesceMilliseconds": 300,
+        "supervisorControlPollMilliseconds": 100,
+        "displayDevice": "/dev/fb0",
+        "display": {
+          "scanoutWidth": 260,
+          "scanoutHeight": 1408,
+          "virtualWidth": 260,
+          "virtualHeight": 23936,
+          "strideBytes": 1040,
+          "mappingBytes": 33554432,
+          "bitsPerPixel": 32,
+          "rotation": 0,
+          "bufferSlots": 17,
+          "slotBytes": 1464320,
+          "damageAlignmentPixels": 8,
+          "phaseIntervalNanoseconds": 11763000
+        },
+        "waveform": {
+          "discoveryPaths": [
+            "/var/lib/uboot/320_R405_AFA011_ED103TC2C5_VB3300-KCD_TC.wbf",
+            "/usr/share/remarkable/320_R467_AF4731_ED103TC2C6_VB3300-KCD_TC.wbf"
+          ],
+          "acceptedSources": [
+            {
+              "path": "/var/lib/uboot/320_R405_AFA011_ED103TC2C5_VB3300-KCD_TC.wbf",
+              "sha256": "79783d751ba066af12c6ac5aca46279fe7c79d4ef834105bd46824f870f9c6f8",
+              "panelSignature": "ED103TC2C5"
+            }
+          ]
+        },
+        "waveformOptionKey": "wbf",
+        "presenterOptions": null,
+        "pen": {
+          "byPath": "/dev/input/by-path/platform-30a20000.i2c-event-mouse",
+          "name": "Wacom I2C Digitizer"
+        },
+        "touch": {
+          "byPath": "/dev/input/by-path/platform-30a40000.i2c-event",
+          "name": "pt_mt"
+        },
+        "powerKey": {
+          "byPath": "/dev/input/by-path/platform-30370000.snvs:snvs-powerkey-event",
+          "name": "30370000.snvs:snvs-powerkey"
+        },
+        "frontlightBrightnessPath": null,
+        "vpddTimeoutPath": null,
+        "bezelRedrawIioPath": null,
+        "bezelRedrawEnablePath": null,
+        "recovery": {
+          "confirmationStrategy": "uboot_env",
+          "failureStrategy": "uboot_env_force_reboot",
+          "bootDefaultEnabled": false,
+          "mmcDevice": "/dev/mmcblk2",
+          "rootPartitions": [
+            2,
+            3
+          ],
+          "expectedBootLimit": 1,
+          "helperPath": null,
+          "counterDirectory": null
+        },
+        "suspendCommand": "systemctl start --wait suspend.target"
+      },
+      "buildModes": [
+        "release"
+      ],
+      "capabilities": [
+        "pen",
+        "touch",
+        "refresh-control",
+        "real-completion"
+      ]
+    },
+    {
+      "id": "move",
+      "wireModel": "paperProMove",
+      "codename": "chiappa",
+      "marketingName": "reMarkable Paper Pro Move",
+      "testedOs": "3.28.0.162",
+      "identity": {
+        "architectures": [
+          "aarch64"
+        ],
+        "boardTokens": [
+          "chiappa"
+        ],
+        "compatibleTokens": [
+          "fsl,imx93"
+        ]
+      },
+      "targetSlice": "linux-arm64",
+      "displayDriver": "gallery3_drm",
+      "panel": {
+        "width": 954,
+        "height": 1696,
+        "dpi": 264,
+        "signature": "AC073MC1F2",
+        "sourcePixelFormat": "rgb565",
+        "color": true
+      },
+      "runtime": {
+        "nativeSessionEnabled": true,
+        "firmwareBuild": "20260629074044",
+        "kernelRelease": "6.12.49+git-imx93-chiappa-gf4c2ab7040e8",
+        "maxResidentApps": 4,
+        "takeoverQuiesceMilliseconds": 300,
+        "supervisorControlPollMilliseconds": 50,
+        "displayDevice": "/dev/dri/card0",
+        "display": {
+          "scanoutWidth": 365,
+          "scanoutHeight": 1700,
+          "virtualWidth": null,
+          "virtualHeight": null,
+          "strideBytes": null,
+          "mappingBytes": null,
+          "bitsPerPixel": 16,
+          "rotation": null,
+          "bufferSlots": 16,
+          "slotBytes": 1241000,
+          "damageAlignmentPixels": 8,
+          "phaseIntervalNanoseconds": 11764706
+        },
+        "waveform": {
+          "discoveryPaths": [
+            "/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink"
+          ],
+          "acceptedSources": [
+            {
+              "path": "/usr/share/remarkable/GAL3_AAB0AM_IC0801_AC073MC1F2_AD1004-GCA_TC.eink",
+              "sha256": "80b8174773effceefbc16b54722cc0afd2187bd9a7c260a71bfbf92baeae8b67",
+              "panelSignature": "AC073MC1F2"
+            }
+          ]
+        },
+        "waveformOptionKey": "eink",
+        "presenterOptions": "exact_color=1,enable_rails=1,vcom=-0.62",
+        "pen": {
+          "byPath": "/dev/input/by-path/platform-44360000.spi-cs-0-event-mouse",
+          "name": "Elan marker input"
+        },
+        "touch": {
+          "byPath": "/dev/input/by-path/platform-44360000.spi-cs-0-event",
+          "name": "Elan touch input"
+        },
+        "powerKey": {
+          "byPath": "/dev/input/by-path/platform-44440000.bbnsm:pwrkey-event",
+          "name": "44440000.bbnsm:pwrkey"
+        },
+        "frontlightBrightnessPath": "/sys/class/backlight/rm_frontlight/brightness",
+        "vpddTimeoutPath": "/sys/bus/i2c/drivers/g2194-regulator/0-0048/vpdd_timeout_ms",
+        "bezelRedrawIioPath": "/dev/iio:device3",
+        "bezelRedrawEnablePath": "/sys/bus/iio/devices/iio:device3/events/in_accel0_gesture_doubletap_en",
+        "recovery": {
+          "confirmationStrategy": "lpgpr_counter",
+          "failureStrategy": "unverified",
+          "bootDefaultEnabled": false,
+          "mmcDevice": null,
+          "rootPartitions": null,
+          "expectedBootLimit": null,
+          "helperPath": "/usr/sbin/rm-reset-boot-count.sh",
+          "counterDirectory": "/sys/devices/platform/lpgpr"
+        },
+        "suspendCommand": "systemctl start --wait suspend.target"
+      },
+      "buildModes": [
+        "release",
+        "profile",
+        "debug"
+      ],
+      "capabilities": [
+        "pen",
+        "touch",
+        "frontlight",
+        "refresh-control",
+        "real-completion",
+        "color-quantization",
+        "overlap-supersession",
+        "exact-color-handoff",
+        "hot-reload"
+      ]
+    }
+  ]
+}

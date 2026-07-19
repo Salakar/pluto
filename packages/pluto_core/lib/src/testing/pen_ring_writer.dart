@@ -9,9 +9,9 @@ final class PenRingWriter {
       throw ArgumentError.value(capacity, 'capacity', 'must be a power of two');
     }
     _data.setUint32(0, magic, Endian.little);
-    _data.setUint32(4, 1, Endian.little);
-    _data.setUint32(8, recordSize, Endian.little);
-    _data.setUint32(12, capacity, Endian.little);
+    _data.setUint32(4, recordSize, Endian.little);
+    _data.setUint32(8, capacity, Endian.little);
+    _data.setUint32(12, 0, Endian.little);
   }
 
   /// Magic value for the `PLTR` ring.

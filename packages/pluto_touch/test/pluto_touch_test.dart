@@ -5,20 +5,18 @@ import 'package:pluto_touch/pluto_touch.dart';
 import 'package:pluto_touch/pluto_touch_testing.dart';
 
 void main() {
-  test('fake touch events emit point views', () async {
-    const TouchPoint point = TouchPoint(
-      timestamp: Duration(milliseconds: 5),
-      id: 1,
-      position: Offset(30, 40),
-      phase: TouchPhase.down,
+  test('fake touch events emit typed events', () async {
+    final TouchDownEvent event = TouchDownEvent(
+      timestamp: const Duration(milliseconds: 5),
+      contact: _contact(1, const Offset(30, 40)),
     );
 
-    final TouchPoint emitted = await FakeTouchEvents.single(
-      point,
-    ).points.single;
+    final TouchEvent emitted = await FakeTouchEvents(
+      Stream<TouchEvent>.value(event),
+    ).events.single;
 
-    expect(emitted.id, 1);
-    expect(emitted.phase, TouchPhase.down);
+    expect(emitted, same(event));
+    expect(emitted.contact.trackingId, 1);
   });
 
   test('touch facade decodes config and capabilities', () async {
@@ -129,6 +127,36 @@ void main() {
       expect(await twoFinger, isA<TwoFingerTapGesture>());
     },
   );
+
+  test('touch tool wire values are exact strings', () {
+    for (final MapEntry<String, TouchToolType> entry
+        in const <String, TouchToolType>{
+          'finger': TouchToolType.finger,
+          'palm': TouchToolType.palm,
+          'unknown': TouchToolType.unknown,
+        }.entries) {
+      expect(
+        TouchContact.fromMap(<String, Object?>{
+          ..._touchPayload('move'),
+          'toolType': entry.key,
+        }).toolType,
+        entry.value,
+      );
+    }
+
+    for (final Object? toolType in <Object?>[0, 1, 'stylus', null]) {
+      expect(
+        () => TouchContact.fromMap(<String, Object?>{
+          ..._touchPayload('move'),
+          'toolType': toolType,
+        }),
+        throwsFormatException,
+      );
+    }
+    final Map<String, Object?> missing = _touchPayload('move')
+      ..remove('toolType');
+    expect(() => TouchContact.fromMap(missing), throwsFormatException);
+  });
 
   test('long press, swipe, and two-finger recognizers emit gestures', () async {
     final TouchContact first = _contact(1, const Offset(10, 10));

@@ -279,7 +279,9 @@ final class PenSampleBatch {
 const int _magic = 0x52544c50;
 const int _recordSize = 40;
 const int _headerSize = 64;
-const int _capacityOffset = 12;
+const int _recordSizeOffset = 4;
+const int _capacityOffset = 8;
+const int _reservedOffset = 12;
 const int _writeIndexOffset = 16;
 const int _droppedOffset = 24;
 const int _flagEraser = 0x4;
@@ -289,26 +291,39 @@ const int _flagSecondary = 0x10;
 PenEvent _penEventFromMap(Map<String, Object?> map) {
   final PenSample sample = PenSample.fromMap(map);
   return switch (_stringAt(map, 'event')) {
-    'enteredProximity' || 'enter' => PenEnteredProximityEvent(sample: sample),
+    'enter' => PenEnteredProximityEvent(sample: sample),
     'hover' => PenHoverEvent(sample: sample),
     'down' => PenDownEvent(sample: sample),
     'move' => PenMoveEvent(sample: sample),
     'up' => PenUpEvent(sample: sample),
-    'leftProximity' || 'leave' => PenLeftProximityEvent(sample: sample),
-    'buttonsChanged' || 'buttons' => PenButtonsChangedEvent(
+    'leave' => PenLeftProximityEvent(sample: sample),
+    'buttons' => PenButtonsChangedEvent(
       sample: sample,
-      previous: PenButtons(_optionalIntAt(map, 'previousButtons') ?? 0),
+      previous: PenButtons(_intAt(map, 'previousButtons')),
     ),
     _ => throw const FormatException('Unknown pen event.'),
   };
 }
 
 void _validateHeader(ByteData data) {
+  if (data.lengthInBytes < _headerSize) {
+    throw const FormatException('Invalid pen ring header size.');
+  }
   if (data.getUint32(0, Endian.little) != _magic) {
     throw const FormatException('Invalid pen ring magic.');
   }
-  if (data.getUint32(8, Endian.little) != _recordSize) {
+  if (data.getUint32(_recordSizeOffset, Endian.little) != _recordSize) {
     throw const FormatException('Invalid pen ring record size.');
+  }
+  final int capacity = data.getUint32(_capacityOffset, Endian.little);
+  if (capacity == 0 || (capacity & (capacity - 1)) != 0) {
+    throw const FormatException('Invalid pen ring capacity.');
+  }
+  if (data.getUint32(_reservedOffset, Endian.little) != 0) {
+    throw const FormatException('Invalid pen ring reserved field.');
+  }
+  if (data.lengthInBytes != _headerSize + capacity * _recordSize) {
+    throw const FormatException('Invalid pen ring byte size.');
   }
 }
 
@@ -334,11 +349,8 @@ String _stringAt(Map<String, Object?> map, String key) {
   throw FormatException('Expected $key to be a string.');
 }
 
-int? _optionalIntAt(Map<String, Object?> map, String key) {
+int _intAt(Map<String, Object?> map, String key) {
   final Object? value = map[key];
-  if (value == null) {
-    return null;
-  }
   if (value is int) {
     return value;
   }

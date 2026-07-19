@@ -45,19 +45,6 @@ final class Frontlight {
       arguments: <String, Object?>{'raw': raw},
     );
   }
-
-  /// Emits whenever the brightness changes.
-  Stream<FrontlightState> get onChanged {
-    return _transport
-        .events(
-          channel: plutoSettingsEventsChannel,
-          arguments: const <String, Object?>{'topic': 'frontlight'},
-        )
-        .map(
-          (Object? event) =>
-              FrontlightState.fromMap(stringMap(event, 'frontlight event')),
-        );
-  }
 }
 
 /// Immutable frontlight snapshot.
@@ -67,6 +54,11 @@ final class FrontlightState {
 
   /// Creates a frontlight snapshot from a protocol map.
   factory FrontlightState.fromMap(Map<String, Object?> map) {
+    requireExactKeys(
+      map,
+      'frontlight',
+      required: const <String>{'raw', 'maxRaw'},
+    );
     return FrontlightState(
       raw: intAt(map, 'raw'),
       maxRaw: intAt(map, 'maxRaw'),

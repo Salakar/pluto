@@ -117,7 +117,6 @@ struct ClassifyTileHistoryState {
 };
 
 struct ClassifyLadderState {
-  uint32_t version = 1;
   ClassifyLadderConfig config{};
   uint32_t epoch = 0;
   std::vector<ClassifyTileHistoryState> history;
@@ -125,7 +124,6 @@ struct ClassifyLadderState {
 
 class ClassifyLadder {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   // level_hist bits of the pure-B/W rails: level 0 (bit 0) + level 30
   // (bit 15).
   static constexpr uint16_t kRailBwHistMask = 0x8001u;

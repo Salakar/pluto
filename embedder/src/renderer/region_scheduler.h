@@ -60,7 +60,7 @@ struct RegionSchedulerConfig {
   // waveform and the visible stroke becomes a row of dash islands.
   uint32_t pen_collision_tile_px = 32;
   // Exact-colour presenters claim whole PixelEngine tiles for mapped truth.
-  // Mono/qtfb backends do not, and retain their existing overlap-safe chase.
+  // Presenters without that constraint retain their overlap-safe chase.
   bool serialize_pen_truth_by_tile = false;
   uint32_t merge_gap_px = 16;
   std::array<uint8_t, k_refresh_class_count> max_rects = k_default_rect_caps;
@@ -73,7 +73,11 @@ struct RegionSchedulerConfig {
   std::array<uint32_t, k_refresh_class_count> latency_model_us = {
       260000, 450000, 450000, 1000000};
   float fence_margin = 1.25f;
-  uint32_t fence_timeout_ms = 3000;
+  // Native presenters may block for up to five seconds in the kernel while
+  // waiting for authoritative panel completion (the RM1 EPDC contract is the
+  // slowest current case).  The scheduler must never declare that same update
+  // lost before the backend's wait has had a chance to return.
+  uint32_t fence_timeout_ms = 5500;
   // Structural Full promotion moved to the ClassifyLadder scenecut rung;
   // guard dilation moved to the GuardBandPackager. The scheduler
   // dispatches the rects it is given.
@@ -87,8 +91,8 @@ struct RegionSchedulerConfig {
   uint16_t debt_promote_threshold = 2048;
   uint32_t debt_promote_min_gap_us = 250'000;
   // True only when the backend can actually honor Text as a non-flashing
-  // class. qtfb exposes only ALL/PARTIAL, so ordinary background Text must
-  // be treated as intrusive there; explicitly required repair is exempt.
+  // class. Ordinary background Text is intrusive otherwise; explicitly
+  // required repair is exempt.
   bool text_settle_nonintrusive = true;
   bool presenter_reports_completion = false;
   bool presenter_collision_safe = false;
@@ -130,7 +134,6 @@ struct RegionSchedulerStateConfig {
 };
 
 struct RegionSchedulerState {
-  uint32_t version = 1;
   RegionSchedulerStateConfig config{};
   bool has_debt_grid = false;
   TileGrid debt_grid{};
@@ -143,7 +146,6 @@ struct RegionSchedulerState {
 
 class RegionScheduler {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   // Ledger pointers may be null (pure scheduling tests); when present the
   // scheduler accrues ghost/stress on rail-class dispatch and clears
   // ghost/stress (Text/Full) and chroma-pending (Full) on quality dispatch.
@@ -207,7 +209,8 @@ public:
                                 PlutoRefreshClass cls = kPlutoRefreshFast);
 
   // Completion entry (drained from FrameRenderer's CompletionQueue).
-  void notify_completion(uint64_t frame_id);
+  // Returns true only when |frame_id| retires a currently accepted present.
+  bool notify_completion(uint64_t frame_id);
 
   // Retires timeout/synthetic fences without dispatching queued work. A pixel
   // reset uses this while ordinary damage is intentionally held behind it.
@@ -240,6 +243,9 @@ public:
   // -- introspection (SettlePlanner + tests) ----------------------------
   bool user_work_pending() const; // pen or generic user damage queued
   bool anything_inflight() const { return inflight_count_ != 0; }
+  // Sticky evidence that a presenter promising real completions missed the
+  // common fence deadline. A timeout must never count as presenter progress.
+  bool real_completion_overdue() const { return real_completion_overdue_; }
   bool settle_work_pending() const; // settle queued or in flight
   bool idle() const;
 
@@ -436,6 +442,7 @@ private:
   size_t parked_count_ = 0;
   std::array<Inflight, k_max_inflight> inflight_ = {};
   size_t inflight_count_ = 0;
+  bool real_completion_overdue_ = false;
   std::array<PlutoRect, k_max_pending_per_class> scratch_rects_ = {};
   std::array<PendingPenPreview, k_max_pending_pen_preview> pen_preview_queue_ =
       {};

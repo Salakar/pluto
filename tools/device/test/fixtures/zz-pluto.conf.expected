@@ -1,16 +1,16 @@
-# Installed by Pluto: run the Pluto session supervisor instead of xochitl.
+# Installed by Pluto: common boot-default supervisor and owned recovery.
 [Unit]
-# The supervisor and all release-AOT payloads live on the persistent home mount.
 RequiresMountsFor=@ROOT@
-# Never drop to emergency.target if Pluto exits; the supervisor self-recovers.
 OnFailure=
+OnFailure=pluto-boot-failure.service
+StartLimitIntervalSec=600
+StartLimitBurst=2
 
 [Service]
-# Stock xochitl expects sd_notify watchdog heartbeats and restarts on failure.
-# The Pluto supervisor has its own recovery policy, so clear both inherited
-# behaviors rather than entering a 60-second watchdog/start-limit loop.
 WatchdogSec=0
 Restart=no
 Environment=PLUTO_ROOT=@ROOT@
+ExecStartPre=
+ExecStartPre=/usr/libexec/pluto-boot-recovery begin
 ExecStart=
 ExecStart=@SUPERVISOR@ start

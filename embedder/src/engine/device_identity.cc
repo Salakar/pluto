@@ -1,9 +1,15 @@
 #include "engine/device_identity.h"
 
+#include <sys/utsname.h>
+
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <string>
+
+#include "generated/device_profiles.h"
 
 namespace pluto {
 namespace {
@@ -22,11 +28,17 @@ std::string normalized_identity(std::string_view raw) {
   return normalized;
 }
 
-bool contains(const std::string& value, const char* needle) {
-  return value.find(needle) != std::string::npos;
+bool contains_any(const std::string &value,
+                  std::span<const std::string_view> tokens) {
+  for (const std::string_view token : tokens) {
+    if (value.find(token) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
 }
 
-std::string read_identity_file(const std::string& path) {
+std::string read_identity_file(const std::string &path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
     return {};
@@ -35,68 +47,69 @@ std::string read_identity_file(const std::string& path) {
                      std::istreambuf_iterator<char>());
 }
 
-void append_identity_file(const std::string& path, std::string* combined) {
-  if (combined == nullptr) {
-    return;
-  }
-  const std::string value = read_identity_file(path);
-  if (value.empty()) {
-    return;
-  }
-  if (!combined->empty()) {
-    combined->push_back(' ');
-  }
-  combined->append(value);
-}
-
-}  // namespace
-
-RemarkableDeviceIdentity classify_remarkable_device_identity(
-    std::string_view hardware_identity) {
-  const std::string identity = normalized_identity(hardware_identity);
-  const bool is_move = contains(identity, "chiappa");
-  const bool is_paper_pro = contains(identity, "ferrari");
-  const bool is_paper_pure = contains(identity, "tatsu");
-  const bool is_remarkable_2 =
-      contains(identity, "zero-sugar") ||
-      contains(identity, "remarkable 2.0") ||
-      contains(identity, "fsl,imx7d-sdb");
-  const bool is_remarkable_1 = contains(identity, "zero-gravitas") ||
-                               contains(identity, "remarkable 1.0") ||
-                               contains(identity, "fsl,imx6sl");
-  const int matches = static_cast<int>(is_move) +
-                      static_cast<int>(is_paper_pro) +
-                      static_cast<int>(is_paper_pure) +
-                      static_cast<int>(is_remarkable_2) +
-                      static_cast<int>(is_remarkable_1);
-  if (matches != 1) {
+std::string kernel_architecture() {
+  struct utsname identity {};
+  if (::uname(&identity) != 0) {
     return {};
   }
-  if (is_move) {
-    return {.model = "paperProMove", .codename = "chiappa"};
-  }
-  if (is_paper_pro) {
-    return {.model = "paperPro", .codename = "ferrari"};
-  }
-  if (is_paper_pure) {
-    return {.model = "paperPure", .codename = "tatsu"};
-  }
-  if (is_remarkable_2) {
-    return {.model = "remarkable2", .codename = "zero-sugar"};
-  }
-  if (is_remarkable_1) {
-    return {.model = "remarkable1", .codename = "zero-gravitas"};
-  }
-  return {};
+  return identity.machine;
 }
 
-RemarkableDeviceIdentity probe_remarkable_device_identity(
-    const RemarkableDeviceIdentityPaths& paths) {
-  std::string combined;
-  append_identity_file(paths.soc_machine, &combined);
-  append_identity_file(paths.device_tree_model, &combined);
-  append_identity_file(paths.device_tree_compatible, &combined);
-  return classify_remarkable_device_identity(combined);
+} // namespace
+
+RemarkableDeviceIdentity classify_remarkable_device_identity(
+    const RemarkableDeviceIdentityEvidence &evidence) {
+  const std::string board =
+      normalized_identity(evidence.machine + " " + evidence.device_tree_model);
+  const std::string compatible =
+      normalized_identity(evidence.device_tree_compatible);
+  std::string architecture = normalized_identity(evidence.architecture);
+  architecture.erase(
+      std::remove_if(architecture.begin(), architecture.end(),
+                     [](unsigned char value) { return std::isspace(value); }),
+      architecture.end());
+
+  const GeneratedDeviceProfile *board_match = nullptr;
+  const GeneratedDeviceProfile *compatible_match = nullptr;
+  for (const GeneratedDeviceProfile &profile : kGeneratedDeviceProfiles) {
+    if (contains_any(board, profile.board_tokens)) {
+      if (board_match != nullptr) {
+        return {};
+      }
+      board_match = &profile;
+    }
+    if (contains_any(compatible, profile.compatible_tokens)) {
+      if (compatible_match != nullptr) {
+        return {};
+      }
+      compatible_match = &profile;
+    }
+  }
+  if (board_match == nullptr || compatible_match == nullptr ||
+      board_match != compatible_match ||
+      std::find(board_match->architectures.begin(),
+                board_match->architectures.end(),
+                architecture) == board_match->architectures.end()) {
+    return {};
+  }
+  return {
+      .profile_id = std::string(board_match->id),
+      .model = std::string(board_match->wire_model),
+      .codename = std::string(board_match->codename),
+  };
 }
 
-}  // namespace pluto
+RemarkableDeviceIdentity
+probe_remarkable_device_identity(const RemarkableDeviceIdentityPaths &paths) {
+  return classify_remarkable_device_identity({
+      .machine = read_identity_file(paths.soc_machine),
+      .device_tree_model = read_identity_file(paths.device_tree_model),
+      .device_tree_compatible =
+          read_identity_file(paths.device_tree_compatible),
+      .architecture = paths.architecture_override.empty()
+                          ? kernel_architecture()
+                          : paths.architecture_override,
+  });
+}
+
+} // namespace pluto

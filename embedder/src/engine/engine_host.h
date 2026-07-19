@@ -1,9 +1,17 @@
 #ifndef PLUTO_ENGINE_ENGINE_HOST_H_
 #define PLUTO_ENGINE_ENGINE_HOST_H_
 
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,14 +32,101 @@
 
 namespace pluto {
 
-struct QtfbPointerBatch;
-struct QtfbKeyBatch;
-
 enum class EngineMode {
   kDebug,
   kProfile,
   kRelease,
 };
+
+// Exact Ink controls exposed through Flutter semantics. These labels are
+// intentionally app-owned and action-specific: no coordinate or arbitrary
+// semantics endpoint is exposed to the device protocol.
+enum class DirectInkSemanticsTarget : std::uint8_t {
+  kCanvasReady,
+  kNewArtwork,
+  kCreate,
+};
+
+struct DirectInkSemanticsNode {
+  FlutterViewId view_id = 0;
+  std::uint64_t node_id = 0;
+  std::uint64_t generation = 0;
+};
+
+enum class DirectInkSemanticsWait : std::uint8_t {
+  kFound,
+  kTimedOut,
+  kAmbiguous,
+  kInactive,
+};
+
+// Thread-safe bridge between Flutter's platform-thread semantics callback and
+// the root-local acceptance worker. Each action must come from a target seen
+// after the caller's generation boundary, so stale gallery/editor nodes cannot
+// satisfy a transition.
+class DirectInkSemanticsState {
+public:
+  std::uint64_t begin();
+  void end();
+  void update(const FlutterSemanticsUpdate2 *update);
+  std::uint64_t generation() const;
+  DirectInkSemanticsWait
+  wait_for_any(std::span<const DirectInkSemanticsTarget> targets,
+               std::uint64_t after_generation,
+               std::chrono::milliseconds timeout,
+               DirectInkSemanticsTarget *matched, DirectInkSemanticsNode *node);
+
+private:
+  struct Slot {
+    DirectInkSemanticsNode node;
+    bool ambiguous = false;
+  };
+
+  mutable std::mutex mutex_;
+  std::condition_variable changed_;
+  std::array<Slot, 3> slots_{};
+  std::uint64_t generation_ = 0;
+  bool active_ = false;
+};
+
+using DirectInkSemanticsToggle = std::function<bool(bool)>;
+using DirectInkSemanticsTap =
+    std::function<bool(const DirectInkSemanticsNode &)>;
+
+// Drives only Ink's exact new-artwork/create semantic actions and does not
+// return success until the editor's Back-to-gallery control proves a real
+// canvas is mounted. An already-open editor succeeds without an action.
+bool prepare_direct_ink_canvas_from_semantics(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap, std::chrono::milliseconds timeout,
+    std::size_t *action_count, DirectControlFailure *failure);
+
+struct DirectInkPresentationProof {
+  std::uint64_t surface_generation = 0;
+  std::uint64_t frame_id = 0;
+};
+
+// Native presentation proof used by the bounded Ink acceptance flow. It must
+// open an optical transaction before the semantic route changes, establish a
+// post-semantics Flutter frame fence, and then complete one exact
+// retained-surface Full presenter frame. Cancellation releases any queued
+// route work when semantics cannot reach the canvas.
+struct DirectInkPresentationTracker {
+  std::function<bool()> begin;
+  std::function<void()> cancel;
+  std::function<bool(std::chrono::milliseconds, DirectInkPresentationProof *)>
+      prove;
+};
+
+// Couples the exact Ink semantics flow to a native presenter receipt. The
+// proof is mandatory even for an already-mounted editor (actionCount == 0).
+bool prepare_direct_ink_canvas_with_presentation_receipt(
+    DirectInkSemanticsState *state, const DirectInkSemanticsToggle &toggle,
+    const DirectInkSemanticsTap &tap,
+    const DirectInkPresentationTracker &presentation,
+    std::chrono::milliseconds semantics_timeout,
+    std::chrono::milliseconds presentation_timeout, std::size_t *action_count,
+    DirectInkPresentationProof *proof, DirectControlFailure *failure);
 
 struct EngineHostConfig {
   // Product AOT is the safe default. JIT is reserved for callers that
@@ -46,6 +141,10 @@ struct EngineHostConfig {
   // require an absolute path; FrameRenderer publishes it atomically after
   // the first presenter acceptance.
   std::string ready_file_path;
+  // Optional native renderer liveness record. The supervisor supplies a
+  // launch-nonce-specific absolute path and requires progress from the real
+  // presenter health loop after a completed frame.
+  std::string health_file_path;
   std::string presenter_name = "null";
   std::string presenter_options;
   PlutoPixelFormat pixel_format = kPlutoPixelFormatRgb565;
@@ -139,6 +238,8 @@ private:
   static void log_message_callback(const char *tag, const char *message,
                                    void *user_data);
   static void pre_engine_restart_callback(void *user_data);
+  static void update_semantics_callback(const FlutterSemanticsUpdate2 *update,
+                                        void *user_data);
   static void presenter_completion_callback(uint64_t frame_id, void *user_data);
 
   void resolve_paths();
@@ -158,14 +259,28 @@ private:
                             const std::optional<std::string> &requested_app_id,
                             DirectScreenshotCapture *capture,
                             DirectControlFailure *failure);
+  bool send_direct_switcher_preview_tap(const std::string &requested_app_id,
+                                        DirectPointerResult *result,
+                                        DirectControlFailure *failure);
+  bool send_direct_ink_stroke(const std::string &requested_app_id,
+                              std::int64_t expected_pid,
+                              DirectPointerResult *result,
+                              DirectControlFailure *failure);
+  bool send_direct_prepare_ink_canvas(const std::string &requested_app_id,
+                                      std::int64_t expected_pid,
+                                      DirectInkCanvasResult *result,
+                                      DirectControlFailure *failure);
+  bool schedule_frame_on_platform_thread(
+      std::chrono::steady_clock::time_point deadline,
+      std::uint64_t *pre_schedule_surface_generation);
+  bool prove_direct_ink_presentation(std::chrono::milliseconds timeout,
+                                     std::uint64_t proof_token,
+                                     DirectInkPresentationProof *proof);
   std::string hibernate_marker_path() const;
   bool publish_hibernate_marker() const;
   bool publish_control_file(const std::string &leaf,
                             const std::string &content) const;
   void touch_input_loop();
-  void qtfb_input_loop();
-  void dispatch_qtfb_pointer_batch(const QtfbPointerBatch &batch);
-  void dispatch_qtfb_key_batch(const QtfbKeyBatch &batch);
   void start_ink_thread();
   // Ink-thread context: forwards one tracker output to Flutter (stylus
   // device 500, phase sequencing, CLOCK_MONOTONIC us), the pen ring and the
@@ -205,6 +320,7 @@ private:
   ChannelRegistry channels_;
   EventLoop event_loop_;
   std::unique_ptr<DirectControlServer> direct_control_server_;
+  DirectInkSemanticsState direct_ink_semantics_;
   VsyncPacer vsync_pacer_;
   LifecycleStateMachine lifecycle_;
   bool initialized_ = false;
@@ -212,12 +328,6 @@ private:
   bool hibernated_ = false;
   std::thread touch_thread_;
   std::atomic<bool> touch_stop_{false};
-  // AppLoad owns the physical evdev devices in cooperative qtfb mode. This
-  // single reader consumes touch and pen packets from the presenter's socket
-  // instead, and is always joined before that presenter is closed.
-  std::thread qtfb_input_thread_;
-  std::atomic<bool> qtfb_input_stop_{false};
-  bool qtfb_input_enabled_ = false;
   // Read by the evdev thread so the physical bottom edge follows live
   // portrait/landscape changes without restarting the Flutter isolate.
   std::atomic<int32_t> input_rotation_{0};
@@ -256,6 +366,29 @@ bool apply_presenter_display_info(const PlutoDisplayInfo &info,
 // Shared by production delivery and focused geometry regression tests.
 FlutterWindowMetricsEvent
 window_metrics_for_config(const EngineHostConfig &config);
+
+inline constexpr std::size_t kDirectInkStrokeEventCount = 24;
+inline constexpr std::size_t kDirectTouchTapEventCount = 4;
+
+// Builds the normal add/down/up/remove touch sequence used by the synthetic
+// host option and the switcher acceptance control.
+bool build_direct_touch_tap_events(
+    double x, double y, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectTouchTapEventCount> *events);
+
+// Builds the deterministic stylus packet used by the root-local acceptance
+// control. Keeping geometry and phase sequencing pure makes the real pointer
+// path independently testable without a Flutter engine.
+bool build_direct_ink_stroke_events(
+    std::int32_t width, std::int32_t height, std::size_t started_us,
+    std::array<FlutterPointerEvent, kDirectInkStrokeEventCount> *events);
+
+// Reads the first selectable app from the supervisor-owned switcher state.
+// The acceptance control uses this as an authorization gate before injecting a
+// center tap. Symlinks, non-regular/unowned/multiply-linked files, malformed
+// ids, a missing target, and a same-as-origin target all fail closed.
+std::optional<std::string>
+read_direct_switcher_target(const std::string &run_dir);
 
 } // namespace pluto
 

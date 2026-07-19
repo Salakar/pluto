@@ -504,7 +504,6 @@ bool AutoGhostbuster::export_state(AutoGhostbusterState *out) const {
   };
 
   AutoGhostbusterState state;
-  state.version = kStateVersion;
   state.grid = grid_;
   state.config = config_;
   state.display_pixels = display_pixels_;
@@ -530,7 +529,7 @@ bool AutoGhostbuster::export_state(AutoGhostbusterState *out) const {
 }
 
 bool AutoGhostbuster::import_state(const AutoGhostbusterState &state) {
-  if (!valid_ || action_active() || state.version != kStateVersion ||
+  if (!valid_ || action_active() ||
       state.active_decision != AutoGhostbusterDecision::kNone ||
       !same_grid(state.grid, grid_) || !same_config(state.config, config_) ||
       state.display_pixels != display_pixels_ ||

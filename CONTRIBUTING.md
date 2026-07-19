@@ -37,12 +37,10 @@ installation.
 - `bash tools/build/embedder-device-arm.sh` — build the ARMv7 release embedder
   and control client with the pinned reMarkable toolchain (needs Docker on
   non-native hosts).
-- `melos run build:device-payload -- --standard` — assemble the `linux-arm64`
-  release-AOT payload.
-- `bash tools/build/assemble-appload-arm-payload.sh` — assemble the managed
-  `linux-arm` release-AOT payload. These two assembler commands are private
-  release-maintainer mechanics; users provision either target through the same
-  device-aware `pluto provision` command.
+- `melos run build:device-release` — build both native target slices and the
+  same standard release-AOT app set, then freeze them under one integrity-
+  checked release manifest. Target workers are private; users always provision
+  through the same device-aware `pluto provision` command.
 - `./ci/check.sh` — the complete Dart, shell-contract, and golden quality
   gate. Run it before sending a change.
 
@@ -81,14 +79,16 @@ embedder code must pass both the AArch64 and ARMv7 device builds.
 - Release-only invariant: default builds, installs, and provisioning are
   product AOT. Nothing outside explicit `--debug` flows may introduce a
   JIT kernel, a debug engine, or a VM service on the device.
-- C ABI changes must bump `PLUTO_ABI_VERSION`.
+- Pluto-owned presenter structs and operation tables are an unpublished,
+  single-release contract: update both sides together and require exact
+  current layouts.
 - Keep device payloads under their managed `/home/root/` roots. Device writes
   must go through the public `pluto provision`, `pluto install`,
   `pluto provision --restore-remarkable`, and
   `pluto provision --uninstall` commands so discovery can select the target and
-  its transactional safety path. Do not install XOVI/AppLoad hooks, service
-  overrides, or another target's payload by hand. A tablet must never be left
-  without a working UI.
+  its transactional safety path. Do not install a second display owner,
+  unmanaged service override, or another target's payload by hand. A tablet
+  must never be left without a working UI.
 - Coordinate device display-service changes in `agents_wip.txt`.
 
 ## Sending a change

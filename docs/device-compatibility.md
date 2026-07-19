@@ -11,37 +11,40 @@ to another firmware without validation.
 
 ## Tested hardware and firmware
 
-| Device | Codename | Tested reMarkable OS | CPU / target | Internally selected integration | Validation status |
+| Device | Codename | Tested reMarkable OS | CPU / target | Native panel path | Validation status |
 | --- | --- | --- | --- | --- | --- |
-| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | AArch64 / `linux-arm64` | Direct SWTCON presenter and managed lifecycle | ✅ Reference device; release platform, Ink, and Codex validated |
-| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ARMv7l / `linux-arm` | Managed XOVI + AppLoad + QTFB integration | 🧪 Runtime and base real-panel path verified; final managed-control, Ink, and real Codex acceptance in progress |
-| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ARMv7l / `linux-arm` | Managed XOVI + AppLoad + QTFB integration | 🧪 Runtime and real-panel path verified; final provision, Ink, and real Codex acceptance in progress |
+| reMarkable Paper Pro Move | `chiappa` | 3.28.0.162 | AArch64 / `linux-arm64` | Native Gallery3/DRM + SWTCON | ✅ Fully accepted; release, common apps, Ink, lifecycle, camera, and Codex validated |
+| reMarkable 2 | `zero-sugar` | 3.28.0.162 | ARMv7l / `linux-arm` | Native LCDIF/TCON | ✅ Fully accepted; release, common apps, Ink, lifecycle, recovery, and camera validated |
+| reMarkable 1 | `zero-gravitas` | 3.27.3.0 | ARMv7l / `linux-arm` | Native MXCFB/EPDC | ✅ Fully accepted; release, common apps, Ink, lifecycle, recovery, and camera validated |
 | reMarkable Paper Pro | `ferrari` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
 | reMarkable Paper Pure | `tatsu` | Not tested | Not assigned | Not assigned | 🚧 Not yet verified |
 
-The two newly brought-up devices are not marked complete merely because the
-embedder starts. Their final acceptance requires the normal CLI workflow,
-visible Home and Ink behavior, a real authenticated Codex request, launch and
-return behavior, logs, screenshots, and measured responsiveness on the
-physical panel. A fake Codex backend does not satisfy that bar.
+The supported matrix is RM1, RM2, and Move on the exact firmware rows above.
+All three passed the normal CLI workflow, visible Home and target-supported
+apps, switching, deterministic Ink drawing, launch and return behavior, logs,
+screenshots, measured responsiveness, camera verification, twenty
+suspend/resume cycles, and foreground-crash recovery on the physical panel.
+Paper Codex is additionally accepted on Move; it is excluded from ARMv7
+releases because no upstream ARMv7 binary exists.
 
 ## One responsive application surface
 
-Home, Ink, Codex, and third-party Pluto applications are not device-specific
+Home, Ink, and target-compatible Pluto applications are not device-specific
 ports. Every backend reports its actual surface dimensions and device pixel
 ratio to Flutter. App manifests keep `display.scale: auto` (also the default
 when omitted), and widgets lay out from live `MediaQuery` and parent
 constraints just as they do on other Flutter platforms.
 
-A numeric manifest scale is an explicit legacy compatibility override, not a
-device selector. Likewise, 954 x 1696 values in design systems, golden tests,
+Numeric manifest scales are rejected. The `scale` field may only be omitted or
+set to `auto`. Likewise, 954 x 1696 values in design systems, golden tests,
 document presets, or Move renderer research are reference coordinates with an
 explicit scope; they do not define the runtime viewport on another tablet.
 Compatibility acceptance therefore checks full-surface use, reflow, reachable
 controls, pen/touch coordinate mapping, and screenshots at the native metrics
 of each tested device.
 
-The release embedder reported these presenter metrics on the attached units:
+The generated exact-device profiles define these presenter metrics. Move, RM1,
+and RM2 reported their rows from the accepted native runtime:
 
 | Device | Native panel surface | Flutter device pixel ratio |
 | --- | ---: | ---: |
@@ -50,8 +53,12 @@ The release embedder reported these presenter metrics on the attached units:
 | reMarkable 1 | 1404 x 1872 | 1.4125 |
 
 Those are inputs to Flutter's normal logical-pixel model, not three separately
-authored app canvases. The same release Home, Ink, and Codex layouts reflow from
-the resulting constraints.
+authored app canvases. The same frozen-release Home, shared applications, and
+Ink layouts reflow from the resulting constraints. Final camera/native pairs
+confirmed full-surface use, reachable controls, correct input transforms, and
+responsive layout on every supported panel. The detailed frozen-release
+evidence is indexed in
+[`native-runtime-implementation-report.md`](native-runtime-implementation-report.md).
 
 ## One public workflow
 
@@ -80,32 +87,39 @@ pluto provision --device "$DEVICE" --restore-remarkable
 pluto provision --device "$DEVICE" --uninstall
 ```
 
-Provisioning probes before writing, selects the matching preassembled payload,
-checks its target, verifies pinned engine checksums, and activates it
-transactionally. Supplying `--payload-dir` never overrides hardware identity;
-a mismatched payload is rejected before device files change.
+Provisioning probes before writing, integrity-checks the universal release
+manifest, selects its matching slice, verifies every deployable file and pinned
+engine checksum, and activates it transactionally. Checkout pins and committed
+engine checksum metadata remain the local trust anchors. Supplying
+`--payload-dir` names another complete release-set root and never overrides
+hardware identity; missing, contradictory, hybrid, or tampered content is
+rejected before device files change. A profile whose persistent boot-default
+recovery gate is closed uses the same supervisor in a transient current-boot
+session; stock remains the next-boot default without creating a second app,
+setup, or document workflow.
 
-## Internal integration boundary
+## Native hardware boundary
 
-The common CLI intentionally hides two hardware integrations:
-
-- `linux-arm64` uses the direct SWTCON presenter and Pluto's managed
-  supervisor, boot fallback, standby, and recovery services.
-- `linux-arm` keeps the stock display service alive. A managed XOVI/AppLoad
-  extension owns app lifecycle, while Pluto's QTFB presenter exchanges the
-  framebuffer, damage, pen, touch, and key events with it.
-
-Those are implementation backends, not separate Pluto products. Applications
-use the same Flutter engine pin, manifest, package integrity contract, Home,
-Ink, Codex UI, and device commands. Contributors may work on the backend
-components directly; users must not install XOVI, AppLoad, service overrides,
-or QTFB shims by hand. `pluto provision` owns their validation, activation,
-rollback, and removal.
+The common CLI and on-device supervisor are shared by every supported tablet.
+After exact profile matching, the embedder selects only the hardware-specific
+panel implementation: Gallery3/DRM on Move, LCDIF/TCON on reMarkable 2, or
+MXCFB/EPDC on reMarkable 1. Applications use the same Flutter engine pin,
+manifest, package integrity contract, responsive UI rules, lifecycle markers,
+and device commands. There is no stock-UI child launcher or alternate install
+flow.
 
 The `linux-arm` runtime is currently release AOT only. The `linux-arm64`
 runtime additionally supports profile AOT and explicitly requested debug/JIT.
 An unavailable development mode is rejected as a capability mismatch; normal
 release install, launch, inspection, and removal remain the same workflow.
+
+Application availability is also declared, not inferred from a model name.
+Home, Counter, Motion Lab, Ink Lab, Validation Lab, and Ink support both
+targets. Paper Codex declares `linux-arm64` only because upstream Codex has no
+native ARMv7 release. Pluto does not build or ship a custom ARMv7 Codex port;
+the ARM standard release omits it and an explicit ARM build request fails
+before compilation. This is one target-capability branch inside the same
+manifest, build, release, provision, launcher, and documentation flow.
 
 ## Release artifact targeting
 
@@ -139,20 +153,21 @@ also be ELF32 `EM_ARM`, EABI5, hard-float. This leaves compatibility margin for
 supported ARMv7 installations instead of allowing a build host or one newer
 firmware image to raise the runtime requirement silently.
 
-## Firmware-sensitive integration
+## Firmware-sensitive native profile
 
-The QTFB/AppLoad integration touches firmware-private Qt/QML interfaces. Pluto
-therefore authenticates the integration bundle and requires a
-firmware-matched QML hash table before activation. Missing or unverified
-firmware data fails closed.
+Display registers, waveform data, framebuffer geometry, input nodes, and boot
+recovery topology vary by exact hardware and firmware. Pluto code-generates
+one profile table and fails closed when immutable identity, semantic firmware,
+build id, architecture, or required artifacts do not match an accepted tuple.
 
 A firmware update must repeat at least:
 
 1. immutable device and firmware probing;
 2. target and ABI validation of every native binary;
-3. QML compatibility and integration-control checks;
-4. guarded activation with rollback available;
-5. Home, Ink, and real Codex runs through the public CLI;
+3. native panel initialization, waveform/LUT, input, and control checks;
+4. transactional boot activation with stock fallback available;
+5. Home, switching, the target-supported app set, and deterministic Ink runs
+   through the public CLI; additionally test native Codex on `linux-arm64`;
 6. logs, screenshots, camera evidence, and responsiveness measurements;
 7. restore and full-uninstall recovery checks.
 
@@ -160,14 +175,12 @@ Only after those checks pass should the tested matrix gain the new firmware.
 
 ## Safety and recovery internals
 
-Pluto never intentionally leaves a tablet without a working UI. The direct
-backend uses a transactional boot installer, fallback service, dead-man
-recovery, and a stock peer root for tethered recovery. The QTFB backend keeps
-the stock display owner active, validates its managed extension under a
-one-attempt guard, and rolls back failed activation; a tethered reboot returns
-to stock behavior.
+Pluto never intentionally leaves a tablet without a working UI. The native
+runtime uses one transactional boot installer, owned fallback service, bounded
+recovery receipts, and a verified stock peer root. Provisioning failure rolls
+back to stock; full uninstall restores stock before deleting the runtime.
 
-When developing either backend:
+When developing a native panel implementation:
 
 - keep the tablet unlocked and tethered during activation;
 - never bypass target, checksum, firmware-table, or peer-credential gates;
@@ -175,17 +188,6 @@ When developing either backend:
   three minutes between restart experiments, and batch changes;
 - verify both logs and the physical panel;
 - use the public restore/uninstall commands for the final recovery test.
-
-## Upstream provenance
-
-The managed QTFB integration builds on
-[XOVI](https://github.com/asivery/xovi),
-[AppLoad](https://github.com/asivery/rm-appload), and the archived
-[qtfb protocol/client](https://github.com/asivery/qtfb). The exact source,
-patch, toolchain, firmware authorization, and accepted-binary identities are
-locked in the tracked
-[`tools/integration` rebuild record](../tools/integration/README.md). These
-projects retain their own licenses and release contracts.
 
 The [reMarkable developer links](https://developer.remarkable.com/links)
 publish the official SDK/toolchain used to keep native binaries compatible

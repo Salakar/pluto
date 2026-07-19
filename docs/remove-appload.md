@@ -1,10 +1,18 @@
 # Remove AppLoad: one native Pluto runtime for every supported reMarkable
 
-Status: implementation plan for a pre-release hard cutover.
+Status: completed implementation and acceptance record. Runtime revision
+`ed349d0b845412d77e9e83092472dffe39b60663` and its frozen universal release
+passed the artifact, three-device optical, lifecycle, recovery, performance,
+and residue gates. Later changes to the acceptance harness and reports are
+host-only and do not relabel the installed artifacts. This user-requested plan
+is retained as the sole historical cutover inventory rather than an active
+compatibility document.
 
 This document plans the work required to make reMarkable 1, reMarkable 2, and
 Paper Pro Move use one Pluto product path with device-aware native display
-drivers. It does not claim that RM1 or RM2 are native today.
+drivers. Sections describing the pre-cutover state are retained as the baseline
+against which the final same-revision evidence is judged; current implementation
+status lives in `native-cutover-report.md`.
 
 The end state is deliberately uncompromising:
 
@@ -16,6 +24,9 @@ The end state is deliberately uncompromising:
 - Common lifecycle, rendering, scheduling, input, packaging, and recovery code
   is shared. Code branches only at the hardware interfaces that genuinely
   differ.
+- Home, Counter, Motion Lab, Ink Lab, Validation Lab, and Ink are the common
+  all-device acceptance set. Paper Codex remains only where the upstream CLI is
+  already native (`linux-arm64`); Pluto does not build an ARMv7 port.
 - There is no backward-compatibility reader, legacy alias, protocol
   negotiation, migration layer, deprecated command, or dual-backend release.
   Old development artifacts simply stop being valid.
@@ -55,6 +66,12 @@ It is not a rendering backend or fallback inside a running Pluto session.
 8. **AppLoad is removed in one cutover, not deprecated.** Native development can
    happen on an integration branch, but no release or documented mainline state
    ships both paths.
+9. **App capability is declared without creating another product flow.** App
+   manifests list their supported targets. The release/package commands build
+   every declared slice, the launcher shows what is installed, and unsupported
+   explicit builds fail before compilation. Paper Codex is `linux-arm64` only;
+   its custom ARMv7 recipe, patches, pin, artifacts, materializer, cache, and
+   device hooks are deleted.
 
 ## 2. Why one OS does not mean one display implementation
 
@@ -96,8 +113,10 @@ an audit snapshot, not a permanent compatibility promise.
 
 ### 3.1 RM1
 
-- Kernel `5.4.70-v1.6.3-rm10x`; official matching kernel source commit
-  `d54fe67bf86e918468b936f97a2ec39f4f87a3d9`.
+- Kernel `5.4.70-v1.6.3-rm10x`. The closest published official kernel source
+  is reMarkable's `RM1XX_5.4.70_v1.6.2` commit
+  `d54fe67bf86e918468b936f97a2ec39f4f87a3d9`; reMarkable has not published a
+  byte-matching v1.6.3 ref, so the source gap is recorded rather than hidden.
 - `/proc/fb` reports `mxc_epdc_fb` at `/dev/fb0`.
 - Visible framebuffer is 1404x1872, virtual 1408x3840, RGB565, 2816-byte
   stride, current rotation 1.
@@ -117,15 +136,21 @@ an audit snapshot, not a permanent compatibility promise.
 - `/dev/fb0` is the LCDIF `mxsfb` path, not an EPDC update API.
 - The stock runtime programs a narrow, tall phase-scanout framebuffer rather
   than exposing the 1404x1872 logical image directly.
-- The audited unit uses
-  `/usr/share/remarkable/320_R467_AF4731_ED103TC2C6_VB3300-KCD_TC.wbf`.
-  The final profile must bind the exact WBF digest to the panel/FPL signature;
-  a filename alone is not sufficient.
-- The reference mode observed in existing research is 260x1408, 32 bpp, with
-  17 phase slots. Its constants derive a 1,464,320-byte phase slot, a
-  24,893,440-byte mapping, and an approximately 11.763 ms phase interval. Pluto
-  must re-measure these on the supported kernel/panel and must not treat
-  reverse-engineered constants as vendor guarantees.
+- The audited unit actively selects
+  `/var/lib/uboot/320_R405_AFA011_ED103TC2C5_VB3300-KCD_TC.wbf`, size 285,735
+  bytes, SHA-256
+  `79783d751ba066af12c6ac5aca46279fe7c79d4ef834105bd46824f870f9c6f8`,
+  for panel signature `ED103TC2C5`. The R467/C6 file under `/usr/share` is a
+  discovery candidate on this image, not an accepted fallback. The profile
+  binds active source, exact digest, and panel/FPL signature together.
+- The stock observer measured a 260x1408, 32-bpp `mxs-lcdif` mode with a
+  1,040-byte stride, virtual height 23,936, and 17 phase slots of 1,464,320
+  bytes each. The 24,893,440-byte slot footprint lives inside an exact
+  33,554,432-byte framebuffer mapping; Pluto must map the kernel-reported
+  allocation rather than the footprint. Observed stock pan cadence was 11.886
+  ms median and 11.933 ms p95. The 11.763 ms profile candidate remains
+  provisional until the native transport measures latch timing directly;
+  reverse-engineered constants are not vendor guarantees.
 - The official kernel's `prevent-frying-pan` path, blank/unblank sequencing,
   regulator control, current-frame completion, and final safe-hold buffer are
   safety requirements, not optional optimisations.
@@ -498,7 +523,8 @@ Add focused modules behind the common native interfaces:
   immutable control templates;
 - `MxsLcdifDevice`: mode validation, bounded mapping, slot ownership,
   pan/current-frame completion, VSYNC, blank/unblank, temperature/power-good,
-  and fault handling through kernel APIs;
+  bounded post-blank rail-settle observation, and fault handling through kernel
+  APIs;
 - `Rm2ScanLoop`: never overwrites an in-flight slot, advances one phase exactly
   once, rearms the safe hold, and turns any missed deadline or hardware fault
   into a supervisor-visible fatal error;
@@ -509,6 +535,14 @@ Never use `/dev/mem`, hard-coded Xochitl addresses, raw GPIO, or direct I2C/PMIC
 writes. Use framebuffer, regulator, thermal, and sysfs/kernel interfaces whose
 behavior is validated against the official kernel.
 
+The official `zero-sugar` driver reads SY7636A `state` and `power_good`
+independently from the same register. Pluto therefore brackets each diagnostic
+state read with live power-good reads. Powered work requires both samples to be
+valid, equal, and `ON`; a torn sample, unknown state, unreadable attribute, or
+power loss fails closed. Known state strings are telemetry and may change
+without creating a second lifecycle flow or restarting a healthy app. The
+same check encloses temperature access, cold INIT, and every phase drive.
+
 ### 7.5 Bring-up ladder
 
 Each rung must pass and produce evidence before the next is attempted:
@@ -518,8 +552,9 @@ Each rung must pass and produce evidence before the next is attempted:
 2. read-only stock observer with no display writes;
 3. persistent SSH, dead-man recovery, untouched stock peer root, boot counter,
    and tested restore path;
-4. while blanked and rails safe, program the exact framebuffer mode with all
-   slots containing the byte-exact safe hold;
+4. issue framebuffer powerdown, wait within a fixed bound for live power-good
+   to fall, then while blanked and rails safe program the exact framebuffer
+   mode with all slots containing the byte-exact safe hold;
 5. validate power-good, temperature, VCOM, profile, pan completion, and safe-hold
    rearming without an active waveform;
 6. one initialisation sequence, then white, black, restore, and optical check;
@@ -650,12 +685,17 @@ Keep and refactor the following because native RM1/RM2 still require them:
 - `tools/build/embedder-device-arm.sh` and its container worker, either as
   private workers or renamed consistently;
 - the committed `linux-arm-release` Flutter engine payload;
-- `tools/build/build-codex-armv7.sh`, `tools/build/codex-armv7/`, and the Codex
-  ARMv7 pin;
 - ARM32 ELF, hard-float, system-library ceiling, and release-AOT verification.
 
 They are not AppLoad artifacts. Delete their AppLoad/QTFB assumptions and feed
 their outputs into the common release assembler.
+
+Do not port Codex to ARMv7. Upstream Codex has no native ARMv7 release, so
+delete Pluto's custom ARMv7 source recipe, patches, pin, split artifacts,
+materializer, cache, packaging/provisioning hooks, tests, and documentation.
+Keep the existing Paper Codex app only for `linux-arm64`. App manifests declare
+target availability, the standard `linux-arm` slice omits Paper Codex, and an
+explicit ARM build request fails before invoking Flutter or writing a device.
 
 Delete `assemble-appload-arm-payload.sh`; do not rename its integration-heavy
 layout and keep it alive. The common assembler builds a native ARM payload from
@@ -920,6 +960,8 @@ The performance gate is intentionally outcome-based:
   10,000-job soak has zero missed phases/underflows;
 - every LUT/pack has an on-device before/after table; unmeasured generated data
   does not ship merely because it looks faster;
+- every cross-app transition is camera-checked immediately after presentation;
+  a later ghost-maintenance cycle cannot make an earlier retained-app image pass;
 - final reports separate Flutter/raster, native CPU, driver/scanout, waveform,
   first optical change, and optical settle. No blended startup number is called
   rendering latency.
@@ -1010,8 +1052,6 @@ Do **not** delete the following merely because the cooperative path used them:
 - `linux-arm` target support;
 - the ARMv7 engine payload and checksum manifest;
 - the ARMv7 CMake toolchain, build container, ELF validation, and native preset;
-- ARMv7 Codex build recipe, patches needed for Codex itself, provenance, binary
-  pin, and validation;
 - generic renderer capabilities such as backend color quantization, completion
   reporting, overlap semantics, and refresh control;
 - responsive 1404x1872 layouts and their generic tests;
@@ -1025,6 +1065,11 @@ Do **not** delete the following merely because the cooperative path used them:
 
 Native RM1/RM2 depend on ARMv7. Removing these would defeat the goal rather than
 remove AppLoad.
+
+The custom ARMv7 Codex port is deliberately excluded from this preservation
+list. Paper Codex and its existing native CLI integration remain an
+`linux-arm64` capability only; the common product flow handles that single app
+availability difference without a second installer, setup path, or runtime.
 
 ### 10.5 Purge ignored host/build residue
 
@@ -1131,9 +1176,9 @@ Owners: display, device tooling, performance.
   generation.
 - Prove dead-man, peer-root, boot-counter, stock restore, and persistent SSH on
   each device without enabling a new boot default.
-- Inventory and preserve unrelated working-tree changes in AppLoad/integration,
-  CLI, docs, and ARMv7 Codex paths before legacy containers are deleted and the
-  surviving native/ARMv7 paths are refactored.
+- Inventory and preserve unrelated working-tree changes in integration, CLI,
+  docs, and surviving native/ARMv7 paths before obsolete containers are
+  deleted and the native paths are refactored.
 
 Exit evidence:
 
@@ -1176,6 +1221,10 @@ Owners: legacy display, ARMv7, input.
 - Implement the mockable device seam, snapshot-mode presenter, damage-copy path,
   marker completion worker, health, lifecycle, and profile routing.
 - Capture/resolve the exact refresh-class waveform table.
+- Keep cross-app optical cleanup inside the RM1 presenter: preserve the exact
+  same-surface proof, but promote the first substantive post-handoff job to the
+  physically accepted full-panel cleanup tuple without adding another renderer
+  frame, lifecycle state, setup path, or app-switch flow.
 - Add RM1 evdev transforms, optional-capability behavior, and direct session
   ownership.
 - Build the native ARM release payload through the common supervisor root.
@@ -1186,7 +1235,8 @@ Exit gate:
 - RM1 passes every requirement in sections 6 and 12 with boot-default still
   separately gated;
 - there are no QTFB sockets/processes while the native test session runs;
-- the same `pluto` commands install and exercise Home, Ink, and Codex.
+- the same `pluto` commands install and exercise Home, the switcher, Validation
+  Lab, and Ink; Paper Codex is absent from the ARM release by design.
 
 ### Phase 3: RM2 observer, clean-room spec, and generated waveform data
 
@@ -1216,6 +1266,10 @@ Owners: RM2 display, supervisor, ARMv7, optical validation.
 
 - Implement scan encoder, LCDIF device seam, phase loop, real completion, health,
   and lifecycle behind the common interfaces.
+- Keep cross-app optical cleanup inside the device presenter: RM2 may promote
+  the first non-probe reconciliation job to full-panel Text and prepend its
+  required two-cycle black/white reset rails, but must not add a second
+  app-switch, install, setup, or refresh flow.
 - Follow the bring-up ladder exactly; archive evidence at every rung.
 - Add RM2 input/profile/session behavior and common direct payload routing.
 - Run byte-oracle, scan timing, optical, failure, soak, lifecycle, and restore
@@ -1225,8 +1279,9 @@ Exit gate:
 
 - all section 7 gates pass on the exact accepted WBF/panel profile;
 - zero missed phases, underflows, unsafe rail states, or final-content mismatch;
-- Home, Ink, Codex, app switching, screenshot, suspend, crash recovery, stock
-  restore, and reboot are optically proven through the common CLI.
+- Home, Ink, Validation Lab, app switching, screenshot, suspend, crash
+  recovery, stock restore, and reboot are optically proven through the common
+  CLI.
 
 ### Phase 5: universal release/package/provision flow
 
@@ -1244,8 +1299,8 @@ Owners: CLI, build/release, setup, device supervisor, docs.
 Exit gate:
 
 - a clean host runs setup once and builds/validates both release target slices;
-- one release archive can carry both app slices and installs the correct one
-  after probe;
+- one release archive carries every app-declared target slice (one or both)
+  and installs the correct one after probe;
 - contradictory/missing target content fails before device writes;
 - old packages fail normally with no legacy-reader branch;
 - all three devices use `/home/root/pluto`, common services, and common commands.
@@ -1284,8 +1339,8 @@ Owners: device/release lead, all code owners.
 5. Run zero-residue source, binary, payload, and device scans.
 6. Run the full host gate and repeat all-device release smoke, optical proof,
    crash/recovery, restore, and uninstall with the final hashes.
-7. Replace durable content from this plan with native architecture docs and
-   delete this file.
+7. Keep durable implementation detail in the native architecture docs, mark
+   this plan complete, and retain it only as the requested cutover record.
 
 Exit gate: every item in the Definition of Done is true on the final tree and
 final device state. There is no compatibility follow-up phase.
@@ -1320,8 +1375,8 @@ For each exact accepted profile:
 - final `/proc/<pid>/exe` and installed payload hashes match the accepted build;
 - Xochitl is stopped while Pluto runs, and Pluto exclusively owns display, pen,
   and touch;
-- Home, launcher grid/list, Ink, Codex, validation lab, logs, and screenshot all
-  work through the same commands;
+- Home, launcher grid/list, Counter, Motion Lab, Ink Lab, Validation Lab, Ink,
+  logs, and screenshot all work through the same commands;
 - viewport, orientation, pen/touch transforms, power key, and optional hardware
   capabilities are correct;
 - every refresh class produces correct final glass, measured onset/settle, and
@@ -1413,10 +1468,10 @@ they do not imply old protocol/package/backend support.
 ### Parallel work in deletion paths
 
 Policy: at the 2026-07-14 planning snapshot, the repository had unrelated edits
-in several docs, CLI, integration, and ARMv7/Codex paths. Inventory and
-coordinate them before the cutover; preserve useful work in the native
-implementation or land it first. Never erase it merely because the containing
-legacy path is scheduled for deletion.
+in several docs, CLI, integration, and ARMv7 paths. Inventory and coordinate
+them before the cutover; preserve useful native work or land it first. The
+custom ARMv7 Codex experiment is explicitly abandoned and removed rather than
+preserved as a compatibility obligation.
 
 ## 14. Definition of Done
 
@@ -1433,24 +1488,26 @@ This project is complete only when all of the following are true:
 - One setup, release assembler, package schema, provisioner, runtime root,
   install/run/log/screenshot/restore/uninstall flow, and user documentation set
   cover every supported device.
-- Release AOT applications, including Home, Ink, and Codex, pass on both target
-  architectures.
+- Release AOT Home, Counter, Motion Lab, Ink Lab, Validation Lab, and Ink pass
+  on both target architectures. Paper Codex passes only on `linux-arm64` and is
+  neither built nor required on ARMv7.
 - Generated profiles/tables/packs are deterministic, digest-bound, fuzzed, and
   faster on the exact devices that use them.
 - Final performance reports show same-device improvement over the cooperative
   RM1/RM2 baseline, no meaningful Move regression, and camera-verified glass
   behavior.
-- AppLoad, XOVI, QTFB, cooperative routing, old formats, integration sources,
-  builders, patches, diagnostics, tests, docs, caches, payloads, sockets, menu
-  entries, device roots, and binary strings are absent.
-- ARMv7 toolchain, engine, Codex, ABI, and AOT support remain as first-class
-  native build inputs.
+- Outside this requested cutover record and Git history, AppLoad, XOVI, QTFB,
+  cooperative routing, old formats, integration sources, builders, patches,
+  diagnostics, tests, docs, caches, payloads, sockets, menu entries, device
+  roots, and binary strings are absent.
+- ARMv7 toolchain, engine, ABI, and AOT support remain as first-class native
+  build inputs; all custom ARMv7 Codex inputs and caches are absent.
 - A clean clone/cache passes setup, both target builds, release assembly,
   `./ci/check.sh`, all-device smoke, recovery, stock restore, and residue audit.
 - There are no compatibility readers, aliases, migrations, dormant fallbacks,
   backend selectors, or follow-up cleanup tasks.
-- Durable native architecture docs are current and this transitional plan has
-  been deleted from the completed tree.
+- Durable native architecture docs are current and this plan is marked complete
+  as the sole retained historical cutover inventory.
 
 ## 15. Primary and repository references
 
@@ -1463,6 +1520,7 @@ Authoritative and original sources for implementation work:
 - [Official RM1 device tree at the audited commit](https://github.com/reMarkable/linux/blob/d54fe67bf86e918468b936f97a2ec39f4f87a3d9/arch/arm/boot/dts/zero-gravitas-factory.dts)
 - [Official RM2 device tree at the audited commit](https://github.com/reMarkable/linux/blob/d54fe67bf86e918468b936f97a2ec39f4f87a3d9/arch/arm/boot/dts/zero-sugar.dts)
 - [Official LCDIF framebuffer driver at the audited commit](https://github.com/reMarkable/linux/blob/d54fe67bf86e918468b936f97a2ec39f4f87a3d9/drivers/video/fbdev/mxsfb.c)
+- [Official zero-sugar SY7636A MFD at the audited commit](https://github.com/reMarkable/linux/blob/2be45d43a07299fcd7a19d4cb914880c53b054de/drivers/mfd/sy7636a.c)
 - [reMarkable official Move Linux repository](https://github.com/reMarkable/linux-imx-rm)
 - [yobert/swtcon, an MIT standalone RM2 reference](https://github.com/yobert/swtcon)
 - [timower/rM2-stuff, GPL-3.0 research reference](https://github.com/timower/rM2-stuff)

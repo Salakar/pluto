@@ -141,7 +141,7 @@ exact Xochitl hash, fixed and descriptor-derived lengths, context pointers,
 mode/temperature, duplicate stride, rects, contiguous worker-row coverage,
 mapper context/hit count, nonzero output, and a nonempty A/B transition. With
 `--write-manifest` it records all SHA-256 values and parsed metadata. The valid
-synthetic bundle passed. Production schema 2 additionally requires the exact
+synthetic bundle passed. A production capture additionally requires the exact
 software-breakpoint addresses/file offsets/original bytes and all three live
 post-detach instruction words. Corrupt detached proof, waveform delta pointer,
 palette, output descriptor, duplicated context stride, injected cleanup error,

@@ -62,7 +62,7 @@ final class _WelcomeScreenState extends State<WelcomeScreen> {
           _WelcomeCard(
             title: 'Flutter for reMarkable.',
             body:
-                'This tablet now runs Pluto Home. Your reMarkable notes app is untouched — it stays one tap away on Home, and Pluto can uninstall itself from Settings.',
+                'This tablet now runs Pluto Home. Your reMarkable notes app is untouched and remains available from Home.',
             codeLines: <String>[
               r'$ pluto devices',
               r'$ pluto install <app>',
@@ -1689,7 +1689,7 @@ final class _AppInfo extends StatelessWidget {
             Text(
               health is LauncherAppBroken
                   ? 'Manifest error — ${health.reason}'
-                  : 'Manifest OK — validated against schema v1',
+                  : 'Manifest OK — exact shape verified',
               style: health is LauncherAppBroken
                   ? theme.type.mono.copyWith(color: theme.palette.accentRed)
                   : theme.type.caption.copyWith(color: theme.palette.gray33),
@@ -1801,7 +1801,8 @@ final class LaunchFailureScreen extends StatelessWidget {
                   Text('STDERR', style: metaMono),
                   const SizedBox(height: PaperSpacing.space8),
                   Text(
-                    failure.stderr ?? 'No stderr was reported by plutod.',
+                    failure.stderr ??
+                        'No stderr was reported by the Pluto supervisor.',
                     maxLines: 6,
                     overflow: TextOverflow.ellipsis,
                     style: theme.type.mono,
@@ -1858,6 +1859,7 @@ final class _SettingsScreenState extends State<SettingsScreen> {
   int _frontlightRaw = 1250;
   int _frontlightMax = 2047;
   int _frontlightNotch = 5;
+  bool _hasFrontlight = false;
   RotationPreference _rotation = RotationPreference.auto;
   String _standby = '20 min';
   String? _wifiSubtitle;
@@ -1883,13 +1885,25 @@ final class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _loadState() async {
-    final LauncherSettings settings = LauncherScope.of(context).settings;
+    final LauncherServices services = LauncherScope.of(context);
+    final LauncherSettings settings = services.settings;
+    bool hasFrontlight = false;
     FrontlightState? frontlight;
     RotationPreference rotation = RotationPreference.auto;
     try {
-      frontlight = await settings.frontlight();
+      final DeviceCapabilities capabilities = await services.device
+          .capabilities();
+      hasFrontlight = capabilities.supports(Capability.frontlight);
     } catch (_) {
-      // Keep the last truthful value instead of fabricating a hardware state.
+      // Fail closed: never offer a hardware control unless the validated
+      // device profile explicitly reports it.
+    }
+    if (hasFrontlight) {
+      try {
+        frontlight = await settings.frontlight();
+      } catch (_) {
+        // Keep the last truthful value instead of fabricating hardware state.
+      }
     }
     try {
       rotation = await settings.rotationPreference();
@@ -1902,6 +1916,7 @@ final class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     setState(() {
+      _hasFrontlight = hasFrontlight;
       if (frontlight != null) {
         _frontlightRaw = frontlight.raw;
         _frontlightMax = frontlight.maxRaw;
@@ -1975,28 +1990,30 @@ final class _SettingsScreenState extends State<SettingsScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             _SectionLabel('DISPLAY'),
-            SizedBox(
-              height: 28,
-              child: Row(
-                children: <Widget>[
-                  Text('Frontlight', style: theme.type.body),
-                  const Spacer(),
-                  Text(
-                    frontlightPercent == 0 ? 'off' : '$frontlightPercent%',
-                    style: theme.type.mono.copyWith(
-                      color: theme.palette.gray33,
+            if (_hasFrontlight) ...<Widget>[
+              SizedBox(
+                height: 28,
+                child: Row(
+                  children: <Widget>[
+                    Text('Frontlight', style: theme.type.body),
+                    const Spacer(),
+                    Text(
+                      frontlightPercent == 0 ? 'off' : '$frontlightPercent%',
+                      style: theme.type.mono.copyWith(
+                        color: theme.palette.gray33,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            DiscreteSlider(
-              notchCount: _frontlightCurve.length,
-              notchIndex: _frontlightNotch,
-              leadingLabel: 'off',
-              onNotchChanged: (int notch) =>
-                  unawaited(_setFrontlightNotch(notch)),
-            ),
+              DiscreteSlider(
+                notchCount: _frontlightCurve.length,
+                notchIndex: _frontlightNotch,
+                leadingLabel: 'off',
+                onNotchChanged: (int notch) =>
+                    unawaited(_setFrontlightNotch(notch)),
+              ),
+            ],
             _SegmentSetting<RotationPreference>(
               label: 'Rotation',
               value: _rotation,
@@ -2073,20 +2090,11 @@ final class _SettingsScreenState extends State<SettingsScreen> {
               onTap: () => _showExitToStockConfirm(context),
             ),
             PaperListItem(
-              title: 'About & developer',
+              title: 'About',
               padding: EdgeInsets.zero,
               height: 48,
               trailing: arrow,
               onTap: () => Navigator.of(context).pushNamed('/settings/about'),
-            ),
-            PaperListItem(
-              title: 'Uninstall Pluto…',
-              destructive: true,
-              padding: EdgeInsets.zero,
-              height: 48,
-              trailing: arrow,
-              onTap: () =>
-                  Navigator.of(context).pushNamed('/settings/uninstall'),
             ),
           ],
         ),
@@ -2462,6 +2470,10 @@ String _wifiErrorText(Object error) {
     final String detail = error.message?.trim() ?? '';
     return 'Wi-Fi: ${detail.isEmpty ? error.code : detail}';
   }
+  if (error is PlutoException) {
+    final String detail = error.message.trim();
+    return detail.isEmpty ? 'Wi-Fi request failed.' : 'Wi-Fi: $detail';
+  }
   final String message = error
       .toString()
       .replaceFirst(RegExp(r'^(Exception|StateError):\s*'), '')
@@ -2741,286 +2753,7 @@ final class _SecurityPinScreenState extends State<SecurityPinScreen> {
   }
 }
 
-/// S14 Uninstall Pluto screen.
-final class UninstallPlutoScreen extends StatefulWidget {
-  /// Creates the self-uninstall screen.
-  const UninstallPlutoScreen({this.initialProgress = false, super.key});
-
-  /// Whether to show the progress state initially.
-  final bool initialProgress;
-
-  @override
-  State<UninstallPlutoScreen> createState() => _UninstallPlutoScreenState();
-}
-
-final class _UninstallPlutoScreenState extends State<UninstallPlutoScreen> {
-  bool _deleteData = false;
-  bool _keepBackup = false;
-  late bool _progress = widget.initialProgress;
-
-  @override
-  Widget build(BuildContext context) {
-    if (_progress) {
-      return _UninstallProgressScreen(deleteData: _deleteData);
-    }
-    final PaperThemeData theme = PaperTheme.of(context);
-    return _LauncherPage(
-      title: 'Uninstall Pluto',
-      leading: _BackButton(label: 'Settings', route: '/settings'),
-      body: Padding(
-        padding: const EdgeInsets.all(PaperSpacing.pageMargin),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Text(
-              'This removes Pluto from the tablet and restores the stock reMarkable experience as it was.',
-              style: theme.type.body,
-            ),
-            const SizedBox(height: PaperSpacing.space24),
-            Text('What will be removed', style: theme.type.heading),
-            const SizedBox(height: PaperSpacing.space12),
-            const _BulletRow('Pluto Home (this launcher)'),
-            const _BulletRow('The Pluto runtime and services'),
-            const _BulletRow('Boot integration (reMarkable starts at boot)'),
-            const _BulletRow('Installed apps'),
-            const SizedBox(height: PaperSpacing.space20),
-            PaperCheckbox(
-              value: _deleteData,
-              onChanged: (bool value) => setState(() => _deleteData = value),
-              label: 'Also delete all app data (21.3 MB)',
-            ),
-            const SizedBox(height: PaperSpacing.space8),
-            PaperCheckbox(
-              value: _keepBackup,
-              onChanged: (bool value) => setState(() => _keepBackup = value),
-              label: 'Keep a backup of app list on /home/root',
-            ),
-            const SizedBox(height: PaperSpacing.space24),
-            Text(
-              'Your documents and notes are not touched. Reinstall any time with:',
-              style: theme.type.body,
-            ),
-            const SizedBox(height: PaperSpacing.space8),
-            const PaperCodeBlock(lines: <String>[r'$ pluto provision']),
-            const Spacer(),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: PaperButton(
-                    label: 'Cancel',
-                    onPressed: () {
-                      final NavigatorState navigator = Navigator.of(context);
-                      unawaited(
-                        navigator.maybePop().then((bool popped) {
-                          if (!popped) {
-                            navigator.pushReplacementNamed('/settings');
-                          }
-                        }),
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(width: PaperSpacing.space12),
-                Expanded(
-                  child: PaperButton.destructive(
-                    label: 'Continue to uninstall',
-                    onPressed: _showHoldConfirm,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showHoldConfirm() async {
-    await PaperDialogs.show<void>(
-      context,
-      builder: (BuildContext dialogContext) {
-        return PaperDialog(
-          title: 'Uninstall Pluto?',
-          actions: <Widget>[
-            PaperButton(
-              label: 'Cancel',
-              onPressed: () => Navigator.of(dialogContext).pop(),
-            ),
-          ],
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              Text(
-                'Press and hold for three seconds.',
-                style: PaperTheme.of(dialogContext).type.body,
-              ),
-              const SizedBox(height: PaperSpacing.space16),
-              HoldToConfirmButton(
-                label: 'Hold to uninstall',
-                onConfirmed: () {
-                  Navigator.of(dialogContext).pop();
-                  setState(() => _progress = true);
-                  unawaited(
-                    LauncherScope.of(context).session.beginPlutoUninstall(
-                      PlutoUninstallOptions(
-                        deleteAppData: _deleteData,
-                        keepAppListBackup: _keepBackup,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-final class _BulletRow extends StatelessWidget {
-  const _BulletRow(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final PaperThemeData theme = PaperTheme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: PaperSpacing.space4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.only(top: 9),
-            child: SizedBox.square(
-              dimension: 6,
-              child: ColoredBox(color: theme.palette.ink),
-            ),
-          ),
-          const SizedBox(width: PaperSpacing.space12),
-          Expanded(child: Text(text, style: theme.type.body)),
-        ],
-      ),
-    );
-  }
-}
-
-final class _UninstallProgressScreen extends StatelessWidget {
-  const _UninstallProgressScreen({required this.deleteData});
-
-  final bool deleteData;
-
-  @override
-  Widget build(BuildContext context) {
-    final PaperThemeData theme = PaperTheme.of(context);
-    final List<PlutoUninstallStep> steps = <PlutoUninstallStep>[
-      const PlutoUninstallStep(
-        label: 'Stopping Pluto services',
-        isComplete: true,
-      ),
-      const PlutoUninstallStep(
-        label: 'Restoring reMarkable boot default',
-        isComplete: true,
-      ),
-      PlutoUninstallStep(
-        label: deleteData ? 'Removing apps and data' : 'Removing apps',
-        isComplete: true,
-      ),
-      const PlutoUninstallStep(
-        label: 'Removing /home/root/pluto',
-        isComplete: false,
-      ),
-      const PlutoUninstallStep(
-        label: 'Handing over to reMarkable',
-        isComplete: false,
-      ),
-    ];
-    final int activeIndex = steps.indexWhere(
-      (PlutoUninstallStep step) => !step.isComplete,
-    );
-    return _LauncherPage(
-      title: 'Uninstalling Pluto',
-      showStatusBar: false,
-      body: Padding(
-        padding: const EdgeInsets.all(PaperSpacing.pageMargin),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            const SizedBox(height: PaperSpacing.space8),
-            for (int i = 0; i < steps.length; i++)
-              _UninstallStepRow(step: steps[i], isActive: i == activeIndex),
-            const Spacer(),
-            Center(
-              child: Column(
-                children: <Widget>[
-                  Text(
-                    'step ${activeIndex < 0 ? steps.length : activeIndex + 1} / ${steps.length}',
-                    style: theme.type.mono.copyWith(
-                      color: theme.palette.gray33,
-                    ),
-                  ),
-                  const SizedBox(height: PaperSpacing.space8),
-                  Text(
-                    'Do not power off the device.',
-                    style: theme.type.caption.copyWith(
-                      color: theme.palette.gray33,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: PaperSpacing.space24),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-final class _UninstallStepRow extends StatelessWidget {
-  const _UninstallStepRow({required this.step, required this.isActive});
-
-  final PlutoUninstallStep step;
-  final bool isActive;
-
-  @override
-  Widget build(BuildContext context) {
-    final PaperThemeData theme = PaperTheme.of(context);
-    final String marker = step.isComplete
-        ? '[x]'
-        : isActive
-        ? '[>]'
-        : '[ ]';
-    final TextStyle labelStyle = step.isComplete
-        ? theme.type.body
-        : isActive
-        ? theme.type.body.copyWith(fontWeight: FontWeight.w700)
-        : theme.type.body.copyWith(color: theme.palette.gray33);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: PaperSpacing.space8),
-      child: Row(
-        children: <Widget>[
-          SizedBox(
-            width: 40,
-            child: Text(
-              marker,
-              style: theme.type.mono.copyWith(
-                color: step.isComplete || isActive
-                    ? theme.palette.ink
-                    : theme.palette.gray33,
-              ),
-            ),
-          ),
-          Expanded(child: Text(step.label, style: labelStyle)),
-        ],
-      ),
-    );
-  }
-}
-
-/// S15 About and developer screen.
+/// S15 About screen.
 final class AboutScreen extends StatefulWidget {
   /// Creates About.
   const AboutScreen({super.key});
@@ -3049,17 +2782,13 @@ final class _AboutScreenState extends State<AboutScreen> {
             body: PaperLoadingState(label: 'Loading about…'),
           );
         }
-        final SessionInfo session = data.session;
         final DeviceInfo device = data.device;
-        final LauncherDeveloperStats stats = data.stats;
         final LauncherNetworkInfo network = data.network;
-        final String engineVersion = session.engineVersion;
         // Head + tail keeps the sha identifiable without wrapping.
-        final String engineHash = engineVersion.length > 20
-            ? '${engineVersion.substring(0, 8)}…${engineVersion.substring(engineVersion.length - 8)}'
-            : engineVersion;
+        final String engineHash =
+            '${kEngineCommitPin.substring(0, 8)}…${kEngineCommitPin.substring(kEngineCommitPin.length - 8)}';
         return _LauncherPage(
-          title: 'About & developer',
+          title: 'About',
           leading: _BackButton(label: 'Settings', route: '/settings'),
           body: Padding(
             padding: const EdgeInsets.all(PaperSpacing.pageMargin),
@@ -3067,11 +2796,11 @@ final class _AboutScreenState extends State<AboutScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 _SectionLabel('SYSTEM'),
-                _InfoRow('Pluto', session.plutoVersion),
+                const _InfoRow('Pluto', kPlutoVersion),
                 _InfoRow('Engine', engineHash),
-                _InfoRow(
+                const _InfoRow(
                   'Flutter / Dart',
-                  '${session.flutterVersion} / ${session.dartVersion}',
+                  '$kFlutterVersionPin / $kDartVersionPin',
                 ),
                 _InfoRow(
                   'Device',
@@ -3083,14 +2812,13 @@ final class _AboutScreenState extends State<AboutScreen> {
                   '${device.panel.width}x${device.panel.height} @${device.dpi} dpi',
                 ),
                 const SizedBox(height: PaperSpacing.space20),
-                _SectionLabel('DEVELOPER'),
+                _SectionLabel('NETWORK'),
                 _InfoRow(
                   'USB IP',
                   network.usbIp ?? 'not connected',
                   annotation: 'pluto devices',
                 ),
                 _InfoRow('Wi-Fi IP', network.wifiIp ?? 'not connected'),
-                _InfoRow('VM service', stats.vmServiceUri),
               ],
             ),
           ),
@@ -3101,16 +2829,9 @@ final class _AboutScreenState extends State<AboutScreen> {
 }
 
 final class _AboutData {
-  const _AboutData({
-    required this.session,
-    required this.device,
-    required this.stats,
-    required this.network,
-  });
+  const _AboutData({required this.device, required this.network});
 
-  final SessionInfo session;
   final DeviceInfo device;
-  final LauncherDeveloperStats stats;
   final LauncherNetworkInfo network;
 }
 
@@ -3718,8 +3439,8 @@ final class StandbyScreen extends StatefulWidget {
   /// Whether to perform the hardware standby transaction after first paint.
   final bool beginStandby;
 
-  /// Time reserved for the e-ink presenter to settle this screen before the
-  /// frontlight is switched off and the kernel is suspended.
+  /// Time reserved for the e-ink presenter to settle this screen before any
+  /// supported frontlight is switched off and the kernel is suspended.
   final Duration settleDelay;
 
   @override
@@ -3749,12 +3470,19 @@ final class _StandbyScreenState extends State<StandbyScreen> {
     FrontlightState? previousLight;
     bool handoffAccepted = false;
     try {
-      previousLight = await services.settings.frontlight();
+      final DeviceCapabilities capabilities = await services.device
+          .capabilities();
+      final bool hasFrontlight = capabilities.supports(Capability.frontlight);
+      if (hasFrontlight) {
+        previousLight = await services.settings.frontlight();
+      }
       await _requestFullStandbyRefresh();
       if (widget.settleDelay > Duration.zero) {
         await Future<void>.delayed(widget.settleDelay);
       }
-      await services.settings.setFrontlightRaw(0);
+      if (hasFrontlight) {
+        await services.settings.setFrontlightRaw(0);
+      }
       await services.session.handoffStandbyToSupervisor();
       handoffAccepted = true;
     } catch (_) {
@@ -3763,9 +3491,9 @@ final class _StandbyScreenState extends State<StandbyScreen> {
       }
     }
 
-    // A successful handoff deliberately leaves the light off and this process
-    // on the standby frame. Native shutdown releases SWTCON/DRM; the supervisor
-    // then suspends and alone restores the saved light after the call returns.
+    // A successful handoff deliberately leaves any supported light off and
+    // this process on the standby frame. Native shutdown releases the display;
+    // the supervisor then suspends and alone restores saved device state.
     if (handoffAccepted) {
       return;
     }
@@ -4056,7 +3784,6 @@ final class _LauncherPage extends StatelessWidget {
     this.trailing,
     this.pageIndicator,
     this.showHeader = true,
-    this.showStatusBar = true,
   });
 
   final Widget body;
@@ -4065,7 +3792,6 @@ final class _LauncherPage extends StatelessWidget {
   final Widget? trailing;
   final Widget? pageIndicator;
   final bool showHeader;
-  final bool showStatusBar;
 
   @override
   Widget build(BuildContext context) {
@@ -4075,7 +3801,6 @@ final class _LauncherPage extends StatelessWidget {
       builder: (BuildContext context, AsyncSnapshot<StatusSnapshot> snapshot) {
         final StatusSnapshot? status = snapshot.data;
         return PaperScaffold(
-          showStatusBar: showStatusBar,
           statusBar: status == null
               ? null
               : StatusBar(
@@ -4655,15 +4380,11 @@ Future<void> _confirmUninstallApp(BuildContext context, LauncherApp app) async {
 }
 
 Future<void> _showExitToStockConfirm(BuildContext context) async {
-  final SessionInfo session = await LauncherScope.of(context).session.info();
-  if (!context.mounted) {
-    return;
-  }
   final bool confirmed = await PaperDialogs.confirm(
     context,
     title: 'Switch to reMarkable?',
     message:
-        'Your notes and documents open in the stock reMarkable interface. Pluto stays installed — ${session.returnInstructions}',
+        'Your notes and documents open in the stock reMarkable interface. Pluto stays installed. To return, connect the tablet to your computer and run pluto run --release dev.pluto.launcher.',
     confirmLabel: 'Switch',
     armingDelay: const Duration(milliseconds: 600),
   );
@@ -4673,16 +4394,9 @@ Future<void> _showExitToStockConfirm(BuildContext context) async {
 }
 
 Future<_AboutData> _aboutData(LauncherServices services) async {
-  final SessionInfo session = await services.session.info();
   final DeviceInfo device = await services.device.deviceInfo();
-  final LauncherDeveloperStats stats = await services.session.developerStats();
   final LauncherNetworkInfo network = await services.settings.networkInfo();
-  return _AboutData(
-    session: session,
-    device: device,
-    stats: stats,
-    network: network,
-  );
+  return _AboutData(device: device, network: network);
 }
 
 int _homeGridCapacity({required double maxWidth, required double maxHeight}) {

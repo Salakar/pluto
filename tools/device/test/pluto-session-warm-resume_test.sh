@@ -3,6 +3,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 SUPERVISOR="$HERE/../pluto-session.sh"
+PROFILE_FILE="$HERE/../generated/device-profiles.sh"
 TMP=${TMPDIR:-/tmp}/pluto-session-warm-resume-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
@@ -80,6 +81,8 @@ marker="$PLUTO_RUN_DIR/hibernated/$$"
 count_file="$PLUTO_TEST_STARTS/$PLUTO_APP_ID"
 count=$(cat "$count_file" 2>/dev/null || echo 0)
 printf '%s\n' "$((count + 1))" > "$count_file"
+printf '%s\n' "$PLUTO_LOG_ACTIVATION" > \
+  "$PLUTO_TEST_STARTS/$PLUTO_APP_ID.log-activation"
 printf '%s %s\n' "$PLUTO_APP_ID" "$*" >> "$PLUTO_TEST_INVOCATIONS"
 hibernate() {
   if [ -f "$PLUTO_TEST_STARTS/$PLUTO_APP_ID.never-hibernate" ]; then
@@ -106,12 +109,14 @@ mkdir -p "$TMP/starts"
 
 PATH="$TMP/bin:$PATH" \
 PLUTO_ROOT="$ROOT" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=rm1 \
 PLUTO_RUN_DIR="$CTL" \
 PLUTO_POWER_WATCHER="$ROOT/bin/missing-power-watcher" \
 PLUTO_UPTIME_FILE="$TMP/uptime" \
 PLUTO_HIBERNATE_WAIT_TICKS=240 \
 PLUTO_RESUME_WAIT_TICKS=120 \
-PLUTO_MAX_WARM_APPS=2 \
 PLUTO_TEST_SLOW_HIBERNATE_APP=dev.pluto.launcher \
 PLUTO_TEST_STARTS="$TMP/starts" \
 PLUTO_TEST_INVOCATIONS="$TMP/invocations" \
@@ -124,19 +129,34 @@ for _ in $(seq 1 220); do
   sleep 0.05
 done
 [ -n "${launcher_pid:-}" ] || fail "launcher never became foreground"
+grep -q 'profile accepted: rm1 .* resident=2' "$TMP/session.log" ||
+  fail "RM1 generated resident-process limit was not applied"
 wait_for_value "$TMP/starts/dev.pluto.launcher" 1 ||
   fail "launcher test process did not finish installing signal handlers"
 wait_for_file "$TMP/starts/dev.pluto.launcher.ready" ||
   fail "launcher test process did not install signal handlers"
+launcher_log_activation=$(cat "$TMP/starts/dev.pluto.launcher.log-activation")
+case "$launcher_log_activation" in
+  ''|*[!A-Za-z0-9_.-]*) fail "launcher received an unsafe log activation" ;;
+esac
+grep -Fqx \
+  "pluto-log-activation app_id=dev.pluto.launcher token=$launcher_log_activation" \
+  "$ROOT/logs/dev.pluto.launcher.log" ||
+  fail "launcher log is not bounded by its process activation token"
 
 printf 'dev.example.paper\n' > "$CTL/launch"
-for _ in $(seq 1 120); do
+# The fixture deliberately acknowledges hibernation after 6.2 seconds to
+# exercise the widened supervisor envelope. Keep the outer assertion wider
+# than that deliberate delay instead of depending on loop overhead.
+for _ in $(seq 1 180); do
   paper_pid=$(cat "$CTL/embedder.pid" 2>/dev/null || true)
   [ -n "$paper_pid" ] && [ "$paper_pid" != "$launcher_pid" ] && break
   sleep 0.05
 done
 [ -n "${paper_pid:-}" ] && [ "$paper_pid" != "$launcher_pid" ] ||
   fail "paper app never became foreground"
+wait_for_file "$TMP/starts/dev.example.paper.ready" ||
+  fail "paper app did not install signal handlers"
 [ -f "$CTL/hibernated/$launcher_pid" ] ||
   fail "launcher did not acknowledge native-resource quiesce"
 grep -q "hibernated 'dev.pluto.launcher' pid=$launcher_pid" \
@@ -144,6 +164,22 @@ grep -q "hibernated 'dev.pluto.launcher' pid=$launcher_pid" \
   fail "safe acknowledgement beyond the old 6s envelope fell back cold"
 kill -0 "$launcher_pid" 2>/dev/null ||
   fail "launcher process did not remain resident"
+
+# Repeating an ordinary release launch for the foreground app must be an
+# idempotent no-op. In particular it must not publish an old healthy receipt
+# while temporarily withdrawing the app's control surface.
+printf 'dev.example.paper\n' > "$CTL/launch"
+wait_for_absent "$CTL/launch" ||
+  fail "same-app release request was not consumed"
+[ "$(cat "$CTL/embedder.pid" 2>/dev/null || true)" = "$paper_pid" ] ||
+  fail "same-app release request changed foreground ownership"
+[ "$(cat "$TMP/starts/dev.example.paper")" -eq 1 ] ||
+  fail "same-app release request restarted the foreground app"
+[ ! -f "$CTL/hibernated/$paper_pid" ] ||
+  fail "same-app release request hibernated the foreground app"
+grep -q "foreground launch is already active: dev.example.paper" \
+  "$TMP/session.log" ||
+  fail "same-app release request was not logged as idempotent"
 
 : > "$CTL/home"
 wait_for_value "$CTL/embedder.pid" "$launcher_pid" ||
@@ -169,12 +205,14 @@ for _ in $(seq 1 120); do
 done
 [ -n "${third_pid:-}" ] && [ "$third_pid" != "$launcher_pid" ] ||
   fail "third app never became foreground"
+wait_for_file "$TMP/starts/dev.example.third.ready" ||
+  fail "third app did not install signal handlers"
 for _ in $(seq 1 120); do
   kill -0 "$paper_pid" 2>/dev/null || break
   sleep 0.05
 done
 kill -0 "$paper_pid" 2>/dev/null &&
-  fail "LRU did not evict the oldest app at the configured limit"
+  fail "LRU did not evict the oldest app at the RM1 profile limit"
 [ ! -e "$CTL/warm-apps/dev.example.paper.pid" ] ||
   fail "LRU left the evicted app registered"
 [ "$(find "$CTL/warm-apps" -name '*.pid' -type f | wc -l | tr -d ' ')" -eq 2 ] ||

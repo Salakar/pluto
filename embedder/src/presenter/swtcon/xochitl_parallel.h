@@ -3,10 +3,13 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #if defined(__linux__)
@@ -79,10 +82,17 @@ inline bool configure_compute_worker_thread(
   }
   cpu_set_t cpus;
   CPU_ZERO(&cpus);
+  const int caller_cpu = sched_getcpu();
   const long representable_cpus =
       std::min<long>(online_cpus, static_cast<long>(CPU_SETSIZE));
   for (long cpu = 0; cpu < representable_cpus; ++cpu) {
-    CPU_SET(static_cast<int>(cpu), &cpus);
+    // Keep the compute helper off the caller's currently-running core when
+    // another CPU exists. This is deterministic on Move's two A55s (engine
+    // CPU1, helper CPU0) and prevents Linux initially colocating both halves
+    // of a phase build before load balancing reacts.
+    if (representable_cpus == 1 || cpu != caller_cpu) {
+      CPU_SET(static_cast<int>(cpu), &cpus);
+    }
   }
   if (pthread_setaffinity_np(worker, sizeof(cpus), &cpus) != 0) {
     return false;
@@ -92,6 +102,164 @@ inline bool configure_compute_worker_thread(
 #endif
   return true;
 }
+
+// Phase construction differs from admission-time color preprocessing: its
+// helper is in the 85 Hz deadline chain. Match an RT caller one priority step
+// lower (engine 60 -> helper 59), retain SCHED_OTHER for ordinary callers,
+// and keep the helper off the caller's current CPU. The worker runs only one
+// bounded row-band stripe and sleeps between frames.
+inline bool
+configure_phase_worker_thread(std::thread::native_handle_type worker) noexcept {
+#if defined(__linux__)
+  int caller_policy = SCHED_OTHER;
+  sched_param caller_param{};
+  if (pthread_getschedparam(pthread_self(), &caller_policy, &caller_param) !=
+      0) {
+    return false;
+  }
+  sched_param worker_param{};
+  int worker_policy = SCHED_OTHER;
+  if (caller_policy == SCHED_FIFO || caller_policy == SCHED_RR) {
+    worker_policy = caller_policy;
+    worker_param.sched_priority = std::max(1, caller_param.sched_priority - 1);
+  }
+  if (pthread_setschedparam(worker, worker_policy, &worker_param) != 0) {
+    return false;
+  }
+
+  const long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+  if (online_cpus <= 0) {
+    return false;
+  }
+  const int caller_cpu = sched_getcpu();
+  cpu_set_t cpus;
+  CPU_ZERO(&cpus);
+  const long representable_cpus =
+      std::min<long>(online_cpus, static_cast<long>(CPU_SETSIZE));
+  for (long cpu = 0; cpu < representable_cpus; ++cpu) {
+    if (representable_cpus == 1 || cpu != caller_cpu) {
+      CPU_SET(static_cast<int>(cpu), &cpus);
+    }
+  }
+  if (pthread_setaffinity_np(worker, sizeof(cpus), &cpus) != 0) {
+    return false;
+  }
+#else
+  (void)worker;
+#endif
+  return true;
+}
+
+// One persistent compute helper for an owner-thread + helper pair. The caller
+// lends a stack-resident work object through a no-allocation type-erased
+// trampoline, executes stripe 1 itself, then waits until stripe 0 completes.
+// It is intentionally a pair rather than a general pool: Move has exactly two
+// A55s, and the phase path needs one wake/join rendezvous, not worker churn.
+class PersistentComputePair final {
+public:
+  PersistentComputePair() = default;
+  ~PersistentComputePair() { stop(); }
+  PersistentComputePair(const PersistentComputePair &) = delete;
+  PersistentComputePair &operator=(const PersistentComputePair &) = delete;
+
+  bool start() noexcept {
+    if (worker_.joinable()) {
+      return true;
+    }
+    try {
+      worker_ = std::thread([this] { worker_loop(); });
+      return true;
+    } catch (const std::system_error &) {
+      return false;
+    }
+  }
+
+  bool available() const noexcept { return worker_.joinable(); }
+
+  template <typename Work> bool run(Work &work) {
+    using WorkType = std::remove_cvref_t<Work>;
+    if (!worker_.joinable()) {
+      return false;
+    }
+    if (!configured_) {
+      if (!configure_phase_worker_thread(worker_.native_handle())) {
+        return false;
+      }
+      configured_ = true;
+    }
+    {
+      std::lock_guard lock(mutex_);
+      if (stop_) {
+        return false;
+      }
+      context_ = &work;
+      invoke_ = [](void *context, std::size_t stripe) {
+        (*static_cast<WorkType *>(context))(stripe);
+      };
+      done_ = false;
+      ++epoch_;
+    }
+    cv_.notify_one();
+    work(1);
+    std::unique_lock lock(mutex_);
+    done_cv_.wait(lock, [this] { return done_ || stop_; });
+    context_ = nullptr;
+    invoke_ = nullptr;
+    return done_ && !stop_;
+  }
+
+private:
+  using Invoke = void (*)(void *, std::size_t);
+
+  void stop() noexcept {
+    if (!worker_.joinable()) {
+      return;
+    }
+    {
+      std::lock_guard lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_one();
+    worker_.join();
+  }
+
+  void worker_loop() {
+    std::uint64_t observed_epoch = 0;
+    while (true) {
+      Invoke invoke = nullptr;
+      void *context = nullptr;
+      {
+        std::unique_lock lock(mutex_);
+        cv_.wait(lock, [this, observed_epoch] {
+          return stop_ || epoch_ != observed_epoch;
+        });
+        if (stop_) {
+          return;
+        }
+        observed_epoch = epoch_;
+        invoke = invoke_;
+        context = context_;
+      }
+      invoke(context, 0);
+      {
+        std::lock_guard lock(mutex_);
+        done_ = true;
+      }
+      done_cv_.notify_one();
+    }
+  }
+
+  std::thread worker_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::condition_variable done_cv_;
+  void *context_ = nullptr;
+  Invoke invoke_ = nullptr;
+  std::uint64_t epoch_ = 0;
+  bool done_ = false;
+  bool stop_ = false;
+  bool configured_ = false;
+};
 
 struct WorkerThreadConfigurator final {
   bool operator()(std::thread::native_handle_type worker,

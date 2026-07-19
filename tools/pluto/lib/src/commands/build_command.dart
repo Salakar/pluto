@@ -1,9 +1,10 @@
 import 'dart:io';
 
+import 'package:pluto_manifest/pluto_manifest.dart';
+
 import '../build/package_builder.dart';
 import '../build/release_pipeline.dart';
 import '../config/pins.dart';
-import '../device/remarkable_device.dart';
 import '../exit_codes.dart';
 import '../run/device_operations.dart';
 import 'base_command.dart';
@@ -24,13 +25,15 @@ mixin _DeviceAwareBuildTarget on PlutoCommand {
     if (endpoint == null) {
       usageException('Invalid --device value: $requestedDevice.');
     }
-    final PlutoRuntimeBackend backend = await LiveDeviceOperations(
+    final String target = await LiveDeviceOperations(
       environment.transportFactory(endpoint),
-    ).runtimeBackend();
-    final PlutoTargetPlatform detected =
-        backend == PlutoRuntimeBackend.cooperative
-        ? PlutoTargetPlatform.linuxArm
-        : PlutoTargetPlatform.linuxArm64;
+    ).runtimeTarget();
+    final PlutoTargetPlatform? detected = PlutoTargetPlatform.fromCliName(
+      target,
+    );
+    if (detected == null) {
+      usageException('Connected device selected unsupported target $target.');
+    }
     if (explicit != null && explicit != detected) {
       usageException(
         '--target-platform ${explicit.cliName} does not match the connected '
@@ -258,6 +261,14 @@ final class BuildPackageCommand extends PlutoCommand
         help: 'Build and package a profile AOT app.',
       )
       ..addFlag(
+        'published',
+        negatable: false,
+        help:
+            'Emit one release package containing every target declared by '
+            'the app. With --from-layout, the directory must contain each '
+            'declared target-named layout.',
+      )
+      ..addFlag(
         'no-live',
         negatable: false,
         help: 'Do not invoke flutter_tools; package --from-layout directly.',
@@ -266,7 +277,8 @@ final class BuildPackageCommand extends PlutoCommand
         'from-layout',
         help:
             'Existing layout containing build-metadata.json, manifest.json, '
-            'and bundle/.',
+            'and bundle/. With --published, a parent containing the app’s '
+            'declared target directories.',
       )
       ..addOption(
         'target',
@@ -338,61 +350,120 @@ final class BuildPackageCommand extends PlutoCommand
           : null;
       final PlutoBuildMode effectiveMode =
           requestedMode ?? PlutoBuildMode.release;
-      final PlutoTargetPlatform targetPlatform =
-          await resolveBuildTargetPlatform();
-      final PlutoPins pins = environment.pinsRepository.readPins();
-      if (source == null) {
-        if (argResults!['no-live'] as bool) {
-          usageException('--from-layout is required with --no-live.');
-        }
-        final String layoutOutput =
-            (argResults!['layout-output'] as String?) ??
-            defaultLayoutOutput(effectiveMode, targetPlatform);
-        final BuildOutput build =
-            await LiveFlutterToolsBuildAdapter(
-              environment: environment,
-              flutterSdkOverride: globalFlutterSdk,
-            ).build(
-              BuildRequest(
-                projectDirectory: Directory.current.path,
-                targetFile: argResults!['target'] as String,
-                mode: effectiveMode,
-                outputDirectory: layoutOutput,
-                dartDefines: argResults!['dart-define'] as List<String>,
-                targetPlatform: targetPlatform,
-              ),
-            );
-        source = build.outputDirectory;
+      final bool published = argResults!['published'] as bool;
+      if (published && effectiveMode != PlutoBuildMode.release) {
+        usageException('Published dual-slice packages are release AOT only.');
       }
-      final BuildLayoutMetadata layoutMetadata = BuildLayoutMetadata.read(
-        source,
-      );
-      layoutMetadata.validate(
-        source,
-        pins: pins,
-        expectedMode: effectiveMode,
-        expectedTargetPlatform:
-            argResults!.wasParsed('target-platform') ||
-                resolveDeviceTarget() != null
-            ? targetPlatform
-            : null,
-      );
+      if (published &&
+          (resolveDeviceTarget() != null ||
+              argResults!.wasParsed('target-platform'))) {
+        usageException(
+          '--published already builds every app-declared target; do not pass '
+          '--device or --target-platform.',
+        );
+      }
+      final PlutoPins pins = environment.pinsRepository.readPins();
       final ByteCompressor compressor =
           (argResults!['compression'] as String) == 'none'
           ? const NoopCompressor()
           : const ExternalZstdCompressor();
-      final PlapPackage package =
-          await PlapPackageBuilder(compressor: compressor).build(
-            source: DirectoryPackageSource(source),
-            metadata: PackageMetadata(
-              flutterVersion: pins.flutterVersion,
-              engineCommit: pins.engineVersion,
-              plutoVersion: '0.1.0',
-              buildMode: layoutMetadata.buildMode.cliName,
-              engineFlavor: layoutMetadata.engineFlavor,
-              target: layoutMetadata.target,
+      final PlapPackage package;
+      if (published) {
+        final List<PlutoTargetPlatform> publishedTargets;
+        if (source == null) {
+          publishedTargets = _authoredPublishedTargets(pins);
+          source = await _resolvePublishedLayouts(
+            mode: effectiveMode,
+            targets: publishedTargets,
+          );
+        } else {
+          publishedTargets = _layoutPublishedTargets(source);
+        }
+        final List<PackageSliceSource> slices = <PackageSliceSource>[];
+        for (final PlutoTargetPlatform target in publishedTargets) {
+          final String layout = '$source/${target.cliName}';
+          if (FileSystemEntity.typeSync(layout, followLinks: false) !=
+              FileSystemEntityType.directory) {
+            usageException(
+              'Published package is missing the ${target.cliName} layout: '
+              '$layout.',
+            );
+          }
+          final BuildLayoutMetadata metadata = BuildLayoutMetadata.read(layout);
+          metadata.validate(
+            layout,
+            pins: pins,
+            expectedMode: PlutoBuildMode.release,
+            expectedTargetPlatform: target,
+          );
+          slices.add(
+            PackageSliceSource(
+              source: DirectoryPackageSource(layout),
+              metadata: PackageMetadata(
+                flutterVersion: pins.flutterVersion,
+                engineCommit: pins.engineVersion,
+                plutoVersion: '0.1.0',
+                buildMode: metadata.buildMode.cliName,
+                engineFlavor: metadata.engineFlavor,
+                target: metadata.target,
+              ),
             ),
           );
+        }
+        package = await PlapPackageBuilder(
+          compressor: compressor,
+        ).buildSlices(slices: slices);
+      } else {
+        final PlutoTargetPlatform targetPlatform =
+            await resolveBuildTargetPlatform();
+        if (source == null) {
+          if (argResults!['no-live'] as bool) {
+            usageException('--from-layout is required with --no-live.');
+          }
+          final String layoutOutput =
+              (argResults!['layout-output'] as String?) ??
+              defaultLayoutOutput(effectiveMode, targetPlatform);
+          final BuildOutput build =
+              await LiveFlutterToolsBuildAdapter(
+                environment: environment,
+                flutterSdkOverride: globalFlutterSdk,
+              ).build(
+                BuildRequest(
+                  projectDirectory: Directory.current.path,
+                  targetFile: argResults!['target'] as String,
+                  mode: effectiveMode,
+                  outputDirectory: layoutOutput,
+                  dartDefines: argResults!['dart-define'] as List<String>,
+                  targetPlatform: targetPlatform,
+                ),
+              );
+          source = build.outputDirectory;
+        }
+        final BuildLayoutMetadata layoutMetadata = BuildLayoutMetadata.read(
+          source,
+        );
+        layoutMetadata.validate(
+          source,
+          pins: pins,
+          expectedMode: effectiveMode,
+          expectedTargetPlatform:
+              argResults!.wasParsed('target-platform') ||
+                  resolveDeviceTarget() != null
+              ? targetPlatform
+              : null,
+        );
+        package = await PlapPackageBuilder(compressor: compressor).build(
+          source: DirectoryPackageSource(source),
+          metadata: PackageMetadata(
+            flutterVersion: pins.flutterVersion,
+            engineCommit: pins.engineVersion,
+            plutoVersion: '0.1.0',
+            buildMode: layoutMetadata.buildMode.cliName,
+            engineFlavor: layoutMetadata.engineFlavor,
+            target: layoutMetadata.target,
+          ),
+        );
+      }
       final File output = File(argResults!['output'] as String);
       await output.parent.create(recursive: true);
       await output.writeAsBytes(package.bytes);
@@ -403,4 +474,108 @@ final class BuildPackageCommand extends PlutoCommand
       return ExitCodes.ok;
     });
   }
+
+  Future<String> _resolvePublishedLayouts({
+    required PlutoBuildMode mode,
+    required List<PlutoTargetPlatform> targets,
+  }) async {
+    if (argResults!['no-live'] as bool) {
+      usageException('--from-layout is required with --no-live.');
+    }
+    final String root =
+        (argResults!['layout-output'] as String?) ??
+        'build/pluto/published-release';
+    final LiveFlutterToolsBuildAdapter adapter = LiveFlutterToolsBuildAdapter(
+      environment: environment,
+      flutterSdkOverride: globalFlutterSdk,
+    );
+    for (final PlutoTargetPlatform target in targets) {
+      await adapter.build(
+        BuildRequest(
+          projectDirectory: Directory.current.path,
+          targetFile: argResults!['target'] as String,
+          mode: mode,
+          outputDirectory: '$root/${target.cliName}',
+          dartDefines: argResults!['dart-define'] as List<String>,
+          targetPlatform: target,
+        ),
+      );
+    }
+    return root;
+  }
+
+  List<PlutoTargetPlatform> _authoredPublishedTargets(PlutoPins pins) {
+    final File authored = File('${Directory.current.path}/pluto.yaml');
+    if (!authored.existsSync()) {
+      usageException('Published build requires pluto.yaml.');
+    }
+    final Result<AppManifest, ManifestError> result =
+        AppManifest.decodeAuthoredYaml(
+          authored.readAsStringSync(),
+          runtime: const FlutterAotRuntime(),
+          engine: EngineRequirement(
+            flutterVersion: pins.flutterVersion,
+            engineCommit: pins.engineVersion,
+          ),
+        );
+    final AppManifest? manifest = result.valueOrNull;
+    if (manifest == null) {
+      usageException('pluto.yaml is invalid: ${result.errorOrNull!.message}');
+    }
+    return _orderedTargets(manifest.targets);
+  }
+
+  List<PlutoTargetPlatform> _layoutPublishedTargets(String root) {
+    AppManifest? manifest;
+    for (final PlutoTargetPlatform target in PlutoTargetPlatform.values) {
+      final File candidate = File('$root/${target.cliName}/manifest.json');
+      if (!candidate.existsSync()) {
+        continue;
+      }
+      final Result<AppManifest, ManifestError> result = AppManifest.decode(
+        candidate.readAsStringSync(),
+      );
+      manifest = result.valueOrNull;
+      if (manifest == null) {
+        usageException(
+          '${candidate.path} is invalid: ${result.errorOrNull!.message}',
+        );
+      }
+      break;
+    }
+    if (manifest == null) {
+      usageException(
+        'Published package has no declared target layout under $root.',
+      );
+    }
+    final List<PlutoTargetPlatform> targets = _orderedTargets(manifest.targets);
+    for (final PlutoTargetPlatform target in PlutoTargetPlatform.values) {
+      final bool exists =
+          FileSystemEntity.typeSync(
+            '$root/${target.cliName}',
+            followLinks: false,
+          ) ==
+          FileSystemEntityType.directory;
+      final bool declared = targets.contains(target);
+      if (exists && !declared) {
+        usageException(
+          'Published package contains undeclared ${target.cliName} layout.',
+        );
+      }
+    }
+    return targets;
+  }
+
+  List<PlutoTargetPlatform> _orderedTargets(
+    Set<AppTargetPlatform> manifestTargets,
+  ) => <PlutoTargetPlatform>[
+    for (final PlutoTargetPlatform target in const <PlutoTargetPlatform>[
+      PlutoTargetPlatform.linuxArm,
+      PlutoTargetPlatform.linuxArm64,
+    ])
+      if (manifestTargets.any(
+        (AppTargetPlatform declared) => declared.wireName == target.cliName,
+      ))
+        target,
+  ];
 }

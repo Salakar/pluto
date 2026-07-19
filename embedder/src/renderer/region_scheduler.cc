@@ -933,13 +933,14 @@ void RegionScheduler::submit_settle(const PlutoRect &rect,
       PendingUpdate{clipped, cls, now_us, damage_epoch_, true, required};
 }
 
-void RegionScheduler::notify_completion(uint64_t frame_id) {
+bool RegionScheduler::notify_completion(uint64_t frame_id) {
   for (size_t i = 0; i < inflight_count_; ++i) {
     if (inflight_[i].frame_id == frame_id) {
       remove_inflight(i);
-      return;
+      return true;
     }
   }
+  return false;
 }
 
 bool RegionScheduler::presenter_ready(PlutoRefreshClass cls) const {
@@ -1286,6 +1287,9 @@ void RegionScheduler::complete_due(uint64_t now_us) {
     const bool synthetic_due =
         !inflight_[i].real_completion && now_us >= inflight_[i].eta_us;
     if (timeout || synthetic_due) {
+      if (timeout && inflight_[i].real_completion) {
+        real_completion_overdue_ = true;
+      }
       remove_inflight(i);
     } else {
       ++i;
@@ -2323,7 +2327,6 @@ bool RegionScheduler::export_state(RegionSchedulerState *out) const {
     return false;
   }
   RegionSchedulerState state;
-  state.version = kStateVersion;
   state.config = persistent_config(config_);
   state.has_debt_grid = !last_submit_us_.empty();
   if (state.has_debt_grid) {
@@ -2343,7 +2346,7 @@ bool RegionScheduler::import_state(const RegionSchedulerState &state) {
   constexpr uint64_t kMaxCbsSlots =
       (static_cast<uint64_t>(std::numeric_limits<size_t>::max()) - 1u) / 100u;
   if (!valid_ || !idle() || !rect_is_empty(pen_focus_rect_) ||
-      pen_focus_expires_us_ != 0 || state.version != kStateVersion ||
+      pen_focus_expires_us_ != 0 ||
       !same_config(state.config, persistent_config(config_)) ||
       state.has_debt_grid != has_debt_grid ||
       state.cbs_total_slots > kMaxCbsSlots ||

@@ -14,9 +14,9 @@ namespace {
 constexpr std::size_t kDirtyWords =
     (static_cast<std::size_t>(kDrmHeight) + 63) / 64;
 
-inline void set_bit(std::vector<std::uint64_t>& bits, int index) {
-  bits[static_cast<std::size_t>(index) >> 6] |=
-      std::uint64_t{1} << (index & 63);
+inline void set_bit_parallel(std::vector<std::uint64_t> &bits, int index) {
+  __atomic_fetch_or(&bits[static_cast<std::size_t>(index) >> 6],
+                    std::uint64_t{1} << (index & 63), __ATOMIC_RELAXED);
 }
 
 inline bool test_bit(const std::vector<std::uint64_t>& bits, int index) {
@@ -483,6 +483,21 @@ bool PhaseEmitter::begin_frame(std::size_t slot, std::uint64_t seq) {
 }
 
 void PhaseEmitter::emit_row(int row, const PixelOp* ops, std::size_t count) {
+  emit_row_impl(row, ops, count, true);
+}
+
+void PhaseEmitter::emit_row_parallel(int row, const PixelOp *ops,
+                                     std::size_t count) {
+  emit_row_impl(row, ops, count, false);
+}
+
+void PhaseEmitter::finish_parallel_rows(std::uint64_t rows, std::uint64_t ops) {
+  stats_.rows_emitted += rows;
+  stats_.ops_deposited += ops;
+}
+
+void PhaseEmitter::emit_row_impl(int row, const PixelOp *ops, std::size_t count,
+                                 bool account_stats) {
   assert(frame_open_ && "emit_row outside begin_frame/end_frame");
   if (!frame_open_) {
     return;
@@ -513,10 +528,14 @@ void PhaseEmitter::emit_row(int row, const PixelOp* ops, std::size_t count) {
   } else {
     compose_ops(dest, data_template_.data(), ops, count);
   }
-  stats_.ops_deposited += count;
+  if (account_stats) {
+    stats_.ops_deposited += count;
+  }
 
-  set_bit(new_dirty_, drm_row);
-  ++stats_.rows_emitted;
+  set_bit_parallel(new_dirty_, drm_row);
+  if (account_stats) {
+    ++stats_.rows_emitted;
+  }
 }
 
 std::size_t PhaseEmitter::end_frame() {

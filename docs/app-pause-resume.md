@@ -50,10 +50,10 @@ clear without changing the warm-process lifecycle.
 ## Exact-color glass-state transaction
 
 The glass handoff is not a Dart-heap or process snapshot. It is a short-lived,
-schema-v2 display-state bundle at `/run/pluto/glass.handoff` that lets two
+exact-layout display-state bundle at `/run/pluto/glass.handoff` that lets two
 otherwise independent embedder processes agree on the physical starting point
-for the next diff. Schema v2 is a clean break: the old monochrome plane-only
-format has no compatibility reader and is conservatively rejected.
+for the next diff. Anything that does not match the one current shape is
+conservatively rejected.
 
 For the Paper Pro Move, the bundle contains:
 
@@ -253,12 +253,9 @@ The renderer waits for current panel work, discards superseded queued damage,
 then drives one full-screen Fast black/white BlinkNow cycle. Because a lone
 blink left visible yellowing on the Move, production BlinkNow immediately
 continues through the complete two-cycle BleachNow policy before a balanced
-Full redraw of the newest retained application frame. Under direct SWTCON the
-black/white rails use the Move's short mode 7 and the final restore uses Full.
-The current Pluto qtfb presenter cannot carry an atomic per-update refresh
-class, so Xochitl chooses its downstream waveform. Upstream's newer
-connection-global mode setter is not used here because it delays mode changes
-and has no immutable snapshot/ack contract.
+Full redraw of the newest retained application frame. Each native panel driver
+maps the Fast rails and final Full restore through its profile-pinned waveform
+contract and reports real completion before the next stage begins.
 The rail bands overlap after a one-frame onset stagger; they do not crawl down
 the display one budget-sized third at a time.
 
@@ -449,9 +446,12 @@ CPU jiffies over five seconds and held 120,772 KiB and 114,256 KiB RSS. The
 active launcher held 254,868–254,912 KiB and advanced 12 CPU jiffies during the
 sample; the complete pool held 489,896–489,940 KiB (about 478.5 MiB). The
 device still had 1,403,700 KiB available of 2,008,664 KiB. This is the
-performance/RAM trade-off behind the default pool size of four. Constrained
-device profiles can lower `PLUTO_MAX_WARM_APPS` without changing handoff
-correctness.
+performance/RAM trade-off behind Move's generated total-resident limit of four.
+The same lifecycle uses a profile-owned limit of two on RM1 and four on RM2;
+production has no environment override. The smaller RM1 pool preserves one
+foreground and one warm process while bounding the tablet's substantially
+tighter memory envelope. Tests alone may exercise other limits through a
+guarded seam without changing production profile data or handoff correctness.
 
 The deterministic host regression is:
 

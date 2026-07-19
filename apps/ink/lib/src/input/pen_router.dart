@@ -331,7 +331,7 @@ final class PenRouter {
       tilt: sample.tilt,
       rawTilt: sample.rawTilt,
       buttons: sample.buttons,
-      hoverDistance: sample.hoverDistance,
+      hoverDistance: sample.distance,
       rawDistance: sample.rawDistance,
       isInProximity: state.$2,
       isInContact: state.$3,

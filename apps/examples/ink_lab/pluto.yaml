@@ -1,10 +1,8 @@
-schema: 1
 id: dev.pluto.examples.ink_lab
 name: Ink Lab
 version: 0.1.0
 description: Full-fidelity pen stream drawing showcase for Pluto.
 icon: assets/pluto/icon.png
-entrypoint: lib/main.dart
 permissions:
   - pen.raw
   - touch.raw

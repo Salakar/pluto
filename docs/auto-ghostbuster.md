@@ -88,28 +88,24 @@ lower hysteresis threshold. Ordinary Full is deliberately not accepted as
 proof that a gold/orange pigment cast was bleached: only a completed
 Bleach/Both plan repays pigment debt.
 
-Pigment debt and automatic global maintenance are enabled only for direct
-`swtcon`, which controls waveform class and reports real device completion.
-qtfb sends only `ALL`/`PARTIAL` framebuffer updates to Xochitl, cannot select a
-Blink/Bleach waveform, and reports timer estimates rather than optical
-completion; it therefore fails closed for automatic global actions. Its
-partial-work input gates and Sparkle no-op defense remain active. Host/null
-preview paths also fail closed.
+Pigment debt and automatic global maintenance are enabled only when the native
+panel profile reports distinct waveform-class control and real device
+completion. A presenter without both capabilities fails closed for global
+actions. Partial-work input gates and the unsupported-Sparkle no-op defense
+remain active; host/null preview paths also fail closed.
 
 ## Partial-area maintenance policy
 
 Real-panel feedback rejected the previous “many tiny partial repairs” policy:
 white regions visibly blacked out and often returned more gold/orange than
-before. The strongest implementation cause was a capability mismatch. The
-256-phase color develop sweep expected the direct SWTCON backend to apply a
-1/256 per-pixel mask, but qtfb can transmit only framebuffer bytes plus
-`ALL`/`PARTIAL`; it ignored the Sparkle flags and refreshed the complete
-rectangle every 350 ms.
+before. The presenter ABI carries rectangular damage, not the 1/256 per-pixel
+mask required by a sparse color-develop sweep. Treating that mask as an
+ordinary rectangle would refresh far more pixels than intended.
 
 Production now follows these rules:
 
-- qtfb accepts unsupported Sparkle/Develop requests as no-ops, as required by
-  the presenter contract;
+- presenters accept unsupported Sparkle/Develop requests as no-ops, as required
+  by the contract;
 - color develop sparkle is disabled, and mode-8 top-off is disabled on the
   physical pigment panel; sparse SWTCON development remains laboratory work
   until camera-validated behind a real capability bit;
@@ -117,11 +113,10 @@ Production now follows these rules:
   regional Text settle into flashing Full;
 - regional ghost-only debt uses non-flashing Text, including a broad backlog;
 - regional Full is reserved for actual undeveloped chromatic app content;
-- direct SWTCON no longer stress-promotes Text tiles into mode 2. DC/pigment
-  hygiene waits for the rare serialized global Bleach restore;
+- native presenters do not stress-promote Text tiles into a deeper waveform.
+  DC/pigment hygiene waits for the rare serialized global Bleach restore;
 - speculative regional black/white “partial bleach” was rejected: sharp rail
-  boundaries add bloom/DC risk and no recovered Xochitl GhostBuster path uses
-  it.
+  boundaries add bloom/DC risk.
 
 Intrusive regional maintenance (ordinary Full and any future sparkle) is held
 while touch or pen proximity is active and for the same 500 ms release grace.
@@ -129,9 +124,9 @@ Already queued maintenance remains owed. The presenter boundary rechecks the
 atomic input state, so an edge racing the scheduler cannot start a black-square
 job. Pen-priority truth is different: it presents verified app pixels and may
 complete during hover without waiting for a pen-up timer. It is required
-content delivery, not optional ghost maintenance. On qtfb, which cannot promise
-Text waveform semantics, every other background settle is treated as
-intrusive.
+content delivery, not optional ghost maintenance. If a native profile cannot
+promise non-flashing Text semantics, every other background settle is treated
+as intrusive.
 
 ## Action selection
 
@@ -144,14 +139,12 @@ remain distinct without changing the public `GhostControlMode` API:
 | Pigment only | Bleach | two Fast black/white cycles, Full retained content (5) |
 | Both | Blink + Bleach | three Fast black/white cycles, one Full retained-content restore (7) |
 
-Pluto submits every solid rail as Fast and never requests mode 0/INIT.
-Direct SWTCON maps that class to its short mode 7; qtfb cannot carry a refresh
-class, so downstream Xochitl chooses the actual waveform for the full-rect
-framebuffer update. A Bleach/Both restore is Full so direct SWTCON gets one
-genuinely balanced content pass instead of many regional mode-2 mosaics. It
-does not force identity, which would serialize the field into visible
-horizontal bands. When both reasons are due there is one operation and one
-final restore.
+Pluto submits every solid rail as Fast and never requests mode 0/INIT. The
+profile-selected native driver maps Fast to its pinned short rail program. A
+Bleach/Both restore is Full so the panel gets one genuinely balanced content
+pass instead of many regional deep-waveform mosaics. It does not force
+identity, which would serialize the field into visible horizontal bands. When
+both reasons are due there is one operation and one final restore.
 
 The public/manual API remains unchanged: user-visible `BlinkNow` and
 `BlinkLater` retain the empirically proven composed Blink-plus-Bleach behavior
@@ -177,10 +170,9 @@ A latched action starts only when all gates are true:
 
 The local settle planner and scheduler run first at that idle boundary. An
 accepted cheap Text repayment can lower/cancel ghost debt; global Blink is the
-fallback only if broad debt remains and the scheduler is still empty. On the
-only enabled automatic backend, direct SWTCON, this makes global Blink
-intentionally uncommon; local Text usually cancels the reason first. qtfb
-automatic global maintenance is disabled by capability.
+fallback only if broad debt remains and the scheduler is still empty. On a
+capable native presenter this makes global Blink intentionally uncommon; local
+Text usually cancels the reason first.
 
 Touch-up or pen-out only removes a gate. It never creates debt or schedules an
 action, so ordinary gesture endings do nothing unless a broad need was already
@@ -227,10 +219,8 @@ cannot interleave and the final restore uses the newest retained truth.
 
 ## Failure and rate limits
 
-On the enabled automatic backend, direct SWTCON, the rail state machine waits
-for real presenter completion between every black, white, and restore stage.
-(Manual qtfb resets remain timer-estimated because qtfb has no completion
-acknowledgement.) It has two new safety bounds:
+The rail state machine waits for real native presenter completion between every
+black, white, and restore stage. It has two safety bounds:
 
 - after 15 seconds, a stuck action attempts a retained-content recovery;
 - after a further 5 seconds, Flutter raster is released so Dart/UI work may
@@ -292,9 +282,9 @@ Primary implementation:
 - `embedder/src/runtime/vsync_pacer.{h,cc}`: render-only hold and lossless baton
   release;
 - `embedder/src/renderer/{settle_policy,region_scheduler}.*` and
-  `embedder/src/presenter/{qtfb,swtcon}`: intrusive partial gating, required
-  pen-truth provenance, qtfb no-op defense, and removal of regional mode-2
-  stress promotion.
+  `embedder/src/presenter/{native,swtcon}`: intrusive partial gating, required
+  pen-truth provenance, unsupported-operation defense, and prevention of
+  regional deep-waveform stress promotion.
 
 Coverage includes pure policy tests for every action, exact thresholds,
 pixel-area accounting, input/busy/suspension gates, low-water cancellation,

@@ -2,16 +2,27 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pluto_core/pluto_core.dart';
+import 'package:pluto_core/testing.dart';
+import 'package:pluto_device/pluto_device.dart';
 import 'package:pluto_launcher/src/models.dart';
 import 'package:pluto_launcher/src/real_services.dart';
 import 'package:pluto_launcher/src/services.dart';
 import 'package:pluto_manifest/pluto_manifest.dart';
+import 'package:pluto_settings/pluto_settings.dart';
 import 'package:pluto_ui/pluto_ui.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('legacy runtime enum manifest remains a healthy launcher app', () async {
+  test('real service bundle uses the canonical package facades', () {
+    final LauncherServices services = createRealServices();
+
+    expect(services.settings, isA<PlutoLauncherSettings>());
+    expect(services.device, isA<PlutoDeviceRepository>());
+  });
+
+  test('canonical runtime manifest remains a healthy launcher app', () async {
     const MethodChannel channel = MethodChannel('test/pluto/apps');
     final ChannelManifestRepository repository = ChannelManifestRepository(
       channel: channel,
@@ -26,8 +37,8 @@ void main() {
           expect(call.method, 'list');
           return <Object?>[
             <String, Object?>{
-              'id': 'dev.example.legacy',
-              'manifest': _legacyManifest,
+              'id': 'dev.example.notes',
+              'manifest': _canonicalManifest,
               'install': _releaseInstall,
               'sizeBytes': 2048,
             },
@@ -58,15 +69,15 @@ void main() {
           return <Object?>[
             <String, Object?>{
               'id': kLauncherAppId,
-              'manifest': _legacyManifest.replaceAll(
-                'dev.example.legacy',
+              'manifest': _canonicalManifest.replaceAll(
+                'dev.example.notes',
                 kLauncherAppId,
               ),
               'install': _releaseInstall,
             },
             <String, Object?>{
-              'id': 'dev.example.legacy',
-              'manifest': _legacyManifest,
+              'id': 'dev.example.notes',
+              'manifest': _canonicalManifest,
               'install': _releaseInstall,
             },
           ];
@@ -75,7 +86,7 @@ void main() {
     final List<LauncherApp> apps = await repository.watchApps().first;
 
     expect(apps.map((LauncherApp app) => app.id.value), <String>[
-      'dev.example.legacy',
+      'dev.example.notes',
     ]);
   });
 
@@ -99,9 +110,9 @@ void main() {
         .setMockMethodCallHandler(channel, (_) async {
           return <Object?>[
             <String, Object?>{
-              'id': 'dev.example.legacy',
+              'id': 'dev.example.notes',
               'path': appDir.path,
-              'manifest': _legacyManifest,
+              'manifest': _canonicalManifest,
               'install': _releaseInstall,
             },
           ];
@@ -115,33 +126,39 @@ void main() {
   test(
     'frontlight reads back exact raw state and surfaces channel failures',
     () async {
-      const MethodChannel channel = MethodChannel('test/standby-settings');
-      final TestDefaultBinaryMessenger messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       int raw = 913;
       bool failRead = false;
       bool failWrite = false;
-      messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
-        if (call.method == 'frontlightGet') {
+      final FakePlutoTransport transport = FakePlutoTransport()
+        ..onInvoke(plutoSettingsChannel, frontlightReadMethod, (
+          Object? arguments,
+        ) {
           if (failRead) {
-            throw PlatformException(code: 'unavailable');
+            throw const PlutoPlatformException(
+              'frontlight read failed',
+              code: 'unavailable',
+            );
           }
-          return <String, Object?>{'raw': raw, 'max': 2047};
-        }
-        if (call.method == 'frontlightSet') {
+          return <String, Object?>{'raw': raw, 'maxRaw': 2047};
+        })
+        ..onInvoke(plutoSettingsChannel, frontlightWriteMethod, (
+          Object? arguments,
+        ) {
           if (failWrite) {
-            throw PlatformException(code: 'unavailable');
+            throw const PlutoPlatformException(
+              'frontlight write failed',
+              code: 'unavailable',
+            );
           }
-          raw = (call.arguments! as Map<Object?, Object?>)['raw']! as int;
+          raw = (arguments! as Map<Object?, Object?>)['raw']! as int;
           return null;
-        }
-        throw MissingPluginException(call.method);
-      });
-      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        });
+      addTearDown(transport.close);
 
-      final ChannelLauncherSettings settings = ChannelLauncherSettings(
-        channel: channel,
+      final PlutoLauncherSettings settings = PlutoLauncherSettings(
+        settings: PlutoSettings.withTransport(transport),
       );
+      addTearDown(settings.dispose);
       expect((await settings.frontlight()).raw, 913);
 
       await settings.setFrontlightRaw(347);
@@ -150,7 +167,7 @@ void main() {
       failWrite = true;
       await expectLater(
         settings.setFrontlightRaw(100),
-        throwsA(isA<PlatformException>()),
+        throwsA(isA<PlutoPlatformException>()),
       );
       expect(
         raw,
@@ -162,7 +179,7 @@ void main() {
       failRead = true;
       await expectLater(
         settings.frontlight(),
-        throwsA(isA<PlatformException>()),
+        throwsA(isA<PlutoPlatformException>()),
       );
     },
   );
@@ -175,10 +192,10 @@ void main() {
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       String value = 'auto';
       messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
-        if (call.method == 'rotationGet') {
+        if (call.method == 'rotation.read') {
           return value;
         }
-        if (call.method == 'rotationSet') {
+        if (call.method == 'rotation.write') {
           value =
               (call.arguments! as Map<Object?, Object?>)['value']! as String;
           return null;
@@ -187,9 +204,11 @@ void main() {
       });
       addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
-      final ChannelLauncherSettings settings = ChannelLauncherSettings(
+      final PlutoLauncherSettings settings = PlutoLauncherSettings(
+        settings: PlutoSettings.withTransport(FakePlutoTransport()),
         channel: channel,
       );
+      addTearDown(settings.dispose);
       expect(await settings.rotationPreference(), RotationPreference.auto);
       await settings.setRotationPreference(RotationPreference.landscape);
       expect(value, 'landscape');
@@ -219,6 +238,90 @@ void main() {
     await expectLater(
       session.returnToLauncher(),
       throwsA(isA<PlatformException>()),
+    );
+  });
+
+  test('switch-to-stock propagates the channel failure', () async {
+    const MethodChannel channel = MethodChannel('test/stock-session');
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
+      expect(call.method, 'exitToStock');
+      throw PlatformException(code: 'io', message: 'stock handoff failed');
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    const ChannelSessionManager session = ChannelSessionManager(
+      channel: channel,
+    );
+    await expectLater(
+      session.switchToStockUi(),
+      throwsA(
+        isA<PlatformException>().having(
+          (PlatformException error) => error.code,
+          'code',
+          'io',
+        ),
+      ),
+    );
+  });
+
+  test('session decoders reject keys outside the current contract', () async {
+    const MethodChannel channel = MethodChannel('test/exact-session');
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    Object? reply = <String, Object?>{'active': false};
+    messenger.setMockMethodCallHandler(channel, (_) async => reply);
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    const ChannelSessionManager session = ChannelSessionManager(
+      channel: channel,
+    );
+    expect(await session.pendingPowerMenu(), isNull);
+
+    reply = <String, Object?>{
+      'active': false,
+      'originAppId': 'dev.pluto.codex',
+    };
+    await expectLater(
+      session.pendingPowerMenu(),
+      throwsA(isA<FormatException>()),
+    );
+
+    reply = <String, Object?>{'ok': true, 'legacyPid': 42};
+    await expectLater(
+      session.powerOffDevice(),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('launch accepts only the current acknowledgement shape', () async {
+    const MethodChannel channel = MethodChannel('test/exact-launch-session');
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    Object? reply = <String, Object?>{'ok': true};
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
+      expect(call.method, 'launch');
+      return reply;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    const ChannelSessionManager session = ChannelSessionManager(
+      channel: channel,
+    );
+    expect(
+      await session.launch(AppId.tryParse('dev.example.weather')!),
+      isA<LaunchSuccess>(),
+    );
+
+    reply = <String, Object?>{'ok': true, 'pid': 42};
+    final LaunchResult malformed = await session.launch(
+      AppId.tryParse('dev.example.weather')!,
+    );
+    expect(malformed, isA<LaunchFailure>());
+    expect(
+      (malformed as LaunchFailure).reason,
+      'Invalid pluto/session launch response.',
     );
   });
 
@@ -391,24 +494,44 @@ void main() {
       final TestDefaultBinaryMessenger messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
-        return switch (call.method) {
-          'batteryGet' => <String, Object?>{
-            'levelPercent': 64,
-            'markerLevelPercent': 77,
-            'isCharging': true,
-            'isUsbNetworkConnected': true,
-          },
-          'frontlightGet' => <String, Object?>{'raw': 512, 'max': 2048},
-          'wifiStatus' => throw PlatformException(
-            code: 'unavailable',
-            message: 'wpa_supplicant control socket is unavailable',
-          ),
-          _ => fail('Unexpected method: ${call.method}'),
+        expect(call.method, 'network.info');
+        return <String, Object?>{
+          'usbConnected': true,
+          'usbIp': '10.11.99.1',
+          'wifiIp': '',
         };
       });
       addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
-      final ChannelLauncherSettings settings = ChannelLauncherSettings(
+      final FakePlutoTransport transport = FakePlutoTransport()
+        ..onInvoke(
+          plutoSettingsChannel,
+          batteryDeviceMethod,
+          (Object? arguments) => <String, Object?>{
+            'level': 0.64,
+            'state': 'charging',
+            'isUsbPowerPresent': false,
+          },
+        )
+        ..onInvoke(
+          plutoSettingsChannel,
+          batteryMarkerMethod,
+          (Object? arguments) => <String, Object?>{'level': 0.77},
+        )
+        ..onInvoke(plutoSettingsChannel, wifiActiveMethod, (Object? arguments) {
+          throw const PlutoPlatformException(
+            'wpa_supplicant control socket is unavailable',
+            code: 'unavailable',
+          );
+        })
+        ..onInvoke(
+          plutoSettingsChannel,
+          frontlightReadMethod,
+          (Object? arguments) => <String, Object?>{'raw': 512, 'maxRaw': 2048},
+        );
+      addTearDown(transport.close);
+      final PlutoLauncherSettings settings = PlutoLauncherSettings(
+        settings: PlutoSettings.withTransport(transport),
         channel: channel,
       );
       addTearDown(settings.dispose);
@@ -430,27 +553,23 @@ void main() {
   test(
     'Wi-Fi status surfaces backend failures instead of inventing state',
     () async {
-      const MethodChannel channel = MethodChannel('test/wifi-settings');
-      final TestDefaultBinaryMessenger messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
-        expect(call.method, 'wifiStatus');
-        throw PlatformException(
-          code: 'unavailable',
-          message: 'wpa_supplicant control socket is unavailable',
-        );
-      });
-      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
-
-      final ChannelLauncherSettings settings = ChannelLauncherSettings(
-        channel: channel,
+      final FakePlutoTransport transport = FakePlutoTransport()
+        ..onInvoke(plutoSettingsChannel, wifiActiveMethod, (Object? arguments) {
+          throw const PlutoPlatformException(
+            'wpa_supplicant control socket is unavailable',
+            code: 'unavailable',
+          );
+        });
+      addTearDown(transport.close);
+      final PlutoLauncherSettings settings = PlutoLauncherSettings(
+        settings: PlutoSettings.withTransport(transport),
       );
       addTearDown(settings.dispose);
       await expectLater(
         settings.wifiStatus(),
         throwsA(
-          isA<PlatformException>().having(
-            (PlatformException error) => error.code,
+          isA<PlutoPlatformException>().having(
+            (PlutoPlatformException error) => error.code,
             'code',
             'unavailable',
           ),
@@ -458,30 +577,82 @@ void main() {
       );
     },
   );
+
+  test('device repository forwards profile capabilities', () async {
+    final FakePlutoTransport transport = FakePlutoTransport()
+      ..onInvoke(
+        plutoDeviceChannel,
+        deviceCapabilitiesMethod,
+        (Object? arguments) => <Object?>['wifi', 'devicePin', 'powerPolicy'],
+      );
+    addTearDown(transport.close);
+    final PlutoDeviceRepository repository = PlutoDeviceRepository(
+      device: PlutoDevice.withTransport(transport),
+    );
+
+    final DeviceCapabilities capabilities = await repository.capabilities();
+
+    expect(capabilities.supports(Capability.frontlight), isFalse);
+    expect(capabilities.supports(Capability.wifi), isTrue);
+  });
+
+  test('device identity failures propagate without a Move fallback', () async {
+    final FakePlutoTransport transport = FakePlutoTransport()
+      ..onInvoke(plutoDeviceChannel, deviceInfoMethod, (Object? arguments) {
+        throw const PlutoPlatformException(
+          'device profile is unavailable',
+          code: 'unavailable',
+        );
+      });
+    addTearDown(transport.close);
+    final PlutoDeviceRepository repository = PlutoDeviceRepository(
+      device: PlutoDevice.withTransport(transport),
+    );
+
+    await expectLater(
+      repository.deviceInfo(),
+      throwsA(
+        isA<PlutoPlatformException>().having(
+          (PlutoPlatformException error) => error.code,
+          'code',
+          'unavailable',
+        ),
+      ),
+    );
+  });
 }
 
-const String _legacyManifest = '''
+const String _canonicalManifest = '''
 {
-  "schema": 1,
-  "id": "dev.example.legacy",
-  "name": "Legacy",
+  "id": "dev.example.notes",
+  "name": "Notes",
   "version": "1.0.0",
+  "icon": "icon.png",
   "runtime": {
-    "type": "flutterAot",
+    "type": "flutter-aot",
     "appElf": "lib/app.so",
     "assets": "flutter_assets"
   },
   "engine": {
     "flutterVersion": "3.44.4",
-    "engineCommit": "a10d8ac38de835021c8d2f920dbf50a920ccc030",
-    "plutoAbi": 1
-  }
+    "engineCommit": "a10d8ac38de835021c8d2f920dbf50a920ccc030"
+  },
+  "targets": ["linux-arm", "linux-arm64"],
+  "permissions": [],
+  "display": {
+    "orientations": ["portrait"],
+    "defaultOrientation": "portrait",
+    "scale": "auto",
+    "color": "auto",
+    "refreshProfile": "ui"
+  },
+  "launch": {"singleInstance": true, "args": []}
 }
 ''';
 
 const String _releaseInstall = '''
 {
-  "schema": 1,
+  "appId": "dev.example.notes",
   "installedAt": "2026-07-10T00:00:00Z",
   "installedBy": "pluto 0.1.0",
   "source": "pluto-cli",

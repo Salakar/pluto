@@ -3,6 +3,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 WATCHER="$HERE/../pluto-power-key-watch.sh"
+PROFILE_FILE="$HERE/../generated/device-profiles.sh"
 TMP=${TMPDIR:-/tmp}/pluto-power-key-watch-test.$$
 FIFO="$TMP/power-event"
 RUN_DIR="$TMP/run"
@@ -35,7 +36,11 @@ start_target() {
 
 start_watcher() {
   hold_seconds="$1"
+  profile_id="${2:-move}"
   PLUTO_EVTEST="$FAKE_EVTEST" \
+  PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+  PLUTO_TESTING=1 \
+  PLUTO_TEST_PROFILE_ID="$profile_id" \
   PLUTO_BACKLIGHT_BRIGHTNESS="$BACKLIGHT" \
   PLUTO_POWER_MENU_HOLD_SECONDS="$hold_seconds" \
     "$WATCHER" --pid="$TARGET_PID" --app-id=dev.example.paper \
@@ -156,6 +161,32 @@ done
   fail "continuous hold did not request target hibernation"
 kill -0 "$TARGET_PID" 2>/dev/null ||
   fail "power-menu hold terminated the warm target"
+kill -TERM "$TARGET_PID" 2>/dev/null || true
+wait "$TARGET_PID" 2>/dev/null || true
+TARGET_PID=""
+
+# A profile without a frontlight still uses the same standby flow but must not
+# manufacture a brightness snapshot or touch a nonexistent sysfs path.
+rm -f "$RUN_DIR/power-menu" "$RUN_DIR/standby" \
+  "$RUN_DIR/standby-frontlight"
+start_target
+PLUTO_EVTEST="$FAKE_EVTEST" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=rm1 \
+PLUTO_POWER_MENU_HOLD_SECONDS=0.5 \
+  "$WATCHER" --pid="$TARGET_PID" --app-id=dev.example.paper \
+    --device="$FIFO" --run-dir="$RUN_DIR" &
+WATCHER_PID=$!
+emit_power_event 1
+sleep 0.05
+emit_power_event 0
+wait "$WATCHER_PID"
+WATCHER_PID=""
+[ -f "$RUN_DIR/standby" ] ||
+  fail "frontlight-free profile did not request standby"
+[ ! -e "$RUN_DIR/standby-frontlight" ] ||
+  fail "frontlight-free profile created a brightness snapshot"
 kill -TERM "$TARGET_PID" 2>/dev/null || true
 wait "$TARGET_PID" 2>/dev/null || true
 TARGET_PID=""

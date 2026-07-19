@@ -264,6 +264,28 @@ TEST(RegionSchedulerBehaviorTest, SynchronousCompletionDuringPresentIsHonored) {
   ASSERT_EQ(presenter.calls.size(), 2u);
 }
 
+TEST(RegionSchedulerBehaviorTest,
+     DefaultRealCompletionFenceOutlivesFiveSecondBackendWait) {
+  ScriptedPresenter presenter;
+  RegionSchedulerConfig config;
+  config.width = 128;
+  config.height = 128;
+  config.presenter_reports_completion = true;
+  RegionScheduler scheduler = make_scheduler(&presenter, config);
+
+  submit_one(&scheduler, PlutoRect{0, 0, 16, 16}, kPlutoRefreshUi, 0);
+  scheduler.tick(0);
+  ASSERT_TRUE(scheduler.anything_inflight());
+
+  scheduler.poll_completions(5'000'000);
+  EXPECT_TRUE(scheduler.anything_inflight());
+  EXPECT_FALSE(scheduler.real_completion_overdue());
+
+  scheduler.poll_completions(5'500'000);
+  EXPECT_FALSE(scheduler.anything_inflight());
+  EXPECT_TRUE(scheduler.real_completion_overdue());
+}
+
 TEST(RegionSchedulerBehaviorTest, PixelResetStagesWaitForCompletion) {
   ScriptedPresenter presenter;
   RegionSchedulerConfig config = test_config();
@@ -1060,7 +1082,7 @@ TEST(RegionSchedulerPenDamageTest,
   scheduler.submit_pen_damage(pen, pen, kPlutoRefreshFull, 100);
   scheduler.tick(100);
 
-  // qtfb has no optical completion callback, but Xochitl accepts overlapping
+  // This presenter has no optical completion callback but accepts overlapping
   // regional updates with newest-content supersession. The one-second nominal
   // fence therefore remains bookkeeping and cannot delay the Full truth.
   ASSERT_EQ(presenter.calls.size(), 2u);
@@ -1838,7 +1860,7 @@ TEST(RegionSchedulerTest,
      InputGateSkipsIntrusiveFullButDispatchesExplicitlyRequiredTextRepair) {
   ScriptedPresenter presenter;
   RegionSchedulerConfig config = test_config();
-  config.text_settle_nonintrusive = false; // qtfb-style capability
+  config.text_settle_nonintrusive = false;
   RegionPresenterHooks hooks;
   hooks.user_data = &presenter;
   hooks.ready = &ScriptedPresenter::ready;

@@ -63,7 +63,8 @@ verify_layout() {
     --from-layout="$layout" \
     --compression=none \
     --output="$OUTPUT/counter-$mode.plap" >/dev/null
-  LC_ALL=C tar -xOf "$OUTPUT/counter-$mode.plap" INTEGRITY.json |
+  LC_ALL=C tar -xOf "$OUTPUT/counter-$mode.plap" \
+    targets/linux-arm64/build-metadata.json |
     grep "\"buildMode\": \"$mode\"" >/dev/null ||
     die "$mode package metadata is incorrect"
 }

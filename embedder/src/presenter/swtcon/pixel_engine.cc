@@ -6,9 +6,10 @@
 #include <cstring>
 #include <limits>
 
-#include "presenter/swtcon/mapped_sweep.h"
 #include "presenter/swtcon/fast_rail_admit_kernels.h"
+#include "presenter/swtcon/mapped_sweep.h"
 #include "presenter/swtcon/sweep_kernels.h"
+#include "presenter/swtcon/xochitl_parallel.h"
 
 namespace pluto::swtcon {
 
@@ -303,12 +304,23 @@ bool PixelEngine::configure(const WaveformTable *waveform,
   // past the compacted `emitted` cursor as harmless scratch that is never
   // read); the +16 tail guarantees those stores stay in bounds for a fully
   // packed final row.
-  row_ops_.resize(static_cast<std::size_t>(config_.width) + 16);
-  mapped_terminal_scratch_.resize(static_cast<std::size_t>(config_.width) +
-                                  16);
-  completed_tiles_.reserve(dc_.tile_count());
-  band_records_.assign(tile_cols_, nullptr);
-  band_renorm_.assign(tile_cols_, 0);
+  static_assert(kMaxSweepStripes == xochitl_parallel::kMaxComputeStripes);
+  for (auto &row_ops : stripe_row_ops_) {
+    row_ops.resize(static_cast<std::size_t>(config_.width) + 16);
+  }
+  for (auto &completed_tiles : stripe_completed_tiles_) {
+    completed_tiles.reserve(dc_.tile_count());
+  }
+  for (auto &band_records : stripe_band_records_) {
+    band_records.assign(tile_cols_, nullptr);
+  }
+  for (auto &band_renorm : stripe_band_renorm_) {
+    band_renorm.assign(tile_cols_, 0);
+  }
+  if (plane >= xochitl_parallel::kParallelWorkItemThreshold &&
+      std::thread::hardware_concurrency() >= 2u) {
+    (void)sweep_compute_pair_.start();
+  }
 
   mapped_operations_.clear();
   mapped_runtime_pool_.clear();
@@ -600,11 +612,15 @@ void PixelEngine::reset_handoff_transients(
   stats_ = PixelEngineStats{};
   sink_impulse_ = nullptr;
   sink_drive_ = nullptr;
-  std::fill(mapped_terminal_scratch_.begin(), mapped_terminal_scratch_.end(),
-            0);
-  completed_tiles_.clear();
-  std::fill(band_records_.begin(), band_records_.end(), nullptr);
-  std::fill(band_renorm_.begin(), band_renorm_.end(), 0);
+  for (auto &completed_tiles : stripe_completed_tiles_) {
+    completed_tiles.clear();
+  }
+  for (auto &band_records : stripe_band_records_) {
+    std::fill(band_records.begin(), band_records.end(), nullptr);
+  }
+  for (auto &band_renorm : stripe_band_renorm_) {
+    std::fill(band_renorm.begin(), band_renorm.end(), 0);
+  }
 }
 
 void PixelEngine::set_temperature(float celsius) {
@@ -700,6 +716,8 @@ void PixelEngine::recycle_mapped_runtime(
   operation->state = MappedState::kQueued;
   operation->ever_emitted = false;
   operation->reconcile_invalidated = false;
+  operation->uniform_phase = false;
+  operation->uniform_phase_cursor = 0;
   operation->active_lanes = 0;
   operation->fnum.clear();
   operation->guard_dc.clear();
@@ -829,11 +847,12 @@ void PixelEngine::activate_mapped(MappedRuntime& operation) {
   const int x1 = std::min(execution.right + 1, config_.stride);
   const int y0 = execution.top;
   const int y1 = std::min(execution.bottom + 1, config_.height);
-  operation.active_lanes = static_cast<std::uint32_t>(
-      std::count_if(operation.fnum.begin(), operation.fnum.end(),
-                    [](std::uint8_t phase) {
-                      return phase != kMappedSweepIdle;
-                    }));
+  operation.active_lanes =
+      operation.uniform_phase
+          ? static_cast<std::uint32_t>(operation.operation->lanes().size())
+          : static_cast<std::uint32_t>(std::count_if(
+                operation.fnum.begin(), operation.fnum.end(),
+                [](std::uint8_t phase) { return phase != kMappedSweepIdle; }));
   for (int y = y0; y < y1; ++y) {
     const std::size_t tight_row =
         static_cast<std::size_t>(y - execution.top) *
@@ -843,7 +862,8 @@ void PixelEngine::activate_mapped(MappedRuntime& operation) {
     std::uint16_t row_lanes = 0;
     for (int x = x0; x < x1; ++x) {
       const std::size_t lane = tight_row + static_cast<std::size_t>(x - x0);
-      if (operation.fnum[lane] == kMappedSweepIdle) {
+      if (!operation.uniform_phase &&
+          operation.fnum[lane] == kMappedSweepIdle) {
         continue;
       }
       ++row_lanes;
@@ -983,8 +1003,11 @@ void PixelEngine::erase_mapped(std::size_t index,
       for (int x = execution.left; x < x1; ++x) {
         const std::size_t lane =
             tight_row + static_cast<std::size_t>(x - execution.left);
-        if (operation.fnum[lane] != kMappedSweepIdle) {
-          operation.fnum[lane] = kMappedSweepIdle;
+        if (operation.uniform_phase ||
+            operation.fnum[lane] != kMappedSweepIdle) {
+          if (!operation.uniform_phase) {
+            operation.fnum[lane] = kMappedSweepIdle;
+          }
           ++active_in_row;
         }
       }
@@ -1670,8 +1693,12 @@ bool PixelEngine::admit_mapped(const MappedAdmitRequest& request,
   // the full lane cursor only once admission is certain; rejected full-panel
   // candidates therefore neither dirty nor evict the pooled hot allocation.
   if (request.operation->lane_mask().empty()) {
-    candidate->fnum.assign(expected_lanes, 0);
+    candidate->fnum.clear();
+    candidate->uniform_phase = true;
+    candidate->uniform_phase_cursor = 0;
   } else {
+    candidate->uniform_phase = false;
+    candidate->uniform_phase_cursor = 0;
     candidate->fnum.resize(expected_lanes);
     std::transform(request.operation->lane_mask().begin(),
                    request.operation->lane_mask().end(),
@@ -2884,25 +2911,13 @@ void PixelEngine::advance(RowEmitter *emitter) {
   }
   activate_mapped_queue();
   process_pending_pieces();
-  completed_tiles_.clear();
+  for (auto &completed_tiles : stripe_completed_tiles_) {
+    completed_tiles.clear();
+  }
 
   if (total_active_px_ > 0 || mapped_active_px_ > 0) {
     const int tile_px = static_cast<int>(config_.tile_px);
     const DcLedgerConfig &dc_config = dc_.config();
-    // Per-segment sweep invariants hoisted out of the row loop. The record
-    // pointer, codes base, phase count and renorm flag of every tile are
-    // frame-invariant (admissions only happen before the sweep; active
-    // tiles only COMPLETE mid-frame), so they are cached once per tile-row
-    // band instead of re-derived via lut_cache_->peek per (row, tile)
-    // segment — ~32x fewer lookups on a dense band. Iteration order (rows
-    // ascending, tiles ascending within a row) and all outputs are
-    // unchanged.
-    SweepArgs sweep;
-    sweep.prev_est = dc_.prev_est_data();
-    sweep.impulse_map = dc_config.impulse_map.data();
-    sweep.dc_cap = dc_config.dc_pixel_cap;
-    std::uint64_t saturations = 0;
-    int cached_band = -1;
     int sweep_min_row = config_.height;
     int sweep_max_row = -1;
     if (total_active_px_ != 0) {
@@ -2913,160 +2928,274 @@ void PixelEngine::advance(RowEmitter *emitter) {
       sweep_min_row = std::min(sweep_min_row, mapped_clip_min_row_);
       sweep_max_row = std::max(sweep_max_row, mapped_clip_max_row_);
     }
-    for (int row = sweep_min_row; row <= sweep_max_row; ++row) {
-      if (row_active_[row] == 0 &&
-          mapped_row_active_[static_cast<std::size_t>(row)] == 0) {
-        continue; // row-skip
-      }
-      PixelOp *const row_ops = row_ops_.data();
-      std::size_t ops_count = 0;
-      const std::size_t row_base = static_cast<std::size_t>(row) *
-                                   static_cast<std::size_t>(config_.stride);
-      const int tile_row = row / tile_px;
-      if (tile_row != cached_band) {
-        cached_band = tile_row;
-        const std::size_t band_base =
-            static_cast<std::size_t>(tile_row) * tile_cols_;
-        for (std::uint32_t tx = 0; tx < tile_cols_; ++tx) {
-          const TileState &tile = tiles_[band_base + tx];
-          if (tile.active_px == 0) {
-            band_records_[tx] = nullptr;
-            continue;
-          }
-          // Bin pinning invariant: the record every active tile
-          // pinned at admission must still be resident (O(1) direct-mapped
-          // peek).
-          const LutRecord *record = lut_cache_->peek(tile.mode, tile.temp_bin);
-          assert(record != nullptr && "pinned LUT record evicted");
-          band_records_[tx] = record;
-          band_renorm_[tx] =
-              dc_config.trust_vendor_balance && dc_.balanced_mode(tile.mode);
+    const int first_band = sweep_min_row / tile_px;
+    const int last_band = sweep_max_row / tile_px;
+    const std::size_t band_count =
+        static_cast<std::size_t>(last_band - first_band + 1);
+
+    // Large ordinary work and exactly one broad mapped operation may use the
+    // bounded helper. Multiple mapped owners retain one-thread mutation/order;
+    // scalar parity stays a literal serial reference, and arbitrary host/test
+    // emitters must opt in before disjoint rows may be called concurrently.
+    MappedRuntime *parallel_mapped_operation = nullptr;
+    if (total_active_px_ == 0 && mapped_active_px_ > 0) {
+      for (auto &operation : mapped_operations_) {
+        if (operation->state != MappedState::kActive) {
+          continue;
         }
+        if (parallel_mapped_operation != nullptr) {
+          parallel_mapped_operation = nullptr;
+          break;
+        }
+        parallel_mapped_operation = operation.get();
       }
-      const std::uint32_t band_base =
-          static_cast<std::uint32_t>(tile_row) * tile_cols_;
-      for (std::uint32_t tx = 0; tx < tile_cols_; ++tx) {
-        const std::uint32_t tile_index = band_base + tx;
-        TileState &tile = tiles_[tile_index];
-        const MappedOperationToken mapped_owner =
-            mapped_tile_owner_[tile_index];
-        if (mapped_owner != 0) {
-          MappedRuntime* const operation = mapped_tile_runtime_[tile_index];
-          assert(operation != nullptr && operation->token == mapped_owner);
-          if (operation->state != MappedState::kActive) {
-            continue;  // terminal tile remains locked but emits nothing
+    }
+    std::size_t stripe_count = 1;
+    const bool parallel_work_shape =
+        mapped_active_px_ == 0 || parallel_mapped_operation != nullptr;
+    if (!config_.force_scalar_sweep && parallel_work_shape &&
+        (emitter == nullptr || emitter->supports_parallel_rows()) &&
+        sweep_compute_pair_.available()) {
+      stripe_count = xochitl_parallel::available_compute_stripes_for_work_items(
+          std::max(total_active_px_, mapped_active_px_));
+      stripe_count = std::min<std::size_t>(stripe_count, 2u);
+      stripe_count = std::min(stripe_count, band_count);
+    }
+    std::array<std::uint64_t, kMaxSweepStripes> stripe_saturations{};
+    std::array<std::uint64_t, kMaxSweepStripes> stripe_ops{};
+    std::array<std::uint64_t, kMaxSweepStripes> stripe_completions{};
+    std::array<std::uint64_t, kMaxSweepStripes> stripe_prev_estimated_clears{};
+    std::array<std::uint64_t, kMaxSweepStripes> stripe_mapped_completions{};
+    std::array<bool, kMaxSweepStripes> stripe_mapped_emitted{};
+    std::array<std::uint64_t, kMaxSweepStripes> stripe_emitted_rows{};
+
+    auto sweep_stripe = [&](std::size_t stripe) {
+      const int stripe_first_band =
+          first_band + static_cast<int>(band_count * stripe / stripe_count);
+      const int stripe_last_band =
+          first_band +
+          static_cast<int>(band_count * (stripe + 1) / stripe_count) - 1;
+      const int first_row =
+          std::max(sweep_min_row, stripe_first_band * tile_px);
+      const int last_row =
+          std::min(sweep_max_row, (stripe_last_band + 1) * tile_px - 1);
+      auto &band_records = stripe_band_records_[stripe];
+      auto &band_renorm = stripe_band_renorm_[stripe];
+      auto &completed_tiles = stripe_completed_tiles_[stripe];
+      PixelOp *const row_ops = stripe_row_ops_[stripe].data();
+
+      // Per-segment invariants are cached once per tile-row band. Each stripe
+      // owns whole bands, so tile counters, row counters, ops, and summary
+      // sinks are all disjoint.
+      SweepArgs sweep;
+      sweep.prev_est = dc_.prev_est_data();
+      sweep.impulse_map = dc_config.impulse_map.data();
+      sweep.dc_cap = dc_config.dc_pixel_cap;
+      int cached_band = -1;
+      for (int row = first_row; row <= last_row; ++row) {
+        if (row_active_[row] == 0 &&
+            mapped_row_active_[static_cast<std::size_t>(row)] == 0) {
+          continue; // row-skip
+        }
+        std::size_t ops_count = 0;
+        const std::size_t row_base = static_cast<std::size_t>(row) *
+                                     static_cast<std::size_t>(config_.stride);
+        const int tile_row = row / tile_px;
+        if (tile_row != cached_band) {
+          cached_band = tile_row;
+          const std::size_t band_base =
+              static_cast<std::size_t>(tile_row) * tile_cols_;
+          for (std::uint32_t tx = 0; tx < tile_cols_; ++tx) {
+            const TileState &tile = tiles_[band_base + tx];
+            if (tile.active_px == 0) {
+              band_records[tx] = nullptr;
+              continue;
+            }
+            const LutRecord *record =
+                lut_cache_->peek(tile.mode, tile.temp_bin);
+            assert(record != nullptr && "pinned LUT record evicted");
+            band_records[tx] = record;
+            band_renorm[tx] =
+                dc_config.trust_vendor_balance && dc_.balanced_mode(tile.mode);
           }
-          const auto execution = operation->operation->execution();
-          if (row < execution.top || row > execution.bottom) {
+        }
+        const std::uint32_t band_base =
+            static_cast<std::uint32_t>(tile_row) * tile_cols_;
+        for (std::uint32_t tx = 0; tx < tile_cols_; ++tx) {
+          const std::uint32_t tile_index = band_base + tx;
+          TileState &tile = tiles_[tile_index];
+          const MappedOperationToken mapped_owner =
+              mapped_tile_owner_[tile_index];
+          if (mapped_owner != 0) {
+            MappedRuntime *const operation = mapped_tile_runtime_[tile_index];
+            assert(operation != nullptr && operation->token == mapped_owner);
+            if (operation->state != MappedState::kActive) {
+              continue; // terminal tile remains locked but emits nothing
+            }
+            assert(stripe_count == 1 || operation == parallel_mapped_operation);
+            const auto execution = operation->operation->execution();
+            if (row < execution.top || row > execution.bottom) {
+              continue;
+            }
+            const int x0 =
+                std::max(static_cast<int>(tx) * tile_px, execution.left);
+            const int x1 = std::min({static_cast<int>(tx + 1) * tile_px,
+                                     execution.right + 1, config_.stride});
+            if (x1 <= x0) {
+              continue;
+            }
+            const std::size_t tight =
+                static_cast<std::size_t>(row - execution.top) *
+                    static_cast<std::size_t>(operation->operation->width()) +
+                static_cast<std::size_t>(x0 - execution.left);
+            const std::size_t px0 = row_base + static_cast<std::size_t>(x0);
+            MappedSweepArgs mapped;
+            mapped.transitions =
+                operation->operation->transitions().data() + tight;
+            mapped.fnum = operation->uniform_phase
+                              ? nullptr
+                              : operation->fnum.data() + tight;
+            mapped.dc = dc_.dc_data() + px0;
+            mapped.terminal = nullptr;
+            mapped.x0 = x0;
+            mapped.count = x1 - x0;
+            mapped.codes = operation->codes;
+            mapped.phase_count = operation->phase_count;
+            mapped.impulse_map = dc_config.impulse_map.data();
+            mapped.dc_cap = dc_config.dc_pixel_cap;
+            mapped.uniform_phase =
+                operation->uniform_phase
+                    ? static_cast<int>(operation->uniform_phase_cursor)
+                    : -1;
+            const MappedSweepResult swept =
+                config_.force_scalar_sweep
+                    ? mapped_sweep_scalar(mapped, row_ops + ops_count)
+                    : mapped_sweep(mapped, row_ops + ops_count);
+            ops_count += swept.emitted;
+            stripe_saturations[stripe] += swept.saturations;
+            if (stripe_count == 1) {
+              operation->ever_emitted |= swept.emitted != 0;
+              assert(operation->active_lanes >= swept.completed);
+              operation->active_lanes -= swept.completed;
+              assert(mapped_active_px_ >= swept.completed);
+              mapped_active_px_ -= swept.completed;
+            } else {
+              stripe_mapped_emitted[stripe] =
+                  stripe_mapped_emitted[stripe] || swept.emitted != 0;
+              stripe_mapped_completions[stripe] += swept.completed;
+            }
+            assert(mapped_row_active_[static_cast<std::size_t>(row)] >=
+                   swept.completed);
+            mapped_row_active_[static_cast<std::size_t>(row)] =
+                static_cast<std::uint16_t>(
+                    mapped_row_active_[static_cast<std::size_t>(row)] -
+                    swept.completed);
+            if (emitter != nullptr && sink_impulse_ != nullptr) {
+              sink_impulse_[tile_index] += swept.impulse;
+              if (swept.drove) {
+                sink_drive_[tile_index] = 1;
+              }
+            }
             continue;
           }
-          const int x0 = std::max(static_cast<int>(tx) * tile_px,
-                                  execution.left);
-          const int x1 = std::min(
-              {static_cast<int>(tx + 1) * tile_px, execution.right + 1,
-               config_.stride});
-          if (x1 <= x0) {
+          if (tile.active_px == 0) {
             continue;
           }
-          const std::size_t tight =
-              static_cast<std::size_t>(row - execution.top) *
-                  static_cast<std::size_t>(operation->operation->width()) +
-              static_cast<std::size_t>(x0 - execution.left);
+          const LutRecord *record = band_records[tx];
+          if (record == nullptr) {
+            continue;
+          }
+          const int x0 = static_cast<int>(tx) * tile_px;
+          const int x1 = std::min(x0 + tile_px, config_.width);
           const std::size_t px0 =
               row_base + static_cast<std::size_t>(x0);
-          MappedSweepArgs mapped;
-          mapped.transitions =
-              operation->operation->transitions().data() + tight;
-          mapped.fnum = operation->fnum.data() + tight;
-          mapped.dc = dc_.dc_data() + px0;
-          mapped.terminal = mapped_terminal_scratch_.data();
-          mapped.x0 = x0;
-          mapped.count = x1 - x0;
-          mapped.codes = operation->codes;
-          mapped.phase_count = operation->phase_count;
-          mapped.impulse_map = dc_config.impulse_map.data();
-          mapped.dc_cap = dc_config.dc_pixel_cap;
-          const MappedSweepResult swept =
+
+          sweep.prev = prev_.data() + px0;
+          sweep.next = next_.data() + px0;
+          sweep.final_lv = final_.data() + px0;
+          sweep.fnum = fnum_.data() + px0;
+          sweep.dc = dc_.dc_data() + px0;
+          sweep.drove = waveform_drove_.data() + px0;
+          sweep.px0 = px0;
+          sweep.x0 = x0;
+          sweep.count = x1 - x0;
+          sweep.codes = record->codes.data();
+          sweep.phase_count = record->phase_count;
+          sweep.renorm_dc = band_renorm[tx];
+          const SweepResult swept =
               config_.force_scalar_sweep
-                  ? mapped_sweep_scalar(mapped, row_ops + ops_count)
-                  : mapped_sweep(mapped, row_ops + ops_count);
-          operation->ever_emitted |= swept.emitted != 0;
+                  ? sweep_segment_scalar(sweep, row_ops + ops_count)
+                  : sweep_segment(sweep, row_ops + ops_count);
           ops_count += swept.emitted;
-          saturations += swept.saturations;
-          assert(operation->active_lanes >= swept.completed);
-          operation->active_lanes -= swept.completed;
-          assert(mapped_row_active_[static_cast<std::size_t>(row)] >=
-                 swept.completed);
-          mapped_row_active_[static_cast<std::size_t>(row)] =
-              static_cast<std::uint16_t>(
-                  mapped_row_active_[static_cast<std::size_t>(row)] -
-                  swept.completed);
-          assert(mapped_active_px_ >= swept.completed);
-          mapped_active_px_ -= swept.completed;
+          stripe_saturations[stripe] += swept.saturations;
+          stripe_prev_estimated_clears[stripe] += swept.prev_estimated_cleared;
           if (emitter != nullptr && sink_impulse_ != nullptr) {
             sink_impulse_[tile_index] += swept.impulse;
             if (swept.drove) {
               sink_drive_[tile_index] = 1;
             }
           }
-          continue;
+          if (swept.completed != 0) {
+            row_active_[row] =
+                static_cast<std::uint16_t>(row_active_[row] - swept.completed);
+            stripe_completions[stripe] += swept.completed;
+            tile.active_px =
+                static_cast<std::uint16_t>(tile.active_px - swept.completed);
+            if (tile.active_px == 0) {
+              completed_tiles.push_back(tile_index);
+            }
+          }
         }
-        if (tile.active_px == 0) {
-          continue;
+        if (ops_count != 0 && emitter != nullptr) {
+          if (stripe_count > 1) {
+            emitter->emit_row_parallel(row, row_ops, ops_count);
+          } else {
+            emitter->emit_row(row, row_ops, ops_count);
+          }
+          ++stripe_emitted_rows[stripe];
         }
-        const LutRecord *record = band_records_[tx];
-        if (record == nullptr) {
-          continue;
-        }
-        const int x0 = static_cast<int>(tx) * tile_px;
-        const int x1 = std::min(x0 + tile_px, config_.width);
-        const std::size_t px0 = row_base + static_cast<std::size_t>(x0);
+        stripe_ops[stripe] += ops_count;
+      }
+    };
 
-        // Fused sweep (sweep_kernels.h): LUT gather + op emission + DC
-        // charge (EVERY emitted op is ledgered, including
-        // guard-band and settle identity transitions) + fnum advance +
-        // waveform-boundary promotion, one tile-row segment wide.
-        sweep.prev = prev_.data() + px0;
-        sweep.next = next_.data() + px0;
-        sweep.final_lv = final_.data() + px0;
-        sweep.fnum = fnum_.data() + px0;
-        sweep.dc = dc_.dc_data() + px0;
-        sweep.drove = waveform_drove_.data() + px0;
-        sweep.px0 = px0;
-        sweep.x0 = x0;
-        sweep.count = x1 - x0;
-        sweep.codes = record->codes.data();
-        sweep.phase_count = record->phase_count;
-        sweep.renorm_dc = band_renorm_[tx];
-        const SweepResult swept =
-            config_.force_scalar_sweep
-                ? sweep_segment_scalar(sweep, row_ops + ops_count)
-                : sweep_segment(sweep, row_ops + ops_count);
-        ops_count += swept.emitted;
-        saturations += swept.saturations;
-        dc_.account_sweep_prev_estimated_clears(
-            swept.prev_estimated_cleared);
-        if (emitter != nullptr && sink_impulse_ != nullptr) {
-          sink_impulse_[tile_index] += swept.impulse;
-          if (swept.drove) {
-            sink_drive_[tile_index] = 1;
-          }
-        }
-        if (swept.completed != 0) {
-          row_active_[row] =
-              static_cast<std::uint16_t>(row_active_[row] - swept.completed);
-          total_active_px_ -= swept.completed;
-          tile.active_px =
-              static_cast<std::uint16_t>(tile.active_px - swept.completed);
-          if (tile.active_px == 0) {
-            completed_tiles_.push_back(tile_index);
-          }
-        }
-      }
-      if (ops_count != 0 && emitter != nullptr) {
-        emitter->emit_row(row, row_ops, ops_count);
-      }
-      stats_.ops_emitted += ops_count;
+    if (stripe_count > 1 && !sweep_compute_pair_.run(sweep_stripe)) {
+      stripe_count = 1;
+      sweep_stripe(0);
+    } else if (stripe_count == 1) {
+      sweep_stripe(0);
+    }
+
+    std::uint64_t saturations = 0;
+    std::uint64_t completed = 0;
+    std::uint64_t prev_estimated_clears = 0;
+    std::uint64_t mapped_completed = 0;
+    bool mapped_emitted = false;
+    std::uint64_t emitted_rows = 0;
+    std::uint64_t emitted_ops = 0;
+    for (std::size_t stripe = 0; stripe < stripe_count; ++stripe) {
+      saturations += stripe_saturations[stripe];
+      completed += stripe_completions[stripe];
+      prev_estimated_clears += stripe_prev_estimated_clears[stripe];
+      mapped_completed += stripe_mapped_completions[stripe];
+      mapped_emitted = mapped_emitted || stripe_mapped_emitted[stripe];
+      emitted_rows += stripe_emitted_rows[stripe];
+      emitted_ops += stripe_ops[stripe];
+      stats_.ops_emitted += stripe_ops[stripe];
+    }
+    if (stripe_count > 1 && emitter != nullptr) {
+      emitter->finish_parallel_rows(emitted_rows, emitted_ops);
+    }
+    assert(total_active_px_ >= completed);
+    total_active_px_ -= static_cast<std::uint32_t>(completed);
+    dc_.account_sweep_prev_estimated_clears(prev_estimated_clears);
+    if (stripe_count > 1 && (mapped_completed != 0 || mapped_emitted)) {
+      assert(parallel_mapped_operation != nullptr);
+      parallel_mapped_operation->ever_emitted |= mapped_emitted;
+      assert(parallel_mapped_operation->active_lanes >= mapped_completed);
+      parallel_mapped_operation->active_lanes -=
+          static_cast<std::uint32_t>(mapped_completed);
+      assert(mapped_active_px_ >= mapped_completed);
+      mapped_active_px_ -= static_cast<std::uint32_t>(mapped_completed);
     }
 
     // Rounded mapper operations can include x>=960 and y>=1696 history guard
@@ -3096,35 +3225,50 @@ void PixelEngine::advance(RowEmitter *emitter) {
         MappedSweepArgs guard;
         guard.transitions =
             operation.operation->transitions().data() + tight;
-        guard.fnum = operation.fnum.data() + tight;
+        guard.fnum =
+            operation.uniform_phase ? nullptr : operation.fnum.data() + tight;
         const std::size_t guard_count =
             static_cast<std::size_t>(execution.right - guard_x0 + 1);
         assert(guard_dc_offset + guard_count <= operation.guard_dc.size());
         guard.dc = operation.guard_dc.data() + guard_dc_offset;
-        guard.terminal = mapped_terminal_scratch_.data();
+        guard.terminal = nullptr;
         guard.x0 = guard_x0;
         guard.count = execution.right - guard_x0 + 1;
         guard.codes = operation.codes;
         guard.phase_count = operation.phase_count;
         guard.impulse_map = dc_config.impulse_map.data();
         guard.dc_cap = dc_config.dc_pixel_cap;
+        guard.uniform_phase =
+            operation.uniform_phase
+                ? static_cast<int>(operation.uniform_phase_cursor)
+                : -1;
         const MappedSweepResult swept =
             config_.force_scalar_sweep
-                ? mapped_sweep_scalar(guard, row_ops_.data())
-                : mapped_sweep(guard, row_ops_.data());
+                ? mapped_sweep_scalar(guard, stripe_row_ops_[0].data())
+                : mapped_sweep(guard, stripe_row_ops_[0].data());
         assert(operation.active_lanes >= swept.completed);
         operation.active_lanes -= swept.completed;
         guard_dc_offset += guard_count;
       }
       assert(guard_dc_offset == operation.guard_dc.size());
     }
+    for (auto &operation : mapped_operations_) {
+      if (operation->state == MappedState::kActive &&
+          operation->uniform_phase && operation->active_lanes != 0) {
+        assert(static_cast<int>(operation->uniform_phase_cursor) + 1 <
+               operation->phase_count);
+        ++operation->uniform_phase_cursor;
+      }
+    }
     if (saturations != 0) {
       dc_.add_saturations(saturations);
     }
     shrink_clip();
     recompute_mapped_clip();
-    for (const std::uint32_t tile_index : completed_tiles_) {
-      finalize_tile(tile_index);
+    for (std::size_t stripe = 0; stripe < stripe_count; ++stripe) {
+      for (const std::uint32_t tile_index : stripe_completed_tiles_[stripe]) {
+        finalize_tile(tile_index);
+      }
     }
     for (auto& operation : mapped_operations_) {
       if (operation->state == MappedState::kActive &&

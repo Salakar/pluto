@@ -81,6 +81,9 @@ class PhaseEmitter final : public RowEmitter {
   bool configure(const PhaseEmitterConfig& config);
   bool configured() const { return configured_; }
   const PhaseEmitterConfig& config() const { return config_; }
+  bool supports_parallel_rows() const noexcept override {
+    return configured_ && !config_.force_scalar_deposit;
+  }
 
   // Attaches a slot's output plane: `words` is the (typically mmap'd WC
   // dumb-buffer) base, `pitch_bytes` its row pitch (>= kDrmWidth * 2).
@@ -103,6 +106,9 @@ class PhaseEmitter final : public RowEmitter {
   // holds). Composes template row + deposits in the staging buffer, then
   // streams the 480 B data window to the frame's slot.
   void emit_row(int row, const PixelOp* ops, std::size_t count) override;
+  void emit_row_parallel(int row, const PixelOp *ops,
+                         std::size_t count) override;
+  void finish_parallel_rows(std::uint64_t rows, std::uint64_t ops) override;
 
   // Closes the frame: re-blanks the slot's stale rows (dirty on its
   // previous use, untouched this use), publishes shadow rows in
@@ -139,6 +145,8 @@ class PhaseEmitter final : public RowEmitter {
     return template_.data() + static_cast<std::size_t>(drm_row) * kDrmWidth;
   }
   void reblank_stale_rows(BuildSlotState& slot);
+  void emit_row_impl(int row, const PixelOp *ops, std::size_t count,
+                     bool account_stats);
   // Destination data-window base for a DRM row (WC target in kRowStage,
   // cached shadow in kShadowCopy). Written write-only on the hot path.
   std::uint16_t* data_window_dest(BuildSlotState& slot, int drm_row);

@@ -106,5 +106,5 @@ run "${DOCKER_RUN[@]}"
 
 if ((DRY_RUN == 0)); then
   echo "device embedder: $ROOT/embedder/build/device-arm64/pluto-embedder"
-  echo "device control client: $ROOT/embedder/build/device-arm64/pluto-apploadctl"
+  echo "device control client: $ROOT/embedder/build/device-arm64/pluto-controlctl"
 fi

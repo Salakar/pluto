@@ -17,7 +17,7 @@
 //     scene-switch waves faster than waveform flight, rapid overlapping
 //     partials, full-field band amortization racing tile damage, budget
 //     deferral storms, and a 10k-admission seeded random torture.
-//   * DrmSwtconPresenter-level (real threads, dry-run, C ABI ops): present
+//   * Gallery3DrmPresenter-level (real threads, dry-run, C ABI ops): present
 //     streams through the mailbox + large-admission lane with
 //     FrameRenderer-shaped Again retries; glass observed via the
 //     engine-thread-serviced debug_glass_for_testing seam.
@@ -470,7 +470,7 @@ TEST(ContentConsistencyEngineTest, RandomTortureConverges) {
 }
 
 // ---------------------------------------------------------------------------
-// Presenter-level oracle (real DrmSwtconPresenter through the C ABI ops,
+// Presenter-level oracle (real Gallery3DrmPresenter through the C ABI ops,
 // dry-run engine thread, mailbox + large-admission lane)
 // ---------------------------------------------------------------------------
 
@@ -493,11 +493,11 @@ class PresenterOracle {
   PresenterOracle() {
     eink_path_ = write_synth_eink("oracle");
     options_ = "dry_run=1,flip_interval_ms=0,stats_log_s=0,eink=" + eink_path_;
-    ops_ = pluto_presenter_by_name("swtcon");
+    ops_ = pluto_gallery3_drm_presenter_ops();
     EXPECT_TRUE(ops_ != nullptr);
     PlutoPresenterConfig config{};
     config.struct_size = sizeof(config);
-    config.backend_name = "swtcon";
+    config.backend_name = "gallery3_drm";
     config.options = options_.c_str();
     config.on_complete = [](std::uint64_t, void* user_data) {
       static_cast<PresenterOracle*>(user_data)->completions_.fetch_add(

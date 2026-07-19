@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,8 @@
 #include "renderer/tile_pass.h"
 
 namespace pluto {
+
+class HealthFilePublisher;
 
 // Mirrors the stock reMarkable GhostControlMode vocabulary. Production
 // BlinkNow/BlinkLater append the complete BleachNow rail policy to prevent
@@ -98,6 +101,9 @@ struct FrameRendererConfig {
   // Absolute path atomically published after the first successful
   // presenter present() return. Empty disables readiness publication.
   std::string ready_file_path;
+  // Absolute launch-nonce-specific liveness path. When set, the renderer
+  // requires real presenter completions and a presenter-loop health probe.
+  std::string health_file_path;
   bool start_presenter_thread = true;
   // Production EngineHost publishes native-panel proximity metadata directly
   // before Flutter pointer delivery. When true, FrameRenderer keeps only its
@@ -125,9 +131,12 @@ struct FrameRendererConfig {
   // renderer mutex is held at this boundary. Production posts shutdown onto
   // the platform event loop so the supervisor can restart on the cold path.
   std::function<void()> on_presenter_device_lost;
-  // TEST-ONLY deterministic policy clock. Timeout/fence accounting always
-  // keeps the real steady clock; this hook controls only timestamps consumed
-  // by renderer classification, debt, quiescence, and scheduling decisions.
+  // Fatal atomic-publication edge for the supervisor liveness record.
+  // Production posts shutdown onto the platform loop.
+  std::function<void()> on_health_file_failure;
+  // TEST-ONLY deterministic renderer clock. Production leaves this null and
+  // uses the real steady clock; tests may drive every renderer/scheduler
+  // timestamp, including completion-fence accounting, without wall sleeps.
   MonotonicNowForTesting monotonic_now_for_testing = nullptr;
   void *monotonic_now_context_for_testing = nullptr;
 };
@@ -284,13 +293,47 @@ public:
   // from any thread, including synchronously on the present() stack; the
   // completion is processed by the next presenter-loop tick in arrival order.
   void notify_present_complete(uint64_t frame_id);
+  // Monotonic generation of accepted Flutter compositor frames. A caller can
+  // use two sequential schedule/wait rounds as a post-semantics raster fence:
+  // the second frame was requested only after the first callback completed.
+  uint64_t flutter_surface_generation() const;
+  bool wait_for_flutter_surface_after(uint64_t baseline,
+                                      std::chrono::milliseconds timeout,
+                                      uint64_t *surface_generation);
+  struct ExactPresentationReceipt {
+    uint64_t surface_generation = 0;
+    uint64_t frame_id = 0;
+  };
+  // Starts an acceptance-only exact-Full transaction before Flutter performs
+  // its semantic route changes. While armed, accepted Flutter frames continue
+  // updating the retained surface but cannot dispatch intermediate panel
+  // requests. The opaque nonzero token binds completion/cancellation to the
+  // one caller that opened the transaction.
+  bool begin_retained_surface_full_proof(uint64_t *token);
+  bool cancel_retained_surface_full_proof(uint64_t token);
+  // After all work already accepted by the presenter has completed, discards
+  // every superseded request still queued in the scheduler and sends one
+  // dedicated full-screen Full request from the newest retained Flutter
+  // surface. Success requires the real presenter callback for that exact frame
+  // id. Unknown, stale, out-of-order and synchronous callbacks are reconciled
+  // without weakening the identity proof.
+  bool present_retained_surface_full(uint64_t token,
+                                     std::chrono::milliseconds timeout,
+                                     ExactPresentationReceipt *receipt);
+  // Convenience path for callers that do not need to hold the proof gate
+  // across a preceding Flutter transaction.
+  bool present_retained_surface_full(std::chrono::milliseconds timeout,
+                                     ExactPresentationReceipt *receipt);
   // TEST-ONLY: number of callbacks enqueued but not yet reconciled with the
   // current scheduler generation.
   size_t queued_present_completions_for_testing() const;
   // Quiesces panel-facing work without destroying the renderer object used by
   // Flutter's compositor. The caller may close the detached presenter after
   // this returns. Frames are rejected until attach_presenter() rebuilds the
-  // scheduler against the newly opened panel owner.
+  // scheduler against the newly opened panel owner. Reattach reconciles the
+  // last complete app surface against the current glass handoff and always
+  // queues real presenter work before returning; post-resume health therefore
+  // cannot depend on Flutter deciding that an unchanged scene needs a frame.
   bool detach_presenter(uint32_t timeout_ms = 5000);
   bool attach_presenter(const PlutoPresenterOps *presenter_ops,
                         PlutoPresenter *presenter);
@@ -338,6 +381,7 @@ private:
 
   void configure(uint32_t width, uint32_t height, PlutoPixelFormat format);
   bool components_valid() const;
+  bool submit_frame_locked(const PlutoFramePacket &packet);
   size_t merge_damage();
   // The Stage-6 classification path: ScrollDetector -> ClassifyLadder ->
   // whole-screen scenecut promotion, filling submit_rects_/submit_classes_
@@ -352,7 +396,8 @@ private:
   void record_frame(const PlutoFramePacket &packet);
   void run_presenter_loop();
   void tick_locked(uint64_t now_us);
-  bool poll_presenter_health_locked();
+  bool poll_presenter_health_locked(uint64_t now_us, bool *presenter_idle);
+  void maybe_publish_health_locked(uint64_t now_us, bool presenter_idle);
   void sync_pen_focus_locked(uint64_t now_us);
   void publish_presenter_pen_focus_locked(const PlutoRect &logical_focus,
                                           bool contact, uint64_t sequence);
@@ -371,6 +416,7 @@ private:
   void maybe_resume_presentation_locked();
   bool reveal_suspended_presentation_locked();
   void drain_completions_locked();
+  void note_accepted_flutter_frame_locked();
   // Called only on the scheduler/presenter call path after present() returns
   // kPlutoStatusOk. Presenter completion callbacks never call this.
   void mark_ready_after_present_locked();
@@ -413,6 +459,7 @@ private:
   AutoGhostbuster auto_ghostbuster_;
   SettlePlanner settle_planner_;
   std::unique_ptr<RegionScheduler> scheduler_;
+  std::unique_ptr<HealthFilePublisher> health_file_;
   // The renderer core: fused tile pass writing through into the frame
   // ledger, presented via the ABI bridge.
   FrameLedger ledger_;
@@ -455,14 +502,31 @@ private:
   std::FILE *record_file_ = nullptr;
   mutable std::mutex mutex_;
   std::condition_variable cv_;
+  std::condition_variable presentation_completion_cv_;
+  std::condition_variable flutter_surface_cv_;
   std::thread thread_;
   bool stop_ = false;
   // Atomic so completion callbacks can request a wake without taking mutex_.
   std::atomic<bool> wake_{false};
   std::atomic<bool> presenter_device_lost_notified_{false};
   uint64_t next_presenter_health_poll_us_ = 0;
+  uint64_t next_health_publish_us_ = 0;
+  uint64_t presenter_completion_count_ = 0;
+  uint64_t health_published_completion_count_ = 0;
+  bool presenter_supports_health_contract_ = false;
+  bool health_file_failed_ = false;
   CompletionQueue completion_queue_;
   std::atomic<size_t> dropped_completions_{0};
+  uint64_t flutter_surface_generation_ = 0;
+  bool exact_proof_active_ = false;
+  bool exact_proof_dispatch_armed_ = false;
+  bool exact_proof_present_accepted_ = false;
+  bool exact_proof_failed_ = false;
+  bool exact_proof_completed_ = false;
+  uint64_t next_exact_proof_token_ = 1;
+  uint64_t exact_proof_token_ = 0;
+  uint64_t exact_proof_frame_id_ = 0;
+  uint64_t exact_proof_surface_generation_ = 0;
   static constexpr uint8_t kTouchInputBit = 1u << 0;
   static constexpr uint8_t kPenInputBit = 1u << 1;
   std::atomic<uint8_t> active_input_mask_{0};

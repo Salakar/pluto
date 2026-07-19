@@ -78,11 +78,13 @@ void main() {
         plutoPenChannel,
         penCapabilitiesMethod,
         (Object? arguments) => <String, Object?>{
-          'rawXMax': 6760,
-          'rawYMax': 11960,
-          'rawPressureMax': 4096,
-          'rawDistanceMax': 65535,
-          'rawTiltMaxCentiDegrees': 9000,
+          'axes': <String, Object?>{
+            'rawXMax': 6760,
+            'rawYMax': 11960,
+            'rawPressureMax': 4096,
+            'rawDistanceMax': 65535,
+            'rawTiltMaxCentiDegrees': 9000,
+          },
           'estimatedSampleRateHz': 200.0,
         },
       );
@@ -91,6 +93,31 @@ void main() {
 
     expect((await pen.currentState()).isInProximity, isTrue);
     expect((await pen.capabilities()).rawPressureMax, 4096);
+  });
+
+  test('capabilities reject retired wire aliases', () {
+    const Map<String, Object?> axes = <String, Object?>{
+      'rawXMax': 6760,
+      'rawYMax': 11960,
+      'rawPressureMax': 4096,
+      'rawDistanceMax': 65535,
+      'rawTiltMaxCentiDegrees': 9000,
+    };
+
+    expect(
+      () => PenCapabilities.fromMap(<String, Object?>{
+        ...axes,
+        'estimatedSampleRateHz': 200.0,
+      }),
+      throwsFormatException,
+    );
+    expect(
+      () => PenCapabilities.fromMap(<String, Object?>{
+        'axes': axes,
+        'sampleRateHzEstimate': 200.0,
+      }),
+      throwsFormatException,
+    );
   });
 
   test('pen event stream decodes lifecycle variants', () async {
@@ -124,7 +151,66 @@ void main() {
     expect(decoded[0], isA<PenHoverEvent>());
     expect(decoded[1], isA<PenMoveEvent>());
     expect(decoded[2], isA<PenUpEvent>());
-    expect(decoded[0].sample.hoverDistance, 0);
+    expect(decoded[0].sample.distance, 0);
+  });
+
+  test('pen event stream rejects non-current lifecycle names', () async {
+    for (final String event in <String>[
+      'enteredProximity',
+      'leftProximity',
+      'buttonsChanged',
+    ]) {
+      final FakePlutoTransport transport = FakePlutoTransport();
+      final Future<PenEvent> decoded = PlutoPen.withTransport(
+        transport,
+      ).events.first;
+
+      transport.emitEvent(plutoPenEventsChannel, _penPayload(event));
+
+      await expectLater(decoded, throwsFormatException);
+    }
+  });
+
+  test('buttons event requires previous button state', () async {
+    final FakePlutoTransport transport = FakePlutoTransport();
+    final Future<PenEvent> decoded = PlutoPen.withTransport(
+      transport,
+    ).events.first;
+    final Map<String, Object?> payload = _penPayload('buttons')
+      ..remove('previousButtons');
+
+    transport.emitEvent(plutoPenEventsChannel, payload);
+
+    await expectLater(decoded, throwsFormatException);
+  });
+
+  test('pen tool wire values are exact integers', () {
+    expect(
+      PenSample.fromMap(<String, Object?>{
+        ..._penPayload('move'),
+        'tool': 1,
+      }).tool,
+      PenTool.pen,
+    );
+    expect(
+      PenSample.fromMap(<String, Object?>{
+        ..._penPayload('move'),
+        'tool': 2,
+      }).tool,
+      PenTool.eraser,
+    );
+
+    for (final Object? tool in <Object?>['pen', 'eraser', 0, 3, null]) {
+      expect(
+        () => PenSample.fromMap(<String, Object?>{
+          ..._penPayload('move'),
+          'tool': tool,
+        }),
+        throwsFormatException,
+      );
+    }
+    final Map<String, Object?> missing = _penPayload('move')..remove('tool');
+    expect(() => PenSample.fromMap(missing), throwsFormatException);
   });
 
   test('cursor enforces single open and reports overwrite drops', () {
@@ -186,6 +272,14 @@ void main() {
   test('cursor rejects invalid ring memory and closed drains', () {
     final ByteData invalid = ByteData(64);
     PlutoPen.debugSetRingSource(ByteDataPenRingSource(invalid));
+    expect(
+      () => PlutoPen.withTransport(FakePlutoTransport()).openSampleCursor(),
+      throwsFormatException,
+    );
+
+    final PenRingWriter versioned = PenRingWriter(capacity: 2);
+    versioned.data.setUint32(4, 1, Endian.little);
+    PlutoPen.debugSetRingSource(FakePenRingSource(versioned));
     expect(
       () => PlutoPen.withTransport(FakePlutoTransport()).openSampleCursor(),
       throwsFormatException,

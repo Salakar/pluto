@@ -93,18 +93,26 @@ provision/install/run commands.
 ## Layout and identity contract
 
 Release and profile layouts contain `bundle/lib/app.so` and cannot contain
-`kernel_blob.bin`. Each layout carries `build-metadata.json` with:
+`kernel_blob.bin`. Each layout carries the sole current, unversioned
+`build-metadata.json` object with exactly five fields:
 
 - exact build mode and engine flavor;
 - target (`linux-arm64` or `linux-arm`);
-- Flutter version and engine pin;
-- application manifest identity.
+- Flutter version and engine pin.
 
-Packages copy this identity into `INTEGRITY.json`; installation preserves it
-in `install.json`. Packaging and provisioning validate all three layers and
-refuse mode relabeling. A complete layout contains `build-metadata.json`,
-`manifest.json`, and `bundle/`; a bare bundle is rejected because release and
-profile both use the same `app.so` filename.
+The sibling canonical `manifest.json` carries application identity; validation
+binds its engine requirement and runtime kind to those five metadata fields.
+
+There is no schema or format discriminator and no compatibility parser. Missing,
+extra, wrongly typed, or contradictory fields fail at the build, package, read,
+and provision boundaries; Pluto never aliases or migrates an older shape.
+
+Packages retain this object inside each target slice and bind its exact bytes in
+`INTEGRITY.json`; installation preserves it beside the generated `install.json`
+receipt. Packaging and provisioning validate all three layers and refuse mode
+relabelling. A complete layout contains `build-metadata.json`, `manifest.json`,
+and `bundle/`; a bare bundle is rejected because release and profile both use
+the same `app.so` filename.
 
 The default Home payload must always be release AOT. Debug engines and apps are
 accepted only through explicit development flags, and a debug app can never be
@@ -136,7 +144,7 @@ ceiling documented in [Device compatibility](device-compatibility.md).
 The following figures preserve the provenance of an earlier AArch64
 release-vs-debug experiment. They were measured on the attached reMarkable
 Paper Pro Move on 2026-07-09. The test ran the same counter bundle through the
-same `pluto-embedder` and `host-png` presenter, with the display session left
+same `pluto-embedder` and `host-headless` presenter, with the display session left
 untouched. All test files lived under `/tmp`; no service, boot setting, or
 installed engine changed.
 

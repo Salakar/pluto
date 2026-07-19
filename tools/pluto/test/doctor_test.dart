@@ -44,7 +44,7 @@ void main() {
   });
 
   test(
-    'doctor probes fake device firmware and overlay markers on request',
+    'doctor probes fake device firmware and native runtime on request',
     () async {
       final _DoctorHarness harness = _DoctorHarness();
       addTearDown(harness.dispose);
@@ -62,7 +62,9 @@ void main() {
       );
       expect(
         report.checks
-            .singleWhere((DoctorCheck check) => check.id == 'device.xovi')
+            .singleWhere(
+              (DoctorCheck check) => check.id == 'device.nativeRuntime',
+            )
             .severity,
         DoctorSeverity.ok,
       );
@@ -105,6 +107,18 @@ final class _DoctorHarness {
       execHandler: (String command) async {
         if (command == 'cat /sys/devices/soc0/machine') {
           return const CommandResult(exitCode: 0, stdout: 'chiappa');
+        }
+        if (command == 'cat /proc/device-tree/compatible') {
+          return const CommandResult(exitCode: 0, stdout: 'fsl,imx93');
+        }
+        if (command == 'uname -m') {
+          return const CommandResult(exitCode: 0, stdout: 'aarch64');
+        }
+        if (command == 'uname -r') {
+          return const CommandResult(
+            exitCode: 0,
+            stdout: '6.12.49+git-imx93-chiappa-gf4c2ab7040e8',
+          );
         }
         if (command == 'cat /etc/version') {
           return const CommandResult(exitCode: 0, stdout: '20260629074044');

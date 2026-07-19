@@ -13,8 +13,7 @@ TEST(StandardCodec, RoundTripsNestedValues) {
       {"items", pluto::StandardValue::List{"a", "b"}},
   });
 
-  const std::vector<uint8_t> bytes =
-      pluto::StandardMessageCodec::encode(value);
+  const std::vector<uint8_t> bytes = pluto::StandardMessageCodec::encode(value);
   std::optional<pluto::StandardValue> decoded =
       pluto::StandardMessageCodec::decode(bytes.data(), bytes.size());
 
@@ -23,14 +22,15 @@ TEST(StandardCodec, RoundTripsNestedValues) {
 }
 
 TEST(StandardMethodCodec, EncodesMethodCallsAndErrorEnvelopes) {
-  pluto::MethodCall call{"setOrientation", int64_t{90}};
+  pluto::MethodCall call{"setExampleValue", int64_t{90}};
   const std::vector<uint8_t> bytes =
       pluto::StandardMethodCodec::encode_method_call(call);
   std::optional<pluto::MethodCall> decoded =
-      pluto::StandardMethodCodec::decode_method_call(bytes.data(), bytes.size());
+      pluto::StandardMethodCodec::decode_method_call(bytes.data(),
+                                                     bytes.size());
 
   ASSERT_TRUE(decoded.has_value());
-  EXPECT_EQ(decoded->method, "setOrientation");
+  EXPECT_EQ(decoded->method, "setExampleValue");
   ASSERT_TRUE(decoded->arguments.integer() != nullptr);
   EXPECT_EQ(*decoded->arguments.integer(), 90);
 
@@ -49,11 +49,11 @@ TEST(StandardMethodCodec, DecodesSuccessEnvelopeWithAlignedDouble) {
   const std::vector<uint8_t> envelope =
       pluto::StandardMethodCodec::encode_success_envelope(value);
   const std::optional<pluto::StandardValue> decoded =
-      pluto::StandardMethodCodec::decode_success_envelope(
-          envelope.data(), envelope.size());
+      pluto::StandardMethodCodec::decode_success_envelope(envelope.data(),
+                                                          envelope.size());
 
   ASSERT_TRUE(decoded.has_value());
   EXPECT_TRUE(*decoded == value);
 }
 
-}  // namespace
+} // namespace

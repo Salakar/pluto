@@ -281,6 +281,8 @@ final class _PaperButtonState extends State<PaperButton> {
       button: true,
       enabled: _enabled,
       label: widget.label,
+      excludeSemantics: true,
+      onTap: _enabled ? widget.onPressed : null,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTapDown: _handleTapDown,

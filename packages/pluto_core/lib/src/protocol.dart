@@ -1,9 +1,3 @@
-/// Current major protocol version spoken by these Dart packages.
-const int plutoProtocolVersion = 1;
-
-/// Current package-family version used in the handshake payload.
-const String plutoPackageVersion = '0.1.0';
-
 /// Core method channel name.
 const String plutoCoreChannel = 'pluto/core';
 
@@ -12,9 +6,6 @@ const String plutoDeviceChannel = 'pluto/device';
 
 /// Settings method channel name.
 const String plutoSettingsChannel = 'pluto/settings';
-
-/// Settings event channel name.
-const String plutoSettingsEventsChannel = 'pluto/settings/events';
 
 /// Pen method channel name.
 const String plutoPenChannel = 'pluto/pen';
@@ -27,9 +18,6 @@ const String plutoTouchChannel = 'pluto/touch';
 
 /// Touch event channel name.
 const String plutoTouchEventsChannel = 'pluto/touch/events';
-
-/// Core handshake method.
-const String coreHandshakeMethod = 'handshake';
 
 /// Core capability query method.
 const String coreCapabilitiesMethod = 'capabilities';
@@ -79,9 +67,6 @@ const String powerSetIdleSuspendDelayMethod = 'power.setIdleSuspendDelay';
 /// Power suspend-to-power-off write method.
 const String powerSetSuspendPowerOffDelayMethod =
     'power.setSuspendPowerOffDelay';
-
-/// Immediate suspend method.
-const String powerSuspendNowMethod = 'power.suspendNow';
 
 /// Device PIN state read method.
 const String securityIsPinSetMethod = 'security.isPinSet';

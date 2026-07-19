@@ -16,7 +16,7 @@ typedef enum PlutoStatus {
   kPlutoStatusUnsupported = 2, // capability not offered by this backend
   kPlutoStatusInvalidArgument = 3,
   kPlutoStatusDeviceLost =
-      4, // backend endpoint died (e.g. xochitl restarted)
+      4, // physical display endpoint became unavailable
   kPlutoStatusTimeout = 5,
   kPlutoStatusInternal = 6,
 } PlutoStatus;
@@ -59,7 +59,7 @@ typedef struct PlutoSurface {
 typedef enum PlutoPresentFlags {
   kPlutoPresentFlagNone = 0,
   // Pen-correlated app damage: bypass backend-internal batching; lowest
-  // latency wins. Name and bit are retained for ABI compatibility.
+  // latency wins.
   kPlutoPresentFlagInkPriority = 1 << 0,
   // Content already quantized/dithered for glass (renderer did it; D6).
   kPlutoPresentFlagPreDithered = 1 << 1,
@@ -94,10 +94,10 @@ typedef enum PlutoPresentFlags {
   kPlutoPresentFlagRequiredSettle = 1 << 16,
   // High-fidelity truth chase for real app-rendered pixels correlated with
   // pen hover/contact. With kPlutoRefreshFull, the damage rectangles MUST
-  // remain regional: in particular qtfb sends UPDATE_PARTIAL rather than
-  // escalating the class to UPDATE_ALL. Direct SWTCON already honors damage
-  // geometry. This flag contains no synthetic ink and creates no damage by
-  // itself; kPlutoPresentFlagInkPriority keeps its independent bit-0 ABI.
+  // remain regional rather than escalating to a whole-screen update. Native
+  // presenters honor that damage geometry. This flag contains no synthetic
+  // ink and creates no damage by itself; kPlutoPresentFlagInkPriority keeps
+  // its independent bit-0 ABI.
   kPlutoPresentFlagPenTruth = 1 << 17,
 } PlutoPresentFlags;
 
@@ -132,14 +132,13 @@ typedef struct PlutoDisplayInfo {
   // Reference completion latencies (ms) per class for scheduler pacing until
   // measured; backends fill from the research table or live measurement.
   int32_t nominal_latency_ms[4];
-  // Backend (or its downstream compositor, e.g. xochitl under qtfb) maps RGB
-  // content to the panel palette itself; the renderer then passes settled
-  // color through instead of palette-crushing it (doc 03 section 7.4).
-  // Appended (not inserted) so struct_size versioning stays meaningful.
+  // Backend maps RGB content to the panel palette itself; the renderer then
+  // passes settled color through instead of palette-crushing it (doc 03
+  // section 7.4).
   bool backend_quantizes_color;
   // Backend/downstream compositor accepts overlapping regional updates with
   // newest-content supersession. This lets immediate pen truth follow a Fast
-  // preview without waiting on a synthetic completion fence (qtfb/Xochitl).
+  // preview without waiting on a synthetic completion fence.
   bool supports_overlap_supersession;
 } PlutoDisplayInfo;
 
@@ -153,15 +152,15 @@ typedef struct PlutoPresenter PlutoPresenter; // opaque, backend-owned
 
 typedef struct PlutoPresenterConfig {
   size_t struct_size;
-  const char *backend_name; // "qtfb" | "swtcon" | "host-window" |
-                            // "host-headless" | "null" | NULL = auto-probe
+  const char *backend_name; // "native" | "host-headless" | "null" |
+                            // NULL = auto-probe
   const char
       *options; // backend-specific key=value CSV (documented per backend)
   PlutoPresentCompleteCallback on_complete; // may be NULL
   void *user_data;
 } PlutoPresenterConfig;
 
-// ---------- optional physical pen focus metadata ----------
+// ---------- physical pen focus metadata ----------
 // This is scheduling metadata only. It cannot create pixels, damage, or a
 // present request. `rect` is in native presenter coordinates and is ignored
 // when kPlutoPenFocusInRange is absent. Contact implies in-range.
@@ -225,12 +224,13 @@ typedef struct PlutoPresenterOps {
 
   // Screenshot path for the CLI (DP-O8): synchronously copy the last settled
   // full frame into caller-provided storage described by out_surface
-  // (pixels/stride pre-set by caller). Optional: may be NULL.
+  // (pixels/stride pre-set by caller). Backends without snapshot support
+  // return kPlutoStatusUnsupported.
   PlutoStatus (*snapshot)(PlutoPresenter *presenter,
                             PlutoSurface *out_surface);
 
-  // Optional append-only hook. Publishes physical hover/contact focus so a
-  // backend may defer expensive UNSTARTED work intersecting the nib region.
+  // Publishes physical hover/contact focus so a backend may defer expensive
+  // UNSTARTED work intersecting the nib region.
   // Already-started work remains authoritative and unpreemptible. A focus
   // with flags=0 clears the reservation. This hook never draws anything.
   PlutoStatus (*set_pen_focus)(PlutoPresenter *presenter,
@@ -239,7 +239,8 @@ typedef struct PlutoPresenterOps {
   // Outgoing: called only after the renderer scheduler and completion queue
   // are idle. The backend copies `payload`, completes its deeper optical
   // barrier (including final scan-count feedback), and stages one complete
-  // bundle for close(). Unsupported backends leave this null.
+  // bundle for close(). Backends without handoff support return
+  // kPlutoStatusUnsupported.
   PlutoStatus (*stage_handoff)(PlutoPresenter *presenter,
                                const PlutoHandoffPayload *payload,
                                uint32_t timeout_ms);
@@ -259,8 +260,8 @@ typedef struct PlutoPresenterOps {
 
 // Registry (static; D9).
 const PlutoPresenterOps *pluto_presenter_by_name(const char *name);
-// Auto-probe ladder for on-device use: qtfb -> (swtcon, if built & gate open).
-// Host builds: host-window -> host-headless.
+// On-device auto-probing selects the immutable-profile-gated native backend.
+// Host builds use the host preview.
 const PlutoPresenterOps *pluto_presenter_probe(void);
 
 #ifdef __cplusplus

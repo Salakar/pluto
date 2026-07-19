@@ -101,6 +101,10 @@ fi
   die "missing $BUILD_DIR/Dockerfile.embedder-device"
 [[ -f "$BUILD_DIR/embedder-device-arm-container.sh" ]] ||
   die "missing $BUILD_DIR/embedder-device-arm-container.sh"
+[[ -x "$ROOT/tools/build/verify-arm-sdk.sh" ]] ||
+  die "missing ARM SDK verification gate"
+[[ -f "$ROOT/tools/pluto/pins/arm-sdk.pin" ]] ||
+  die "missing authoritative ARM SDK pin"
 
 if [[ -n "$SDK_DIR" ]]; then
   if ((DRY_RUN == 0)); then
@@ -133,6 +137,21 @@ if ((SKIP_IMAGE_BUILD == 0)); then
     "$BUILD_DIR"
 fi
 
+# Fingerprinting needs to read the complete SDK, including root-only sysroot
+# account metadata. Run this read-only gate as container root, then compile as
+# the host uid so build products never become root-owned.
+SDK_VERIFY_RUN=(
+  docker run --rm
+  --platform linux/amd64
+  --env PLUTO_RM_SDK_ROOT=/sdk
+  --volume "$SDK_MOUNT_SOURCE:/sdk:ro"
+  --volume "$ROOT:/work:ro"
+  --workdir /work
+  "$IMAGE"
+  bash tools/build/verify-arm-sdk.sh
+)
+run "${SDK_VERIFY_RUN[@]}"
+
 DOCKER_RUN=(
   docker run --rm
   --platform linux/amd64
@@ -151,11 +170,11 @@ run "${DOCKER_RUN[@]}"
 
 OUTPUT="$ROOT/embedder/build/device-arm/pluto-embedder"
 run bash "$ROOT/tools/build/verify-device-elf.sh" "$OUTPUT" 2.35 linux-arm
-CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-apploadctl"
+CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-controlctl"
 run bash "$ROOT/tools/build/verify-device-elf.sh" \
   "$CONTROL_CLIENT" 2.35 linux-arm
 
 if ((DRY_RUN == 0)); then
   echo "ARMv7 device embedder: $OUTPUT"
-  echo "ARMv7 AppLoad control client: $CONTROL_CLIENT"
+  echo "ARMv7 device control client: $CONTROL_CLIENT"
 fi

@@ -35,7 +35,6 @@ struct TileGrid {
 };
 
 struct GhostLedgerState {
-  uint32_t version = 1;
   TileGrid grid{};
   uint32_t tau_ms = 0;
   uint16_t owed_threshold = 0;
@@ -48,7 +47,6 @@ struct GhostLedgerState {
 };
 
 struct StressLedgerState {
-  uint32_t version = 1;
   TileGrid grid{};
   uint64_t last_decay_us = 0;
   bool clock_started = false;
@@ -58,7 +56,6 @@ struct StressLedgerState {
 };
 
 struct ChromaPendingState {
-  uint32_t version = 1;
   TileGrid grid{};
   uint64_t pending_count = 0;
   std::vector<uint8_t> pending;
@@ -84,7 +81,6 @@ struct ChromaPendingState {
 // tiles would flip with tick phase, and the settled picture with them.)
 class GhostLedger {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   // Q8 accrual weights w(mode) per refresh class; rail classes weigh heavier.
   static constexpr uint16_t kWeightFastQ8 = 3 * 256;
   static constexpr uint16_t kWeightUiQ8 = 2 * 256;
@@ -147,7 +143,6 @@ private:
 // so a stressed tile eventually forgives if it is never railed again.
 class StressLedger {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   static constexpr uint16_t kFastDelta = 3;
   static constexpr uint16_t kUiDelta = 1;
 
@@ -186,7 +181,6 @@ private:
 // cleared by any Full-class admission covering the tile.
 class ChromaPendingSet {
 public:
-  static constexpr uint32_t kStateVersion = 1;
   bool configure(const TileGrid &grid);
   bool valid() const { return valid_; }
 

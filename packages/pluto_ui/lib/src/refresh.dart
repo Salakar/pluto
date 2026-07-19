@@ -115,9 +115,6 @@ final class EinkRefreshRegion extends StatelessWidget {
   }
 }
 
-/// Compatibility name used by early launcher docs.
-typedef RefreshRegion = EinkRefreshRegion;
-
 final class _EinkRefreshMarker extends InheritedWidget {
   const _EinkRefreshMarker({
     required this.refreshClass,

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PAYLOAD="$ROOT/build/pluto-payload"
+PAYLOAD=""
 FLUTTER_VERSION="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/flutter.version")"
 ENGINE_COMMIT="$(tr -d '[:space:]' < "$ROOT/tools/pluto/pins/engine.version")"
 SDK="${PLUTO_SDK:-$HOME/.pluto/sdk/$FLUTTER_VERSION}"
@@ -10,50 +10,57 @@ DART="$SDK/bin/cache/dart-sdk/bin/dart"
 CLI="$ROOT/tools/pluto/bin/pluto.dart"
 PACKAGES="$ROOT/tools/pluto/.dart_tool/package_config.json"
 EMBEDDER=""
-CONTROL_CLIENT="$ROOT/embedder/build/device-arm64/pluto-apploadctl"
+CONTROL_CLIENT=""
+DEVICE_PROFILES="$ROOT/tools/device/generated/device-profiles.sh"
 ENGINE_ROOT="$ROOT/third_party/engine/$ENGINE_COMMIT"
 TARGET_PLATFORM=linux-arm64
 TARGET_GLIBC_CEILING=2.39
 SNAPSHOT_ARCH=arm64
+HAS_PROFILE_ENGINE=1
 DRY_RUN=0
 SELECTED_APPS=()
 SELECTED_APP_COUNT=0
+STANDARD_APPS=0
 
 DEVICE_SCRIPTS=(
   pluto-session.sh
+  pluto-session-once.sh
+  pluto-boot-confirm.sh
   pluto-power-key-watch.sh
   pluto-boot-install.sh
   pluto-app-control.sh
   pluto-install-transaction.sh
+  pluto-release-activate.sh
   pluto-uninstall.sh
-  pluto-xochitl-guard.sh
 )
 
 usage() {
   cat <<'EOF'
-Usage: tools/build/assemble-device-payload.sh [options]
+Internal usage: tools/build/assemble-device-payload.sh [options]
 
-Assemble the release-AOT launcher and selected apps into the canonical
-build/pluto-payload directory. No app is selected implicitly besides the
-launcher; debug/JIT payloads are never copied.
+Assemble exactly one private release-AOT target slice. The public release entry
+point is tools/build/assemble-device-release.sh, which invokes this worker for
+both targets and checksum-freezes the results in one release manifest.
 
 Options:
   --app NAME       include one repo app; repeat for more apps
                    (counter, motion_lab, ink_lab, validation_lab, codex, or an
                    apps/... repo-relative directory)
   --examples       include counter, motion_lab, and ink_lab
-  --standard       include every standard app: the examples, Validation Lab,
-                   and Codex (the launcher is always included)
+  --standard       include every standard app supported by the target:
+                   examples, Validation Lab, and Ink on all devices, plus
+                   Paper Codex on linux-arm64 (the launcher is always included)
   --target-platform TARGET
-                   build this low-level direct backend for linux-arm64
-                   (default); model-specific routing belongs to the CLI
+                   build the native runtime for linux-arm64 (default) or
+                   linux-arm; model-specific routing belongs to the CLI
   --embedder PATH  use an alternate target-compatible pluto-embedder
+  --output DIR     required private slice output directory
   --dry-run        print the complete assembly plan without changing files
   -h, --help       show this help
 
 Examples:
-  melos run build:device-payload -- --standard
-  melos run build:device-payload -- --app counter --app validation_lab
+  tools/build/assemble-device-payload.sh --target-platform linux-arm \
+    --standard --output /tmp/release/targets/linux-arm
 EOF
 }
 
@@ -114,11 +121,12 @@ while (($# > 0)); do
       add_selected_app ink_lab
       ;;
     --standard)
+      STANDARD_APPS=1
       add_selected_app counter
       add_selected_app motion_lab
       add_selected_app ink_lab
       add_selected_app validation_lab
-      add_selected_app codex
+      add_selected_app ink
       ;;
     --embedder)
       shift
@@ -126,6 +134,15 @@ while (($# > 0)); do
       EMBEDDER="$1"
       ;;
     --embedder=*) EMBEDDER="${1#*=}" ;;
+    --output)
+      shift
+      (($# > 0)) || die "--output requires a value"
+      PAYLOAD="${1%/}"
+      ;;
+    --output=*)
+      PAYLOAD="${1#*=}"
+      PAYLOAD="${PAYLOAD%/}"
+      ;;
     --target-platform)
       shift
       (($# > 0)) || die "--target-platform requires a value"
@@ -146,11 +163,31 @@ case "$TARGET_PLATFORM" in
   linux-arm64)
     [[ -n "$EMBEDDER" ]] || \
       EMBEDDER="$ROOT/embedder/build/device-arm64/pluto-embedder"
+    CONTROL_CLIENT="$ROOT/embedder/build/device-arm64/pluto-controlctl"
+    TARGET_GLIBC_CEILING=2.39
+    SNAPSHOT_ARCH=arm64
+    HAS_PROFILE_ENGINE=1
     ;;
   linux-arm)
-    die "linux-arm is not supported by this direct-backend assembler; the normal Pluto workflow must dispatch the cooperative backend"
+    [[ -n "$EMBEDDER" ]] || \
+      EMBEDDER="$ROOT/embedder/build/device-arm/pluto-embedder"
+    CONTROL_CLIENT="$ROOT/embedder/build/device-arm/pluto-controlctl"
+    TARGET_GLIBC_CEILING=2.35
+    SNAPSHOT_ARCH=arm
+    HAS_PROFILE_ENGINE=0
+    DEVICE_SCRIPTS+=(pluto-rm2-cpufreq-restore.sh)
     ;;
   *) die "unsupported target platform: $TARGET_PLATFORM" ;;
+esac
+if ((STANDARD_APPS == 1)) && [[ "$TARGET_PLATFORM" == linux-arm64 ]]; then
+  add_selected_app codex
+fi
+
+[[ -n "$PAYLOAD" ]] || die "--output is required for the private slice worker"
+case "$PAYLOAD" in
+  / | . | .. | */. | */.. | "$ROOT" | "$ROOT/" | "$HOME" | "$HOME/")
+    die "refusing unsafe output directory: $PAYLOAD"
+    ;;
 esac
 
 resolve_app_directory() {
@@ -190,11 +227,26 @@ manifest_app_id() {
 
 require_target_elf() {
   local elf="$1"
-  local description
+  local allow_no_glibc="${2:-0}"
   [[ -s "$elf" ]] || die "missing ELF: $elf"
-  description="$(file "$elf")"
-  [[ "$description" == *"ELF 64-bit"* && "$description" == *"ARM aarch64"* ]] ||
-    die "expected ELF64 AArch64 ELF: $description"
+  if [[ "$allow_no_glibc" == 1 ]]; then
+    PLUTO_ELF_ALLOW_NO_GLIBC=1 \
+      bash "$ROOT/tools/build/verify-device-elf.sh" \
+        "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+  else
+    bash "$ROOT/tools/build/verify-device-elf.sh" \
+      "$elf" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+  fi
+}
+
+reject_host_metadata() {
+  local tree="$1"
+  local forbidden
+  forbidden="$(find "$tree" \
+    \( -name '.DS_Store' -o -name '.AppleDouble' -o -name '._*' \) \
+    -print -quit)"
+  [[ -z "$forbidden" ]] ||
+    die "payload contains forbidden host metadata: $forbidden"
 }
 
 verify_release_layout() {
@@ -205,13 +257,18 @@ verify_release_layout() {
   local app_elf="$layout/bundle/lib/app.so"
   local kernel
 
+  reject_host_metadata "$layout"
   [[ -s "$metadata" ]] || die "release layout has no build-metadata.json: $layout"
   [[ -s "$manifest" ]] || die "release layout has no manifest.json: $layout"
   [[ -d "$layout/bundle/flutter_assets" ]] ||
     die "release layout has no bundle/flutter_assets: $layout"
   [[ -s "$layout/bundle/icudtl.dat" ]] ||
     die "release layout has no bundle/icudtl.dat: $layout"
-  require_target_elf "$app_elf"
+  # Product AOT snapshots are target-native ELF shared objects but may be
+  # completely self-contained and therefore have no GLIBC imports. This
+  # exception is scoped to app.so; every native executable/runtime above keeps
+  # the required-import ABI gate.
+  require_target_elf "$app_elf" 1
 
   grep -Eq '"buildMode"[[:space:]]*:[[:space:]]*"release"' "$metadata" ||
     die "layout metadata is not release: $metadata"
@@ -272,6 +329,9 @@ for ((selection_index = 0; selection_index < SELECTED_APP_COUNT; selection_index
   done
   APP_PROJECTS[$APP_COUNT]="$project"
   APP_IDS[$APP_COUNT]="$app_id"
+  if [[ "$TARGET_PLATFORM" == linux-arm && "$app_id" == dev.pluto.codex ]]; then
+    die "Paper Codex is not supported on linux-arm because upstream Codex has no native ARMv7 release"
+  fi
   APP_COUNT=$((APP_COUNT + 1))
 done
 
@@ -286,6 +346,8 @@ if ((DRY_RUN == 0)); then
     die "missing device embedder; run melos run build:embedder:device"
   [[ -s "$CONTROL_CLIENT" ]] ||
     die "missing device control client; run melos run build:embedder:device"
+  [[ -s "$DEVICE_PROFILES" ]] ||
+    die "missing generated device profiles: $DEVICE_PROFILES"
 fi
 
 # Setup verification is the authoritative pin/checksum gate for both committed
@@ -298,25 +360,32 @@ run bash "$ROOT/tools/build/verify-device-elf.sh" \
   "$CONTROL_CLIENT" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
 run bash "$ROOT/tools/build/verify-device-elf.sh" \
   "$RELEASE_ENGINE" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
-run bash "$ROOT/tools/build/verify-device-elf.sh" \
-  "$PROFILE_ENGINE" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
-
+if ((HAS_PROFILE_ENGINE == 1)); then
+  run bash "$ROOT/tools/build/verify-device-elf.sh" \
+    "$PROFILE_ENGINE" "$TARGET_GLIBC_CEILING" "$TARGET_PLATFORM"
+fi
 run rm -rf "$PAYLOAD"
 PAYLOAD_DIRECTORIES=(
   "$PAYLOAD"
   "$PAYLOAD/bin"
   "$PAYLOAD/engine/release"
-  "$PAYLOAD/engine/profile"
   "$PAYLOAD/apps"
+  "$PAYLOAD/share"
 )
+if ((HAS_PROFILE_ENGINE == 1)); then
+  PAYLOAD_DIRECTORIES+=("$PAYLOAD/engine/profile")
+fi
 run install -d "${PAYLOAD_DIRECTORIES[@]}"
 run install -m 0755 "$EMBEDDER" "$PAYLOAD/pluto-embedder"
-run install -m 0755 "$CONTROL_CLIENT" "$PAYLOAD/bin/pluto-apploadctl"
+run install -m 0755 "$CONTROL_CLIENT" "$PAYLOAD/bin/pluto-controlctl"
+run install -m 0644 "$DEVICE_PROFILES" \
+  "$PAYLOAD/share/device-profiles.sh"
 run install -m 0644 "$RELEASE_ENGINE" \
   "$PAYLOAD/engine/release/libflutter_engine.so"
-run install -m 0644 "$PROFILE_ENGINE" \
-  "$PAYLOAD/engine/profile/libflutter_engine.so"
-
+if ((HAS_PROFILE_ENGINE == 1)); then
+  run install -m 0644 "$PROFILE_ENGINE" \
+    "$PAYLOAD/engine/profile/libflutter_engine.so"
+fi
 for script in "${DEVICE_SCRIPTS[@]}"; do
   source_script="$ROOT/tools/device/$script"
   if ((DRY_RUN == 0)); then
@@ -334,11 +403,16 @@ for ((index = 0; index < APP_COUNT; index += 1)); do
 done
 
 if ((DRY_RUN == 0)); then
+  reject_host_metadata "$PAYLOAD"
   forbidden_kernel="$(find "$PAYLOAD" -type f -name kernel_blob.bin -print -quit)"
   [[ -z "$forbidden_kernel" ]] ||
     die "assembled payload contains forbidden JIT kernel: $forbidden_kernel"
   [[ ! -d "$PAYLOAD/engine/debug" ]] ||
     die "assembled release payload unexpectedly contains a debug engine"
+  embedded_auth="$(find "$PAYLOAD" -type f \
+    \( -name auth.json -o -name credentials.json \) -print -quit)"
+  [[ -z "$embedded_auth" ]] ||
+    die "release payload contains embedded authentication: $embedded_auth"
   echo "Assembled release payload: $PAYLOAD"
   if ((APP_COUNT > 0)); then
     echo "Target: $TARGET_PLATFORM; apps: launcher ${APP_IDS[*]}"
@@ -347,4 +421,4 @@ if ((DRY_RUN == 0)); then
   fi
 fi
 
-echo "Direct-backend handoff: pluto provision --payload-dir $PAYLOAD"
+echo "Internal release slice complete: $PAYLOAD"

@@ -27,6 +27,13 @@ sealed class PlutoException implements Exception {
   }
 }
 
+/// Host-side CLI configuration is invalid or unsafe for the requested mode.
+final class CliConfigurationException extends PlutoException {
+  /// Creates a CLI configuration failure.
+  const CliConfigurationException({required super.message, super.remediation})
+    : super(exitCode: ExitCodes.usage);
+}
+
 /// A device could not be reached over the configured transport.
 final class DeviceUnreachableException extends PlutoException {
   /// Creates a device reachability failure.
@@ -50,13 +57,4 @@ final class ArtifactVerificationException extends PlutoException {
     required super.message,
     super.remediation,
   });
-}
-
-/// A requested device operation is unavailable in the current backend.
-final class DeviceOperationNotImplementedException extends PlutoException {
-  /// Creates a device-backend capability failure.
-  const DeviceOperationNotImplementedException({
-    required super.message,
-    super.remediation,
-  }) : super(exitCode: ExitCodes.toolBug);
 }

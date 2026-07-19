@@ -467,7 +467,6 @@ bool SettlePlanner::export_state(SettlePlannerState *out) const {
     return false;
   }
   SettlePlannerState state;
-  state.version = kStateVersion;
   state.config = config_;
   state.last_damage_us = last_damage_us_;
   state.forced.reserve(forced_.size());
@@ -486,8 +485,7 @@ bool SettlePlanner::export_state(SettlePlannerState *out) const {
 }
 
 bool SettlePlanner::import_state(const SettlePlannerState &state) {
-  if (!valid_ || state.version != kStateVersion ||
-      !same_config(state.config, config_) ||
+  if (!valid_ || !same_config(state.config, config_) ||
       state.last_damage_us.size() != last_damage_us_.size() ||
       state.forced.size() > kMaxForced ||
       state.emitted_settles > std::numeric_limits<size_t>::max() ||

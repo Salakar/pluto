@@ -3,6 +3,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 SUPERVISOR="$HERE/../pluto-session.sh"
+PROFILE_FILE="$HERE/../generated/device-profiles.sh"
 TMP=${TMPDIR:-/tmp}/pluto-session-standby-test.$$
 ROOT="$TMP/root"
 CTL="$TMP/run"
@@ -22,8 +23,9 @@ fail() {
 }
 
 grep -Fq \
-  'SUSPEND_COMMAND="${PLUTO_SUSPEND_COMMAND:-systemctl start --wait suspend.target}"' \
-  "$SUPERVISOR" || fail "default suspend command is not blocking through wake"
+  '"suspendCommand": "systemctl start --wait suspend.target"' \
+  "$HERE/../../../config/device_profiles.json" ||
+  fail "generated profile suspend command is not blocking through wake"
 
 mkdir -p \
   "$ROOT/bin" \
@@ -39,6 +41,7 @@ printf '100.0 0.0\n' > "$TMP/uptime"
 printf '913\n' > "$TMP/brightness"
 printf '30000\n' > "$TMP/vpdd-length"
 printf '0\n' > "$TMP/vpdd-timeout"
+printf '424242\n' > "$TMP/rtc-since-epoch"
 printf 'stale-at-startup\n' > "$CTL/suspend"
 
 cat > "$ROOT/bin/pluto-embedder" <<'EMBEDDER'
@@ -101,6 +104,7 @@ sleep 0.2
   : > "$PLUTO_TEST_SUSPEND_PREMATURE_RELAUNCH"
 [ "$(cat "$PLUTO_BACKLIGHT_BRIGHTNESS")" = 0 ] ||
   : > "$PLUTO_TEST_SUSPEND_LIGHT_FAILURE"
+printf '424243\n' > "$PLUTO_TEST_RTC_SINCE_EPOCH_FILE"
 exit 0
 SUSPEND
 
@@ -136,6 +140,9 @@ chmod +x "$ROOT/bin/pluto-embedder" "$ROOT/bin/fake-power-watch.sh" \
   "$ROOT/bin/fake-suspend.sh"
 
 PLUTO_ROOT="$ROOT" \
+PLUTO_PROFILE_FILE="$PROFILE_FILE" \
+PLUTO_TESTING=1 \
+PLUTO_TEST_PROFILE_ID=move \
 PLUTO_RUN_DIR="$CTL" \
 PLUTO_POWER_WATCHER="$ROOT/bin/fake-power-watch.sh" \
 PLUTO_UPTIME_FILE="$TMP/uptime" \
@@ -145,6 +152,7 @@ PLUTO_VPDD_TIMEOUT_FILE="$TMP/vpdd-timeout" \
 PLUTO_VPDD_IDLE_INTERVAL=0 \
 PLUTO_SUSPEND_COMMAND="$ROOT/bin/fake-suspend.sh" \
 PLUTO_SUSPEND_QUIESCE_DELAY=0 \
+PLUTO_TEST_RTC_SINCE_EPOCH_FILE="$TMP/rtc-since-epoch" \
 PLUTO_TEST_INVOCATIONS="$TMP/invocations" \
 PLUTO_TEST_SAW_STANDBY="$TMP/saw-standby" \
 PLUTO_TEST_WATCHER_ACTIVE="$TMP/watcher-active" \
@@ -216,6 +224,9 @@ grep -q 'power standby requested; launching standby screen' "$TMP/session.log" |
   fail "supervisor did not consume the standby marker"
 grep -q 'suspend target completed after wake' "$TMP/session.log" ||
   fail "supervisor did not log the suspend return"
+grep -q 'suspend-wake-receipt rtc=rtc0 since_epoch=424243' \
+  "$TMP/session.log" ||
+  fail "supervisor did not record rtc0 immediately after suspend returned"
 grep -q 'VPDD cooldown is idle' "$TMP/session.log" ||
   fail "supervisor did not verify the regulator cooldown"
 grep -q 'standby child exited without suspend request; recovering frontlight' \

@@ -54,13 +54,13 @@ if [[ "$CLEAN_FIRST" == 1 ]]; then
 fi
 "${BUILD_COMMAND[@]}"
 
-# The cooperative control client deliberately has no Qt dependency. Build it
+# The control client deliberately has no display-backend dependency. Build it
 # beside the embedder so the payload assembler can authenticate and install
 # the exact ARMv7 helper expected by the unified CLI.
 "$SDK_C_COMPILER" \
   --sysroot="$SDK_SYSROOT" \
   -march=armv7-a -mfpu=neon -mfloat-abi=hard \
   -O2 -DNDEBUG -std=c11 -Wall -Wextra -Werror \
-  "$ROOT/tools/device/pluto-apploadctl.c" \
+  "$ROOT/tools/device/pluto-controlctl.c" \
   -Wl,-O1 -Wl,--hash-style=gnu -Wl,--as-needed \
-  -o "$EMBEDDER_DIR/build/device-arm/pluto-apploadctl"
+  -o "$EMBEDDER_DIR/build/device-arm/pluto-controlctl"

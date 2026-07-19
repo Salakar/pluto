@@ -1,0 +1,89 @@
+#ifndef PLUTO_PRESENTER_NATIVE_MXCFB_MXCFB_BACKEND_H_
+#define PLUTO_PRESENTER_NATIVE_MXCFB_MXCFB_BACKEND_H_
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+
+#include "generated/device_profiles.h"
+#include "pluto/glass_handoff.h"
+#include "presenter/native/mxcfb/mxcfb_device.h"
+#include "presenter/native/native_display_backend.h"
+
+namespace pluto::native::mxcfb {
+
+// Production always uses the fixed private tmpfs path. Tests may opt into an
+// isolated path and deterministic clock, but neither seam is reachable from
+// the native presenter factory.
+struct MxcfbHandoffOptions {
+  std::string path = kGlassHandoffDefaultPath;
+  bool allow_insecure_path_for_testing = false;
+  GlassHandoffClock (*now_for_testing)() = nullptr;
+};
+
+// Test-only identity seam for inspecting a bundle produced by the backend.
+// Production routing remains internal to MxcfbDisplayBackend.
+bool build_mxcfb_handoff_identity_for_testing(
+    const GeneratedDeviceProfile &profile, GlassHandoffIdentity *out);
+
+// Driver-specific diagnostics for accepted kernel updates. Requested pixels
+// are the exact geometric union of submitted damage (including defensively
+// accepted overlap/duplicates); driven pixels are the rectangular MXCFB update
+// regions. Ratios use 1000 == 1.0x.
+struct MxcfbDamageTelemetry {
+  std::uint64_t accepted_updates = 0;
+  std::uint64_t requested_pixels = 0;
+  std::uint64_t driven_pixels = 0;
+  std::uint64_t amplified_updates = 0;
+  std::uint64_t full_quality_updates = 0;
+  std::uint64_t regional_full_quality_updates = 0;
+  std::uint64_t legacy_full_screen_pixels_avoided = 0;
+  std::uint64_t max_amplification_milli = 0;
+  std::uint64_t handoff_cleanup_jobs = 0;
+};
+
+// Conservative first native backend for the reMarkable 1 kernel EPDC path.
+// It deliberately admits one request at a time: the mapped framebuffer is the
+// kernel update source, so overlapping writers would otherwise be able to
+// mutate pixels before the EPDC has consumed the preceding request.
+class MxcfbDisplayBackend final : public NativeDisplayBackend {
+public:
+  MxcfbDisplayBackend(const GeneratedDeviceProfile &profile,
+                      std::unique_ptr<MxcfbDevice> device = nullptr,
+                      std::uint32_t first_marker = 0,
+                      MxcfbHandoffOptions handoff = {});
+  ~MxcfbDisplayBackend() override;
+
+  MxcfbDisplayBackend(const MxcfbDisplayBackend &) = delete;
+  MxcfbDisplayBackend &operator=(const MxcfbDisplayBackend &) = delete;
+  MxcfbDisplayBackend(MxcfbDisplayBackend &&) = delete;
+  MxcfbDisplayBackend &operator=(MxcfbDisplayBackend &&) = delete;
+
+  std::string_view driver_name() const override;
+  PlutoStatus probe(const GeneratedDeviceProfile &profile) override;
+  PlutoStatus start(const PlutoPresenterConfig &config) override;
+  PlutoStatus info(PlutoDisplayInfo *out_info) override;
+  PlutoStatus submit(const PlutoPresentRequest *request) override;
+  bool ready(PlutoRefreshClass refresh_class) override;
+  PlutoStatus wait_idle(std::uint32_t timeout_ms) override;
+  PlutoStatus snapshot(PlutoSurface *out_surface) override;
+  PlutoStatus set_pen_focus(const PlutoPenFocus *focus) override;
+  PlutoStatus stage_handoff(const PlutoHandoffPayload *payload,
+                            std::uint32_t timeout_ms) override;
+  PlutoStatus get_handoff(PlutoHandoffPayload *out_payload) override;
+  PlutoStatus confirm_handoff(bool accepted) override;
+  PlutoStatus suspend(std::uint32_t timeout_ms) override;
+  PlutoStatus resume() override;
+  NativeBackendHealth health() const override;
+  MxcfbDamageTelemetry damage_telemetry() const;
+  void stop() override;
+
+private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+} // namespace pluto::native::mxcfb
+
+#endif // PLUTO_PRESENTER_NATIVE_MXCFB_MXCFB_BACKEND_H_

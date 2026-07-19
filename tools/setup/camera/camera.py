@@ -24,6 +24,7 @@ from typing import Any, Iterable, Sequence
 
 
 SCHEMA_VERSION = 6
+DEVICE_PROFILE_IDS = frozenset({"rm1", "rm2", "move"})
 NORMALIZED_MAX = 1000
 DEFAULT_SIZE = "1280x720"
 DEFAULT_FRAMERATE = 30
@@ -70,7 +71,8 @@ CODEX_DISABLED_FEATURES = (
 )
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = REPO_ROOT / ".pluto-devices.json"
-KNOWN_COMMANDS = {"configure", "identify", "image", "video"}
+FFMPEG_BIN = os.environ.get("PLUTO_CAMERA_FFMPEG_BIN", "ffmpeg")
+FFPROBE_BIN = os.environ.get("PLUTO_CAMERA_FFPROBE_BIN", "ffprobe")
 
 
 class CameraError(RuntimeError):
@@ -120,6 +122,15 @@ def nonnegative_float(value: str) -> float:
     if not math.isfinite(parsed) or parsed < 0:
         raise argparse.ArgumentTypeError("value must be zero or greater")
     return parsed
+
+
+def device_profile(value: str) -> tuple[int, str]:
+    match = re.fullmatch(r"([1-9][0-9]*)=(rm1|rm2|move)", value)
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            "device profile must look like NUMBER=rm1, NUMBER=rm2, or NUMBER=move"
+        )
+    return int(match.group(1)), match.group(2)
 
 
 def require_commands(names: Iterable[str]) -> None:
@@ -285,7 +296,7 @@ def enumerate_cameras(*, include_virtual: bool, timeout: float) -> list[dict[str
     if sys.platform == "darwin":
         result = run_process(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-hide_banner",
                 "-f",
                 "avfoundation",
@@ -411,7 +422,7 @@ def camera_input_args(
     framerate: int,
     pixel_format: str | None,
 ) -> list[str]:
-    command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"]
+    command = [FFMPEG_BIN, "-nostdin", "-hide_banner", "-loglevel", "error"]
     backend = camera.get("backend")
     if backend == "avfoundation":
         command.extend(["-f", "avfoundation"])
@@ -554,7 +565,7 @@ def identify_command(
 def probe_dimensions(path: Path, *, timeout: float) -> tuple[int, int]:
     result = run_process(
         [
-            "ffprobe",
+            FFPROBE_BIN,
             "-v",
             "error",
             "-select_streams",
@@ -1182,15 +1193,6 @@ def canonical_even_box(
     return {"x": left, "y": top, "width": right - left, "height": bottom - top}
 
 
-def even_video_box(
-    box: dict[str, int], *, frame_width: int, frame_height: int
-) -> dict[str, int]:
-    """Compatibility name for callers/tests written before schema version 2."""
-    return canonical_even_box(
-        box, frame_width=frame_width, frame_height=frame_height
-    )
-
-
 def point_distance(first: dict[str, int], second: dict[str, int]) -> float:
     return math.hypot(second["x"] - first["x"], second["y"] - first["y"])
 
@@ -1602,7 +1604,7 @@ def render_crop(
 ) -> None:
     result = run_process(
         [
-            "ffmpeg",
+            FFMPEG_BIN,
             "-nostdin",
             "-hide_banner",
             "-loglevel",
@@ -1647,7 +1649,7 @@ def render_identify_preview(
     """Render the same red-device/green-capture overlay used by ``identify``."""
     result = run_process(
         [
-            "ffmpeg",
+            FFMPEG_BIN,
             "-nostdin",
             "-hide_banner",
             "-loglevel",
@@ -1689,7 +1691,7 @@ def decode_grayscale_preview(
     try:
         result = subprocess.run(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-nostdin",
                 "-hide_banner",
                 "-loglevel",
@@ -1779,7 +1781,7 @@ def decode_rgb_preview(
     try:
         result = subprocess.run(
             [
-                "ffmpeg",
+                FFMPEG_BIN,
                 "-nostdin",
                 "-hide_banner",
                 "-loglevel",
@@ -2132,7 +2134,8 @@ def multiscale_boundary_sample_deltas(*, width: int, height: int) -> list[int]:
     """Return image-size-aware offsets that reject thin internal UI rules."""
     dimension = max(width, height)
     return sorted(
-        {
+        {1}
+        | {
             max(2, round(dimension * ratio))
             for ratio in BOUNDARY_MULTISCALE_DELTA_RATIOS
         }
@@ -2211,6 +2214,8 @@ def fit_multiscale_physical_boundary_edge(
         candidate_first: dict[str, float],
         candidate_second: dict[str, float],
         *,
+        first_displacement: float,
+        second_displacement: float,
         count: int = sample_count,
     ) -> list[dict[str, Any]]:
         candidate_tangent_x = candidate_second["x"] - candidate_first["x"]
@@ -2232,10 +2237,8 @@ def fit_multiscale_physical_boundary_edge(
                 inward_normal=candidate_normal,
                 sample_delta=sample_delta,
                 sample_count=count,
-                # Persistence decides whether this is a physical boundary;
-                # distance is used later to choose the nearest such boundary.
-                first_displacement=0,
-                second_displacement=0,
+                first_displacement=first_displacement,
+                second_displacement=second_displacement,
             )
             for sample_delta in sample_deltas
         ]
@@ -2253,7 +2256,12 @@ def fit_multiscale_physical_boundary_edge(
         candidate_first, candidate_second = shifted_line(
             displacement, displacement
         )
-        scores = scale_scores(candidate_first, candidate_second)
+        scores = scale_scores(
+            candidate_first,
+            candidate_second,
+            first_displacement=displacement,
+            second_displacement=displacement,
+        )
         if not scores:
             continue
         scale_count = persistent_scale_count(scores)
@@ -2325,6 +2333,8 @@ def fit_multiscale_physical_boundary_edge(
             scored = scale_scores(
                 candidate_first,
                 candidate_second,
+                first_displacement=first_displacement,
+                second_displacement=second_displacement,
                 count=max(96, sample_count),
             )[0]
             if (
@@ -2350,7 +2360,11 @@ def fit_multiscale_physical_boundary_edge(
         return None
     best = max(fine_candidates, key=lambda candidate: candidate["selection_score"])
     final_scores = scale_scores(
-        best["first"], best["second"], count=max(96, sample_count)
+        best["first"],
+        best["second"],
+        first_displacement=float(best["first_displacement"]),
+        second_displacement=float(best["second_displacement"]),
+        count=max(96, sample_count),
     )
     final_scale_count = persistent_scale_count(final_scores)
     final_median_score = float(
@@ -2360,6 +2374,19 @@ def fit_multiscale_physical_boundary_edge(
         final_scale_count < required_scale_count
         or final_median_score < BOUNDARY_MULTISCALE_MIN_MEDIAN_SCORE
     ):
+        return None
+    # Multiscale persistence distinguishes a physical material transition from
+    # a thin UI rule, but an internal panel boundary can also persist at every
+    # scale. Preserve the semantic prior instead of allowing such a boundary
+    # to crop deeply into active display pixels. Outward corrections retain the
+    # full search range; a small inward correction still accommodates an
+    # imprecise prior.
+    inward_displacement_limit = max(2.0, 0.01 * normal_dimension)
+    if max(
+        0.0,
+        float(best["first_displacement"]),
+        float(best["second_displacement"]),
+    ) > inward_displacement_limit:
         return None
     good_vectors = [
         score["median_vector"]
@@ -2374,7 +2401,12 @@ def fit_multiscale_physical_boundary_edge(
         return None
 
     prior_first, prior_second = shifted_line(0, 0)
-    prior_small = scale_scores(prior_first, prior_second)[0]
+    prior_small = scale_scores(
+        prior_first,
+        prior_second,
+        first_displacement=0,
+        second_displacement=0,
+    )[0]
     best_small = final_scores[0]
     prior_score = float(prior_small["score"])
     score_ratio = (
@@ -3648,8 +3680,19 @@ def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
 
 
 def configure(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg", "ffprobe", "codex"))
+    require_commands((FFMPEG_BIN, FFPROBE_BIN, "codex"))
     config_path = config_path_from_args(args)
+    requested_device_profiles = list(args.device_profile)
+    if not requested_device_profiles and config_path.is_file():
+        previous_config = load_config(config_path)
+        requested_device_profiles = [
+            (int(device["number"]), str(device["profile_id"]))
+            for device in previous_config["devices"]
+        ]
+    if not requested_device_profiles:
+        raise CameraError(
+            "a new rig requires --device-profile NUMBER=PROFILE for every device"
+        )
     width, height = args.size
     work_dir, requested_artifact_dir = make_work_dir(args.artifacts)
     keep_work_dir = bool(args.keep_artifacts or requested_artifact_dir)
@@ -3756,6 +3799,18 @@ def configure(args: argparse.Namespace) -> None:
             configured_devices: list[dict[str, Any]] = []
             verification_notes = ""
             expected_numbers = {int(device["number"]) for device in devices}
+            profile_by_number: dict[int, str] = {}
+            for number, profile_id in requested_device_profiles:
+                if number in profile_by_number:
+                    raise CameraError(f"device {number} has more than one profile binding")
+                profile_by_number[number] = profile_id
+            if set(profile_by_number) != expected_numbers:
+                missing = sorted(expected_numbers - set(profile_by_number))
+                extra = sorted(set(profile_by_number) - expected_numbers)
+                raise CameraError(
+                    "device profile bindings must exactly match detected labels "
+                    f"(missing={missing}, extra={extra})"
+                )
             calibration_configured = attach_pixel_boxes(
                 devices,
                 width=frame_width,
@@ -4050,6 +4105,11 @@ def configure(args: argparse.Namespace) -> None:
                     + (f": {verification_notes}" if verification_notes else "")
                 )
 
+            for configured_device_entry in configured_devices:
+                configured_device_entry["profile_id"] = profile_by_number[
+                    int(configured_device_entry["number"])
+                ]
+
             config: dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
                 "configured_at": dt.datetime.now(dt.timezone.utc)
@@ -4230,10 +4290,15 @@ def load_config(path: Path) -> dict[str, Any]:
     for device in devices:
         try:
             number = int(device["number"])
+            profile_id = device["profile_id"]
         except (KeyError, TypeError, ValueError) as error:
             raise CameraError(f"invalid device entry in config; rerun configure: {path}") from error
-        if number < 0 or number in seen:
+        if number <= 0 or number in seen:
             raise CameraError(f"invalid device entry in config; rerun configure: {path}")
+        if not isinstance(profile_id, str) or profile_id not in DEVICE_PROFILE_IDS:
+            raise CameraError(
+                f"invalid device {number} profile id in config; rerun configure"
+            )
         try:
             screen = device["screen"]
             calibration_reference = screen["calibration_reference"]
@@ -4551,7 +4616,7 @@ def config_camera_capture_values(config: dict[str, Any]) -> tuple[dict[str, Any]
 
 
 def capture_image(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg",))
+    require_commands((FFMPEG_BIN,))
     config_path = config_path_from_args(args)
     output = absolute_path(args.output)
     config = load_config(config_path)
@@ -4576,7 +4641,7 @@ def capture_image(args: argparse.Namespace) -> None:
 
 
 def capture_video(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg",))
+    require_commands((FFMPEG_BIN,))
     config_path = config_path_from_args(args)
     output = absolute_path(args.output)
     config = load_config(config_path)
@@ -4699,7 +4764,7 @@ def identify_filter(config: dict[str, Any]) -> str:
 
 
 def identify(args: argparse.Namespace) -> None:
-    require_commands(("ffmpeg",))
+    require_commands((FFMPEG_BIN,))
     config_path = config_path_from_args(args)
     output = absolute_path(args.output)
     config = load_config(config_path)
@@ -4720,76 +4785,6 @@ def identify(args: argparse.Namespace) -> None:
         )
         run_atomic_capture(command, output, timeout=args.timeout)
     print(output)
-
-
-def legacy_capture(argv: Sequence[str]) -> bool:
-    if not argv or argv[0].startswith("-") or argv[0] in KNOWN_COMMANDS:
-        return False
-    output = absolute_path(argv[0])
-    seconds = 0.0
-    remaining = list(argv[1:])
-    while remaining:
-        option = remaining.pop(0)
-        if option != "--seconds" or not remaining:
-            raise CameraError(
-                "legacy usage is: capture.sh OUTPUT_PATH [--seconds N]; "
-                "see capture.sh --help for the configured interface"
-            )
-        try:
-            seconds = positive_float(remaining.pop(0))
-        except argparse.ArgumentTypeError as error:
-            raise CameraError(f"invalid --seconds value: {error}") from error
-
-    require_commands(("ffmpeg",))
-    try:
-        size = parse_size(os.environ.get("CAMERA_SIZE", DEFAULT_SIZE))
-    except argparse.ArgumentTypeError as error:
-        raise CameraError(f"invalid CAMERA_SIZE: {error}") from error
-    backend = os.environ.get(
-        "CAMERA_INPUT", "avfoundation" if sys.platform == "darwin" else "v4l2"
-    )
-    identifier = os.environ.get(
-        "CAMERA_DEVICE", "0" if backend == "avfoundation" else "/dev/video0"
-    )
-    camera_input = identifier
-    if backend == "avfoundation" and ":" not in identifier:
-        camera_input = f"{identifier}:none"
-    camera = {
-        "backend": backend,
-        "id": identifier,
-        "name": "legacy camera",
-        "input": camera_input,
-    }
-    pixel_format = "uyvy422" if backend == "avfoundation" else None
-    if seconds:
-        command = video_command(
-            camera,
-            output,
-            width=size[0],
-            height=size[1],
-            framerate=DEFAULT_FRAMERATE,
-            pixel_format=pixel_format,
-            settle_seconds=DEFAULT_SETTLE_SECONDS,
-            seconds=seconds,
-            video_filter="null",
-        )
-        timeout = seconds + DEFAULT_SETTLE_SECONDS + 15
-    else:
-        command = still_command(
-            camera,
-            output,
-            width=size[0],
-            height=size[1],
-            framerate=DEFAULT_FRAMERATE,
-            pixel_format=pixel_format,
-            settle_seconds=DEFAULT_SETTLE_SECONDS,
-        )
-        timeout = 15
-    with camera_lock(DEFAULT_CONFIG):
-        run_atomic_capture(command, output, timeout=timeout)
-    eprint("legacy unconfigured capture; run 'capture.sh configure' for device crops")
-    print(output)
-    return True
 
 
 def add_config_argument(parser: argparse.ArgumentParser, *, suppress_default: bool = False) -> None:
@@ -4838,6 +4833,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--camera",
         metavar="ID_OR_NAME",
         help="only sample one known camera (automatic selection is the default)",
+    )
+    configure_parser.add_argument(
+        "--device-profile",
+        action="append",
+        type=device_profile,
+        default=[],
+        metavar="NUMBER=PROFILE",
+        help="bind each red device number to rm1, rm2, or move (repeat per device)",
     )
     configure_parser.add_argument(
         "--include-virtual", action="store_true", help="also sample virtual cameras"
@@ -4909,8 +4912,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
-        if legacy_capture(arguments):
-            return 0
         parser = build_parser()
         args = parser.parse_args(arguments)
         if getattr(args, "framerate", 1) <= 0:
